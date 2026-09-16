@@ -1,0 +1,30 @@
+{
+	"schemaVersion": 1,
+	"id": "fabricfolia",
+	"version": "${version}",
+	"name": "Fabric-Folia",
+	"description": "Regionized multithreaded server execution for vanilla Minecraft under Fabric Loader: the world is dynamically partitioned into independent regions, each ticked in parallel on a bounded worker pool. A clean-room, Fabric-native architecture inspired by Folia's documented invariants.",
+	"authors": [
+		"Palorder Softworks"
+	],
+	"contact": {
+		"homepage": "https://github.com/palordersoftworks/fabric-folia",
+		"sources": "https://github.com/palordersoftworks/fabric-folia"
+	},
+	"license": "Apache-2.0",
+	"environment": "server",
+	"entrypoints": {
+		"main": [
+			"com.palordersoftworks.fabricfolia.FabricFoliaMod"
+		]
+	},
+	"mixins": [
+		"fabricfolia.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

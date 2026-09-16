@@ -1,0 +1,66 @@
+# Fabric Folia configuration - compatibility validation instance
+config-version: 1
+general:
+  enabled: true
+  regionized-random-ticks: true
+threads:
+  worker-threads: -1
+  thread-check-mode: STRICT
+diagnostics:
+  debug-logging: true
+  # Verbose debug logging from the regionizer and schedulers.
+  #
+  # What it does: logs region creation, merge, split, tick scheduling
+  # decisions, and task queue depths at DEBUG level. Very chatty.
+  #
+  # Default: false
+  # Valid values: true, false
+  # Performance: noticeable logging overhead; development only.
+  # Restart required: no - applies live.
+  debug: false
+  # Per-region tick timing diagnostics.
+  #
+  # What it does: tracks and logs per-region tick durations, letting you
+  # identify which regions are slow. A slow region only slows itself;
+  # see THREADING.md for the independence guarantee.
+  #
+  # Default: false
+  # Valid values: true, false
+  # Performance: small constant overhead per region tick.
+  # Restart required: no - applies live.
+  profiling: false
+  # Lightweight metrics: TPS per region, worker utilization,
+  # cross-region operation counts, queue depths.
+  #
+  # What it does: keeps rolling counters readable via /folia status.
+  # This is not a full metrics-export system (no Prometheus etc.) -
+  # it exists to back the benchmark methodology in the project docs.
+  #
+  # Default: false
+  # Valid values: true, false
+  # Performance: negligible.
+  # Restart required: no - applies live.
+  metrics: false
+regions:
+  # Region SECTION size in chunks (NxN grid), the internal bookkeeping
+  # granularity of the regionizer.
+  #
+  # IMPORTANT (see REGIONS.md): this is NOT the size or shape of a tick
+  # region. Regions are dynamic, mergeable, splittable groups of these
+  # sections; final regions may be much larger or smaller than NxN.
+  # "8x8" here only means the default bookkeeping cell size.
+  #
+  # What it does:
+  #   The regionizer groups chunks into NxN-chunk sections and builds
+  #   regions out of whole sections. Larger sections = coarser, cheaper
+  #   bookkeeping but potentially more empty-buffer area kept loaded
+  #   around activity; smaller = finer parallelism, more bookkeeping.
+  #
+  # Default: 8 (i.e. 8x8 = 64 chunks per section)
+  # Valid values: any power of two from 1 to 32
+  # Performance: 8 is a balanced default; 4 halves bookkeeping cell area.
+  # Compatibility: safe at any supported value; this is internal
+  #   bookkeeping only and does not change game behavior.
+  # Safety: values outside the supported powers of two are rejected.
+  # Restart required: yes (affects live region geometry).
+  region-section-size: 8

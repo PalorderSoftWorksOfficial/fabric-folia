@@ -1,0 +1,24 @@
+# Gradle version catalog — single source of truth for dependency coordinates.
+# Bundle coordinates come from gradle.properties (they are interpolated there and
+# passed down via project properties); this catalog carries the library pins.
+
+[versions]
+snakeyamlEngine = "3.1.1"
+junit = "5.11.4"
+jsr305 = "3.0.2"
+# Pinned here (not gradle.properties) so the root plugins block can alias() it;
+# 1.17.x is the Loom line required for MC 26.2 (verified 2026-09-14).
+fabricLoom = "1.17-SNAPSHOT"
+
+[plugins]
+fabricLoom = { id = "net.fabricmc.fabric-loom", version.ref = "fabricLoom" }
+
+[libraries]
+snakeyamlEngine = { module = "org.snakeyaml:snakeyaml-engine", version.ref = "snakeyamlEngine" }
+junitJupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+jsr305 = { module = "com.google.code.findbugs:jsr305", version.ref = "jsr305" }
+
+[bundles]
+# Libraries bundled inside the mod jar via Loom's include(), so administrators
+# do not need to install them separately.
+fabricFoliaBundled = ["snakeyamlEngine"]
