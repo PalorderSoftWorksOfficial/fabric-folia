@@ -221,10 +221,16 @@ Lithium compiling into `tickChunk`): docs/compatibility/c2me.md.
 
 ## What is deliberately NOT tested yet (spec 17 honesty)
 
-- **No automated Mixin tests** — the single Mixin's behavior is verified by
-  the live-server evidence above (mixin apply, vanilla fall-through when
-  disabled, worker-thread execution when enabled), not yet by an automated
-  gametest; automating the gametest harness is integration-phase work.
+- **No automated Mixin tests** — the Mixins' behavior is verified by the
+  live-server evidence above (mixin apply, vanilla fall-through when
+  disabled, worker-thread execution when enabled) and by unit tests of the
+  machinery they call (the entity registry protocol is storm-tested in
+  `common`), not yet by automated gametests; automating the gametest harness
+  is integration-phase work. The new entity add/remove/move hooks are
+  verified to compile against the 26.2 mapped jar and to package into the
+  mod jar; their live-server behavioral validation (ownership following a
+  mob across a region boundary on a real server) is the next validation
+  step.
 - **No vanilla-behavior parity tests** — the remaining pipeline partitioning
   (scheduled ticks, block entities, entities) has not begun; parity tests
   become the acceptance tests of that work.

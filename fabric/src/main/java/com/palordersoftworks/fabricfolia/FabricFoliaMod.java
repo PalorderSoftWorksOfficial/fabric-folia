@@ -178,12 +178,15 @@ public class FabricFoliaMod implements ModInitializer {
 		int simulationDistance = server.getPlayerList().getSimulationDistance();
 		for (ServerLevel level : server.getAllLevels()) {
 			String worldName = level.dimension().identifier().toString();
-			// attachWorld honors the config flag internally (interceptor null
-			// is treated as structure-only attachment).
+			// attachWorld honors the config flag intercept flag internally
+			// (interceptor null is treated as structure-only attachment).
 			current.attachWorld(worldName, simulationDistance, currentInterceptor);
+			// Entity ownership tracking (mandate §15) is independent of the
+			// random-tick intercept: it attaches whenever the engine is live.
+			current.attachEntityTracking(level);
 		}
 		Console.success("Fabric Folia is ready.");
-		Console.info("  Still on the server thread in this release: entities, block entities, scheduled ticks, worldgen, spawning (see SCHEDULING.md).");
+		Console.info("  Entity ownership tracking is active (add/remove/move hooks). Still on the server thread in this release: entity/block-entity ticking, scheduled ticks, worldgen, spawning (see THREADING.md).");
 	}
 
 	private static void stopEngine(MinecraftServer server) {
@@ -212,6 +215,16 @@ public class FabricFoliaMod implements ModInitializer {
 	/** @return the live engine, or null when disabled (commands check this). */
 	public static FabricFoliaEngine engine() {
 		return engine;
+	}	/**
+	 * Containment sink for entity-hook failures (mixin hooks catch and route
+	 * here): bookkeeping must never break vanilla gameplay, so the failure is
+	 * logged and the hook continues inert.
+	 */
+	public static void reportTrackerFailure(String operation, String worldName, RuntimeException e) {
+		Console.error("Fabric Folia entity tracking failure (" + operation
+				+ " in " + worldName + "): " + e
+				+ " - the hook is inert for this entity; gameplay continues on vanilla execution.");
+		Console.error("  Stack trace for the Fabric Folia issue tracker:", e);
 	}
 
 	/** @return the intercept layer, or null when the engine is disabled. */

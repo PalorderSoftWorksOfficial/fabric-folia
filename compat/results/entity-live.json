@@ -1,0 +1,55 @@
+{
+  "verdict": "FAIL",
+  "phases": [
+    {
+      "phase": "dev server boot + RCON ready",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "phase": "two regions formed (pin 0 0, pin 400 400)",
+      "ok": true,
+      "detail": "2 region(s)"
+    },
+    {
+      "phase": "entities diagnostics readable",
+      "ok": true,
+      "detail": "baseline overworld tracked=0 migrations=0 retired=0"
+    },
+    {
+      "phase": "tagged probe summons succeeded",
+      "ok": true,
+      "detail": "failures=[] probes_visible=True"
+    },
+    {
+      "phase": "add funnel registers 5 spawns",
+      "ok": true,
+      "detail": "tracked 0 -> 5"
+    },
+    {
+      "phase": "probe physically teleported out",
+      "ok": false,
+      "detail": "tp='Teleported Cow to 400.500000, 120.000000, 400.500000' dest='No entity was found' probes_remaining=4"
+    },
+    {
+      "phase": "movement hook migrates across regions",
+      "ok": false,
+      "detail": "migrations 0 -> -1 (teleported=False)"
+    },
+    {
+      "phase": "removal hook unregisters all probes",
+      "ok": false,
+      "detail": "tracked 9 -> 16 (expect 4)"
+    },
+    {
+      "phase": "unregister is not retire",
+      "ok": true,
+      "detail": "retired 0 -> 0"
+    },
+    {
+      "phase": "engine shutdown logged",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

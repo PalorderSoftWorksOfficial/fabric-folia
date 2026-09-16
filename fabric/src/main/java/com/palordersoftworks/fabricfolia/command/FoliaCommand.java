@@ -79,7 +79,8 @@ public final class FoliaCommand {
 					"Fabric Folia status:\n"
 							+ "  Engine: ACTIVE\n"
 							+ "  Regionized random ticks: " + randomTickLine + "\n"
-							+ "  Still on server thread: scheduled ticks, block entities, entities, worldgen, spawning\n"
+							+ "  Entity ownership tracking: active (add/remove/move hooks; /folia entities)\n"
+							+ "  Still on server thread: entity/block-entity ticking, scheduled ticks, worldgen, spawning\n"
 							+ "  Worker threads: " + engine.primaryWorkerCount() + "\n"
 							+ "  Thread-check mode: " + config.threadCheckMode() + "\n"
 							+ "  Region section size: " + config.regionSectionSize() + " (bookkeeping cell, not region shape)\n"
@@ -104,6 +105,21 @@ public final class FoliaCommand {
 			}
 			// Per-region detail (admin diagnostics): state, tick count, size.
 			for (String line : engine.regionDetailLines()) {
+				text.append(line).append("\n");
+			}
+			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+			return 1;
+		}));
+
+		root.then(Commands.literal("entities").executes(context -> {
+			FabricFoliaEngine engine = FabricFoliaMod.engine();
+			if (engine == null) {
+				context.getSource().sendSuccess(() -> Component.literal(
+						"Fabric Folia is disabled; entity tracking is not running."), false);
+				return 1;
+			}
+			StringBuilder text = new StringBuilder("Entity ownership tracking (mandate \u00a715; see THREADING.md):\n");
+			for (String line : engine.entityTrackingLines()) {
 				text.append(line).append("\n");
 			}
 			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);

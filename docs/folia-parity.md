@@ -41,7 +41,7 @@ named test. Update it in the same change that moves a status.
 | Region scheduler | TESTED | `RegionScheduler` (EDF coordinator, shared pool); RegionSchedulerTest |
 | Global scheduler | TESTED | `GlobalSchedulerImpl` (dedicated dispatch thread, ordered queue) |
 | Async scheduler (distinct from global) | TESTED | `AsyncSchedulerImpl` (own bounded daemon pool + timer thread, wall-clock time base, IO context tagging, fixed-rate non-overlap, exception isolation, bounded-queue backpressure); AsyncSchedulerImplTest — never shares the global dispatch thread or region workers |
-| Entity scheduler (follows migration) | TESTED | `EntitySchedulerImpl` — follow/retire semantics tested against a stub resolver; live-entity resolution NOT_IMPLEMENTED |
+| Entity scheduler (follows migration) | TESTED | `EntitySchedulerImpl` — follow/retire semantics tested; now wired per world to the live `RegionEntityRegistry` resolver, so entity tasks resolve the owning region at execution time |
 | RegionizedTaskQueue (create-region-if-absent) | TESTED | `scheduleToChunkOrCreate` creates the region for an unowned position and executes the task in its context |
 | Worker pool (bounded, world-agnostic) | TESTED | `WorkerPool` storm tests; shared across worlds |
 | Scheduler fairness (§37: one lagging region never delays others) | TESTED | RegionSchedulerTest deadline-independence case |
@@ -64,7 +64,7 @@ named test. Update it in the same change that moves a status.
 | Subsystem | Status | Evidence / notes |
 |---|---|---|
 | Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
-| Entity migration between regions | TESTED (engine) / NOT_IMPLEMENTED (vanilla hook) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. The fabric-module hook that feeds vanilla entity movement into it is NOT_IMPLEMENTED |
+| Entity migration between regions | TESTED (engine) / IMPLEMENTED (vanilla hooks) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks this release: `ServerLevel.addEntity` funnel capture (all spawn paths), `Entity.setRemoved` release (every removal reason), and server-thread movement re-homing gated on chunk-boundary crossings — fed into the registry protocol by `EntityRegionTracker` |
 | Teleportation (multi-phase, region-safe) | NOT_IMPLEMENTED | |
 | Player login placement | NOT_IMPLEMENTED | |
 | Player respawn | NOT_IMPLEMENTED | |
@@ -82,7 +82,7 @@ named test. Update it in the same change that moves a status.
 | Scheduled block ticks | NOT_IMPLEMENTED | |
 | Scheduled fluid ticks | NOT_IMPLEMENTED | |
 | Block entities | NOT_IMPLEMENTED | |
-| Entity ticking | NOT_IMPLEMENTED | |
+| Entity ticking | NOT_IMPLEMENTED | ticking remains on the server thread this phase; ownership capture (add/remove/move) is live via `EntityRegionTracker` — the substrate region ticking will consume |
 | Redstone/current-tick state | NOT_IMPLEMENTED | |
 | Chunk load/generation on region threads | NOT_IMPLEMENTED | chunk loads still server/async-cache driven |
 | Worldborder/daylight/weather/game rules on a global region task | NOT_IMPLEMENTED | vanilla still owns these on the server thread; the global scheduler exists to receive them |

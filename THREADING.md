@@ -112,6 +112,29 @@ the enforcement machinery on a real work path, not just in tests:
   no attachment and falls through to vanilla's inline consumer, so the
   shutdown window executes no region-thread work at all.
 
+## Entity ownership hooks (server-thread capture)
+
+Entity add/remove/move capture (mandate §15) is the second live vanilla
+integration, with its own documented boundary:
+
+- **All hooks run on the server thread.** Vanilla adds, removes, and moves
+  entities there; `EntityRegionTracker` forwards synchronously into the
+  registry's atomic migrate protocol. This single-writer discipline is what
+  makes the resolve→register/migrate sequence race-free — if entity ticking
+  later moves onto region workers, these entry points are re-plumbed onto
+  region contexts (the registry protocol itself is already thread-safe and
+  storm-tested).
+- **Movement re-homing is gated on chunk-boundary crossings.** Region
+  ownership cannot change within a chunk, so the per-entity hook compares a
+  cached packed chunk and only contacts the regionizer on a crossing — the
+  hot path (same-chunk position updates) never takes the structure lock.
+- **Failures are contained per entity.** A tracker exception un-caches that
+  entity's hook (going inert, never throwing repeatedly) and routes to the
+  error sink; vanilla's add/move/remove continues regardless.
+- **Removal clears the cache before unregistering** — dimension transfers
+  re-cache through the new dimension's add path, and no hook observes a
+  removed entity's ownership state.
+
 ## Disable and quiescence (spec 16) — the contract
 
 `/folia config enabled false` will be a real state machine, not a flag flip.

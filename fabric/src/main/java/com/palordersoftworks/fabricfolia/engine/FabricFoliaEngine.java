@@ -49,6 +49,15 @@ public final class FabricFoliaEngine {
 	/** Per-world schedulers for worlds attached after the primary (shared pool). */
 	private final java.util.concurrent.ConcurrentHashMap<String, RegionScheduler> schedulersByWorld =
 			new java.util.concurrent.ConcurrentHashMap<>();
+	/** Per-world region-data hubs (region-local data lifecycle fan-out). */
+	private final java.util.concurrent.ConcurrentHashMap<String, com.palordersoftworks.fabricfolia.scheduler.RegionDataHub> hubsByWorld =
+			new java.util.concurrent.ConcurrentHashMap<>();
+	/** Per-world entity-ownership trackers (mandate §15, live vanilla hooks). */
+	private final java.util.concurrent.ConcurrentHashMap<String, com.palordersoftworks.fabricfolia.entity.EntityRegionTracker> entityTrackersByWorld =
+			new java.util.concurrent.ConcurrentHashMap<>();
+	/** Per-world entity schedulers (mandate §14 — follow the owning region). */
+	private final java.util.concurrent.ConcurrentHashMap<String, com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl> entitySchedulersByWorld =
+			new java.util.concurrent.ConcurrentHashMap<>();
 	private final GlobalSchedulerImpl global;
 	private final AsyncSchedulerImpl async;
 	private final ThreadContextImpl threadContext;
@@ -189,6 +198,15 @@ public final class FabricFoliaEngine {
 			return shared;
 		});
 
+		// Region-local data hub for this world (created once; the entity
+		// registry and future per-region systems register with it).
+		hubsByWorld.computeIfAbsent(worldName, name -> {
+			com.palordersoftworks.fabricfolia.scheduler.RegionDataHub hub =
+					new com.palordersoftworks.fabricfolia.scheduler.RegionDataHub();
+			hub.attachTo(regionizer);
+			return hub;
+		});
+
 		boolean suppressed = interceptSuppressedReason != null;
 		if (interceptActive && suppressed) {
 			info.accept("World attached: " + worldName
@@ -206,6 +224,73 @@ public final class FabricFoliaEngine {
 			info.accept("World attached: " + worldName
 					+ " (structure-only: regionized random ticks disabled, vanilla execution untouched).");
 		}
+	}
+
+	/**
+	 * Attaches entity-ownership tracking to a live dimension (mandate §15):
+	 * creates the per-world entity registry on the region-data hub, backfills
+	 * every entity vanilla has already loaded, and wires the entity scheduler
+	 * that follows entities across region migrations.
+	 *
+	 * <p><strong>Contract:</strong> called once per dimension AFTER
+	 * {@link #attachWorld} (the hub and regionizer must exist), from the
+	 * server thread. Idempotent per world name.</p>
+	 *
+	 * @param level the dimension to track
+	 */
+	public void attachEntityTracking(net.minecraft.server.level.ServerLevel level) {
+		String worldName = level.dimension().identifier().toString();
+		com.palordersoftworks.fabricfolia.scheduler.RegionDataHub hub = hubsByWorld.get(worldName);
+		WorldRegionizer regionizer = regionizers.get(worldName);
+		RegionScheduler scheduler = schedulersByWorld.get(worldName);
+		if (hub == null || regionizer == null || scheduler == null) {
+			// World not attached (engine disabled mid-startup): no tracking.
+			return;
+		}
+		entityTrackersByWorld.computeIfAbsent(worldName, name -> {
+			com.palordersoftworks.fabricfolia.entity.EntityRegionTracker tracker =
+					new com.palordersoftworks.fabricfolia.entity.EntityRegionTracker(
+							level, name, regionizer, hub, info::accept);
+			tracker.backfillExisting();
+			return tracker;
+		});
+		// The entity scheduler follows the registry's resolver: tasks resolve
+		// the owning region at execution time (mandate §14).
+		entitySchedulersByWorld.computeIfAbsent(worldName, name ->
+				new com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl(
+						scheduler, entityTrackersByWorld.get(name).resolver()));
+		info.accept("  Entity ownership tracking active for " + worldName
+				+ " (add/remove/move hooks live; ticking stays on the server thread this phase).");
+	}
+
+	/**
+	 * @return the entity-ownership tracker for a world, or null when the
+	 * world is not tracked (mixin hooks consult this and no-op on null).
+	 */
+	public com.palordersoftworks.fabricfolia.entity.EntityRegionTracker entityTrackerOrNull(String worldName) {
+		return entityTrackersByWorld.get(worldName);
+	}
+
+	/** @return the entity scheduler for a world, or null if not attached. */
+	public com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl entitySchedulerFor(String worldName) {
+		return entitySchedulersByWorld.get(worldName);
+	}
+
+	/**
+	 * Per-world entity-tracking diagnostics lines ({@code /folia entities},
+	 * mandate §35 metrics). The tracked-count read is a snapshot of live
+	 * state — raciness is bounded and acceptable for display.
+	 */
+	public java.util.List<String> entityTrackingLines() {
+		java.util.List<String> lines = new java.util.ArrayList<>();
+		if (entityTrackersByWorld.isEmpty()) {
+			lines.add("  (no worlds tracked)");
+			return lines;
+		}
+		for (var entry : entityTrackersByWorld.entrySet()) {
+			lines.add("  " + entry.getKey() + ": " + entry.getValue().diagnosticsLine());
+		}
+		return lines;
 	}
 
 	/**
@@ -248,6 +333,12 @@ public final class FabricFoliaEngine {
 
 	/** Detaches a world (server stop): stops its scheduler, drops its queues. */
 	public void detachWorld(String worldName) {
+		com.palordersoftworks.fabricfolia.entity.EntityRegionTracker tracker = entityTrackersByWorld.remove(worldName);
+		if (tracker != null) {
+			tracker.close();
+		}
+		entitySchedulersByWorld.remove(worldName);
+		hubsByWorld.remove(worldName);
 		RegionScheduler scheduler = schedulersByWorld.remove(worldName);
 		if (scheduler != null) {
 			try {
