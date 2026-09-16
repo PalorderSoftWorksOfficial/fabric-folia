@@ -35,3 +35,6 @@ compat/instances/
 compat/cache/
 compat/__pycache__/
 compat/*.stdout.log
+
+# Dev-run logs (./gradlew :fabric:runServer artifacts)
+fabric/logs/

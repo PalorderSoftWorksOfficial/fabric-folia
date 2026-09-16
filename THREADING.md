@@ -83,6 +83,39 @@ Schedule the operation through the appropriate RegionScheduler entry point.
 
 In STRICT mode the same text is the exception message.
 
+## Random state (per-thread sources, spec 31)
+
+Vanilla gives every world ONE `LegacyRandomSource` (ThreadingDetector-guarded:
+it throws `Accessing LegacyRandomSource from multiple threads` on concurrent
+use). Region workers executing `tickChunk` race that single instance — a real
+defect observed in every multi-region live run before this contract existed.
+
+**The fix (measured, bytecode-verified):** `LevelMixin` wraps each level's
+`random` field at construction with `WorkerRandoms`, a dispatching
+`RandomSource`. A thread inside a REGION ownership context draws from its own
+lazily-created source (fresh unique seed, same mechanism as vanilla's own
+per-level seeds and its `createThreadLocalInstance` precedent); every other
+thread — server thread, global, async, network, IO, unknown — gets the
+original instance untouched.
+
+The consequences an implementer must know:
+
+* **Server-thread sequences are bit-identical to vanilla.** The original
+  source is never replaced or re-seeded.
+* **Dispatch keys on REGION context only.** A GLOBAL-context task touching
+  `level.random` deliberately still hits the guarded original — that IS an
+  ownership violation under this architecture, and masking it would hide the
+  violation from STRICT diagnostics (mandate §24).
+* **No cross-region stream coupling.** Each region thread's draws are
+  independent; vanilla's observable seeding behavior (what a player could
+  see) is unchanged — random tick *placement* within a chunk depends on
+  positions and the tick speed, not on which source instance drew.
+* **Lifecycle:** active while the engine is live, deactivated before the
+  worker pool drains at shutdown; per-thread sources are reclaimed with
+  their threads (workers die with the pool).
+* The compat harness greps the ThreadingDetector signature in
+  `diagnostics-clean`; a regression cannot pass a run again.
+
 ## Other mods' code (spec 23 groundwork)
 
 A violation originating in a third-party mod's code path is reported through

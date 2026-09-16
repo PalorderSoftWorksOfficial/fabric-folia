@@ -2,11 +2,11 @@
   "combo": "baseline",
   "mods": {
     "fabric-api": "0.160.0+26.2",
-    "fabric-folia-jar": "fabric-0.1.0.jar"
+    "fabric-folia-jar": "folia-0.1.0.jar"
   },
   "minecraft": "26.2",
   "fabric-folia": "0.1.0",
-  "date": "2026-09-15",
+  "date": "2026-09-16",
   "verdict": "PASS",
   "phases": [
     {
@@ -30,14 +30,19 @@
       "detail": ""
     },
     {
+      "phase": "multi-region",
+      "ok": true,
+      "detail": ""
+    },
+    {
       "phase": "scenario-built",
       "ok": true,
-      "detail": "grass=25 dirt=25 roof=25 (dirt/roof want 25; grass >= 18)"
+      "detail": "A: grass=25 dirt=25 roof=25; B: grass=25 dirt=25 roof=25 (dirt/roof want 25; grass >= 18)"
     },
     {
       "phase": "baseline-readable",
       "ok": true,
-      "detail": "grass=25 dirt=25 roof=25 (dirt must be 25)"
+      "detail": "A dirt=25, B dirt=25 (must both be 25)"
     },
     {
       "phase": "worker-tick-mutation",
@@ -47,12 +52,17 @@
     {
       "phase": "worker-attribution",
       "ok": true,
-      "detail": "workers seen: ['FabricFolia-Worker-2', 'FabricFolia-Worker-3', 'FabricFolia-Worker-5', 'FabricFolia-Worker-6', 'FabricFolia-Worker-7', 'FabricFolia-Worker-8']"
+      "detail": "workers seen: ['FabricFolia-Worker-1', 'FabricFolia-Worker-2', 'FabricFolia-Worker-3', 'FabricFolia-Worker-4', 'FabricFolia-Worker-5', 'FabricFolia-Worker-6', 'FabricFolia-Worker-7', 'FabricFolia-Worker-8']"
+    },
+    {
+      "phase": "worker-tick-mutation-B",
+      "ok": true,
+      "detail": "B grass 25->20 (deaths=5), dirt control=25"
     },
     {
       "phase": "dispatch-cessation",
       "ok": true,
-      "detail": "dispatch lines 1595->1595"
+      "detail": "dispatch lines 1679->1679"
     },
     {
       "phase": "diagnostics-clean",

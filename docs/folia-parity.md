@@ -92,6 +92,7 @@ named test. Update it in the same change that moves a status.
 | Subsystem | Status | Evidence / notes |
 |---|---|---|
 | Thread-ownership enforcement (STRICT/WARN/OFF) | TESTED | ThreadContextTest; live evidence in compat runs |
+| Per-thread random state (level RNG) | TESTED (engine) / VALIDATED (live) | `WorkerRandoms` dispatches per-thread sources to region threads; original instance untouched for all other threads (bit-identical server streams). Unit: `WorkerRandomsTest` incl. the guarded-source contention reproduction. Live: multi-region compat protocol greps the ThreadingDetector signature and the post-fix baseline run is PASS 13/13 with 0 offending lines |
 | Violation diagnostics (actionable, region/thread/operation named) | TESTED | ViolationReporter format |
 | Exception isolation per region | PARTIAL | per-task + per-tick catches tested; region-halt policy is drop-and-diagnose, no configurable failure policy yet |
 | Performance metrics (MSPT per region, queue depths, utilization) | PARTIAL | per-region last-tick duration + queue sizes via commands; no metrics export, no TPS-per-region |

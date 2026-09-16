@@ -7,6 +7,18 @@ Fabric API events (lifecycle, commands).
 
 ## Current inventory (5 mixins)
 
+### LevelMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `LevelMixin` |
+| Target | `Level.<init>` — `@Inject` at TAIL (single constructor, bytecode-verified) |
+| Transformation | wraps the `protected final RandomSource random` field (`@Mutable @Shadow @Final`) with `WorkerRandoms.wrap` — a dispatching `RandomSource` that serves engine region threads their own lazily-created source and every other thread the original instance |
+| Effect when armed | region workers executing `tickChunk` (and any other `level.random` consumer) draw from their own source; the `Accessing LegacyRandomSource from multiple threads` ThreadingDetector signature seen in multi-region runs is impossible |
+| Effect when disarmed / engine disabled | the wrapper is fully inert: every thread gets the original instance, so server-thread random sequences are bit-identical to vanilla |
+| Why TAIL + @Mutable (not a Redirect of `RandomSource.create`) | the ctor call is one of three `RandomSource` creations in the constructor (`randValue`, `random`, `soundSeedGenerator`); wrapping the field after assignment is unambiguous, needs no descriptor juggling, and leaves vanilla's unique-seed behavior untouched |
+| Scope note | one wrap covers every read site by construction — internal `tickChunk`/`tickBlock`/weather reads and the public `getRandom()` accessor all funnel through the single field |
+
 ### ServerChunkCacheTickMixin
 
 | Field | Value |

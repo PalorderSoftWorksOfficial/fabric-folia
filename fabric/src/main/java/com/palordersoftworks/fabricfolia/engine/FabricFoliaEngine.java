@@ -135,6 +135,11 @@ public final class FabricFoliaEngine {
 		ThreadContextImpl threadContext = new ThreadContextImpl(reporter);
 
 		scheduler.start();
+		// Region workers get their own RandomSource instances while the engine
+		// lives (measured LegacyRandomSource cross-thread defect — see
+		// WorkerRandoms); deactivation restores vanilla's single-instance
+		// behavior exactly at shutdown. Inert whenever the engine is disabled.
+		com.palordersoftworks.fabricfolia.thread.WorkerRandoms.activate();
 		// Global context cadence: one tick() per 50ms on a dedicated daemon
 		// thread (the single consumer of the global queue — see
 		// GlobalSchedulerImpl's contract). Folding this into the pool's
@@ -436,6 +441,10 @@ public final class FabricFoliaEngine {
 		for (String worldName : List.copyOf(schedulersByWorld.keySet())) {
 			detachWorld(worldName);
 		}
+		// Worker-thread dispatch off BEFORE the pool drains its last tasks:
+		// from this point any still-running region task sees the original
+		// (vanilla) source — same semantics as the intercept-detach window.
+		com.palordersoftworks.fabricfolia.thread.WorkerRandoms.deactivate();
 		globalDispatchThread.interrupt();
 		globalDispatchThread.join(1000);
 		async.close();

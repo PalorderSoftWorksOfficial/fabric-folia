@@ -15,7 +15,7 @@ that would fail if the claim became false.
 The whole suite runs in a plain JVM — **no Minecraft classes on the
 classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
 
-## Current suite (70 tests, 12 classes)
+## Current suite (76 tests, 13 classes)
 
 ### Server GUI icon (`gui/`, fabric module)
 
@@ -27,6 +27,19 @@ classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
   `./gradlew :fabric:verifyServerGui`) boots the assembled baseline
   production server **without `nogui`** and asserts the "Server GUI icon set
   from logo.png (512x512)" line, zero GUI-scope errors, and clean shutdown.
+
+### Per-thread random state (`thread/`, fabric module)
+
+- `WorkerRandomsTest` — the `LegacyRandomSource` cross-thread defect
+  (mandate §31/§37): inert-by-default passthrough (bit-identical server
+  streams even inside a REGION context); region threads draw from their own
+  persistent source and never advance the original (stream-position
+  assertions, not value comparisons — both sources are the same algorithm);
+  non-region threads keep the original while active; deactivation restores
+  passthrough on the same thread mid-stream; concurrent region threads are
+  isolated; and the live defect itself reproduced at unit scale — three
+  region threads + a non-region thread hammering a real ThreadingDetector-
+  guarded `LegacyRandomSource` through the wrapper with zero throws.
 
 ### Config engine (`config/`)
 
@@ -140,6 +153,21 @@ forwards unchanged.
 
 The definitive end-to-end proof — that those worker ticks **mutate world
 state** and that interception **ceases** on unpin — is the next section.
+
+## Multi-region live proof and the per-thread random-state fix
+
+The compat protocol (`compat/validate.py`) pins TWO regions 3000 chunks apart
+(chunks 12000,0 and 15000,0), asserts both form and both mutate on worker
+threads over one shared 75s window, and greps the full log for the
+ThreadingDetector signature as part of `diagnostics-clean` — a
+`Accessing LegacyRandomSource from multiple threads` line fails the run.
+This is the configuration under which the shared-`Level.random` defect first
+surfaced; the run is therefore both the regression gate and the evidence.
+
+Last baseline run after the `WorkerRandoms` fix:
+**PASS 13/13** (`compat/results/baseline.json`) — multi-region PASS, both
+regions' grass dying under worker attribution (8 distinct workers),
+**0 offending log lines**, graceful shutdown.
 
 ## Entity-ownership live proof (mandate §15 hooks on a real server)
 

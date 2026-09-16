@@ -407,35 +407,69 @@ def run_protocol(inst_dir, rcon_port, combo_name):
                 break
             time.sleep(2)
         results.append(phase("regionization", regionized))
+    # --- multi-region run (the real claim: regionS tick in parallel) ---
+    # One pin proves regionized dispatch; a SECOND pin 3000 chunks away proves
+    # two independent regions tick concurrently — the configuration under
+    # which the LegacyRandomSource cross-thread defect was first observed, so
+    # every intercept phase below runs with >= 2 live regions.
+    ux2 = 240000  # chunk 15000,0 — a second, fully independent region
+    r.cmd("folia pin 15000 0")
+    if not intercept_off and not suppressed:
+        two_regions = False
+        for _ in range(30):
+            regs = r.cmd("folia regions")[0]
+            if re.search(r"minecraft:overworld: ([2-9]|\d{2,})", regs):
+                two_regions = True
+                break
+            time.sleep(2)
+        results.append(phase("multi-region", two_regions))
     r.cmd(*[f"setblock {ux+dx} -58 {dz} grass_block" for dx in range(-2, 3) for dz in range(-2, 3)])
     r.cmd(*[f"setblock {ux+dx} -57 {dz} minecraft:stone" for dx in range(-2, 3) for dz in range(-2, 3)])
     r.cmd(*[f"setblock {ux+dx} -58 {20+dz} minecraft:dirt" for dx in range(-2, 3) for dz in range(-2, 3)])
+    r.cmd(*[f"setblock {ux2+dx} -58 {dz} grass_block" for dx in range(-2, 3) for dz in range(-2, 3)])
+    r.cmd(*[f"setblock {ux2+dx} -57 {dz} minecraft:stone" for dx in range(-2, 3) for dz in range(-2, 3)])
+    r.cmd(*[f"setblock {ux2+dx} -58 {20+dz} minecraft:dirt" for dx in range(-2, 3) for dz in range(-2, 3)])
     time.sleep(2)
     grass0 = count_block(r, ux, -58, 0, "grass_block", "GRASS_A")
     dirt0 = count_block(r, ux, -58, 20, "minecraft:dirt", "DIRT_B")
     roof0 = count_block(r, ux, -57, 0, "minecraft:stone", "ROOF_A")
+    grass0_b = count_block(r, ux2, -58, 0, "grass_block", "GRASS_C")
+    dirt0_b = count_block(r, ux2, -58, 20, "minecraft:dirt", "DIRT_D")
+    roof0_b = count_block(r, ux2, -57, 0, "minecraft:stone", "ROOF_C")
     # The roof check makes the scenario self-verifying: if the build failed,
     # uncovered grass legitimately won't die and a mod must not be blamed.
     # Grass baseline may be < 25: random ticks start the moment the pin lands,
     # so a few deaths between build and read are valid worker-tick behavior.
     # Causality is asserted on the RELATIVE drop over the window instead.
-    results.append(phase("scenario-built", dirt0 == 25 and roof0 == 25 and grass0 >= 18,
-                         f"grass={grass0} dirt={dirt0} roof={roof0} (dirt/roof want 25; grass >= 18)"))
-    results.append(phase("baseline-readable", dirt0 == 25,
-                         f"grass={grass0} dirt={dirt0} roof={roof0} (dirt must be 25)"))
+    results.append(phase("scenario-built", dirt0 == 25 and roof0 == 25 and grass0 >= 18
+                         and dirt0_b == 25 and roof0_b == 25 and grass0_b >= 18,
+                         f"A: grass={grass0} dirt={dirt0} roof={roof0}; "
+                         f"B: grass={grass0_b} dirt={dirt0_b} roof={roof0_b} "
+                         "(dirt/roof want 25; grass >= 18)"))
+    results.append(phase("baseline-readable", dirt0 == 25 and dirt0_b == 25,
+                         f"A dirt={dirt0}, B dirt={dirt0_b} (must both be 25)"))
+    # One shared observation window serves both regions: the regions tick in
+    # parallel by design, so a single 75s window is a fair clock for each.
     time.sleep(75)
     grass1 = count_block(r, ux, -58, 0, "grass_block", "GRASS_A")
     dirt1 = count_block(r, ux, -58, 20, "minecraft:dirt", "DIRT_B")
+    grass1_b = count_block(r, ux2, -58, 0, "grass_block", "GRASS_C")
+    dirt1_b = count_block(r, ux2, -58, 20, "minecraft:dirt", "DIRT_D")
     died = (grass1 is not None and grass0 is not None and grass1 < grass0)
+    died_b = (grass1_b is not None and grass0_b is not None and grass1_b < grass0_b)
     mutation_phase = "vanilla-tick-mutation" if suppressed else "worker-tick-mutation"
     results.append(phase(mutation_phase, died,
                          f"grass {grass0}->{grass1} (deaths={None if grass1 is None else grass0-grass1}), dirt control={dirt1}"))
     if not intercept_off and not suppressed:
         workers = set(re.findall(r"on '(FabricFolia-Worker-\d+)'", "\n".join(grep("WORKER-EVIDENCE"))))
         results.append(phase("worker-attribution", len(workers) >= 1, f"workers seen: {sorted(workers)}"))
+        # Region B (second pin) must ALSO mutate: both regions tick
+        # independently — a single-lagging-region stall would show here.
+        results.append(phase("worker-tick-mutation-B", died_b,
+                             f"B grass {grass0_b}->{grass1_b} (deaths={None if grass1_b is None else grass0_b-grass1_b}), dirt control={dirt1_b}"))
 
         # --- dispatch cessation on unpin ---
-        r.cmd("folia unpin 12000 0")
+        r.cmd("folia unpin 12000 0", "folia unpin 15000 0")
         time.sleep(5)
         before = len(grep(r"pass: dispatched"))
         time.sleep(45)
@@ -443,12 +477,15 @@ def run_protocol(inst_dir, rcon_port, combo_name):
         results.append(phase("dispatch-cessation", after == before, f"dispatch lines {before}->{after}"))
     else:
         # Still unpin so the shutdown path is the production one.
-        r.cmd("folia unpin 12000 0")
+        r.cmd("folia unpin 12000 0", "folia unpin 15000 0")
 
     # --- diagnostics cleanliness ---
     # "Region task failed" is the scheduler's per-task failure report — the
     # line that exposed the C2ME random-guard failures once grepped for.
-    bad = grep(r"VIOLATION|Region tick failed|Region task failed|dropped [1-9][0-9]* queued")
+    # "Accessing LegacyRandomSource" is the cross-thread random-state
+    # signature that multi-region runs surfaced (workers sharing the level's
+    # single LegacyRandomSource) — a regression there can never pass again.
+    bad = grep(r"VIOLATION|Region tick failed|Region task failed|dropped [1-9][0-9]* queued|Accessing LegacyRandomSource")
     results.append(phase("diagnostics-clean", not bad, f"{len(bad)} offending log lines"))
 
     # --- graceful shutdown ---

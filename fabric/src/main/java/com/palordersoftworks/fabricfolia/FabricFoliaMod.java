@@ -147,11 +147,7 @@ public class FabricFoliaMod implements ModInitializer {
 			Console.sched("  Workers: " + workers + " (FabricFolia-Worker-1 .. -" + workers
 					+ "); regions are not pinned to threads (see THREADING.md).");
 			if (!config.regionizedRandomTicks()) {
-				Console.info(config.regionizedRandomTicks()
-					? (c2meDetected
-							? "Regionized random-tick interception suppressed for this session (see the C2ME warning above)."
-							: "Regionized random-tick interception is enabled.")
-					: "Regionized random-tick interception is disabled by config: vanilla execution is untouched.");
+				Console.info("Regionized random-tick interception is disabled by config: vanilla execution is untouched.");
 			}
 		} catch (Exception e) {
 			engine = null;
