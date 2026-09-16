@@ -243,6 +243,12 @@ def assemble(combo_name):
     jars = [j for j in os.listdir(libs) if j.endswith(".jar") and "sources" not in j]
     if not jars:
         raise SystemExit("no Fabric-Folia jar in fabric/build/libs — run ./gradlew :fabric:build first")
+    # Remove any previously-copied Fabric-Folia jar (e.g. under an older name)
+    # so exactly one copy of the mod under test is loaded — a stale jar here
+    # once shadowed a fresh build and silently ran old bytecode.
+    for old in os.listdir(os.path.join(inst_dir, "mods")):
+        if (old.startswith("fabric-") or old.startswith("folia-")) and old.endswith(".jar"):
+            os.remove(os.path.join(inst_dir, "mods", old))
     shutil.copyfile(os.path.join(libs, jars[0]), os.path.join(inst_dir, "mods", jars[0]))
     resolved["fabric-folia-jar"] = jars[0]
     for src, name in mods:

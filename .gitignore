@@ -26,3 +26,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Compat harness: assembled server instances are regenerable artifacts
+# (compat/validate.py assemble() rebuilds them cold on every run) — never
+# commit server worlds or stale mod jars; a committed jar once shadowed a
+# fresh build in the instance mods dir.
+compat/instances/
+compat/cache/
+compat/__pycache__/
+compat/*.stdout.log

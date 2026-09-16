@@ -11,6 +11,13 @@ plugins {
 	alias(libs.plugins.fabricLoom)
 }
 
+// Distributable jar name: folia-<version>.jar (version from mod_version).
+// Everything downstream discovers the jar dynamically (compat harness scans
+// fabric/build/libs), so the name is free to carry the brand.
+base {
+	archivesName = "folia"
+}
+
 dependencies {
 	// Minecraft itself. 26.2 is unobfuscated (Mojang names ARE the runtime
 	// names), so there is no mappings layer to configure. Verified 2026-09-14
@@ -67,4 +74,18 @@ tasks.named<Jar>("jar") {
 	from(rootProject.file("LICENSE")) {
 		rename { "${it}_fabric-folia" }
 	}
+}
+
+// Live verification of the server GUI window icon (logo.png, MinecraftServerGui
+// parity with Folia's upstream change). The production server is booted WITHOUT
+// nogui by compat/gui_icon_check.py, which asserts the icon-apply log line and a
+// clean shutdown. Run from Gradle (not a bare shell) so the server JVM is a
+// child of this daemon and inherits the interactive desktop session — a plain
+// shell on CI/non-interactive contexts is java.awt-headless and vanilla skips
+// the GUI entirely (net.minecraft.server.Main checks isHeadless before showGui).
+tasks.register<Exec>("verifyServerGui") {
+	group = "verification"
+	description = "Boots the assembled baseline server with its GUI and verifies the logo.png window icon is applied."
+	workingDir(rootDir)
+	commandLine("python", "compat/gui_icon_check.py")
 }

@@ -15,7 +15,18 @@ that would fail if the claim became false.
 The whole suite runs in a plain JVM — **no Minecraft classes on the
 classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
 
-## Current suite (66 tests, 10 classes)
+## Current suite (70 tests, 12 classes)
+
+### Server GUI icon (`gui/`, fabric module)
+
+- `ServerGuiIconTest` — `logo.png` packaged at the jar root and decodable;
+  `loadFrameIcon` follows the environment (null headless, real image on a
+  desktop JVM); **`applyTo` on a real `JFrame`** sets the icon and fully
+  decodes it (the exact code the server window runs); null-frame safety.
+  Plus the live protocol: `compat/gui_icon_check.py` (or
+  `./gradlew :fabric:verifyServerGui`) boots the assembled baseline
+  production server **without `nogui`** and asserts the "Server GUI icon set
+  from logo.png (512x512)" line, zero GUI-scope errors, and clean shutdown.
 
 ### Config engine (`config/`)
 
@@ -272,10 +283,12 @@ Lithium compiling into `tickChunk`): docs/compatibility/c2me.md.
 - **No automated Mixin tests** — the Mixins' behavior is verified by the
   live-server evidence above (mixin apply, vanilla fall-through when
   disabled, worker-thread execution when enabled, and the entity-lifecycle
-  protocol in `compat/entity_live_check.py`) and by unit tests of the
-  machinery they call (the entity registry protocol is storm-tested in
-  `common`), not yet by automated gametests; automating the gametest harness
-  is integration-phase work.
+  protocol in `compat/entity_live_check.py`), by the GUI-icon protocol in
+  `compat/gui_icon_check.py` (which caught a real invalid-descriptor mixin
+  apply failure that compile+package checks cannot see), and by unit tests
+  of the machinery they call (the entity registry protocol is storm-tested
+  in `common`), not yet by automated gametests; automating the gametest
+  harness is integration-phase work.
 - **No vanilla-behavior parity tests** — the remaining pipeline partitioning
   (scheduled ticks, block entities, entities) has not begun; parity tests
   become the acceptance tests of that work.

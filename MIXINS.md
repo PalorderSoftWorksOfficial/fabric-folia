@@ -5,7 +5,9 @@ that gates any future one. Fabric Folia is deliberately mixin-minimal: the
 intercept seam is a single call site, and everything else is done through
 Fabric API events (lifecycle, commands).
 
-## Current inventory (1 mixin)
+## Current inventory (5 mixins)
+
+### ServerChunkCacheTickMixin
 
 | Field | Value |
 |---|---|
@@ -17,12 +19,48 @@ Fabric API events (lifecycle, commands).
 | Why a redirect (not inject) | the call site's consumer is the entire per-chunk work handoff; a redirect is total and reversible, an inject could not suppress vanilla's inline execution |
 | Conditional | checks `FabricFoliaMod.interceptorOrNull()`; null → call the original target |
 
-## The seven questions (answered for the current mixin)
+### PersistentEntitySectionManagerMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `PersistentEntitySectionManagerMixin` |
+| Target | `PersistentEntitySectionManager.addEntity(EntityAccess, boolean)` — bytecode-verified single funnel for every entity add (spawn, chunk-load, worldgen, dimension re-add) |
+| Transformation | `@Inject` TAIL capturing the entity into the region entity registry |
+| Effect | every server-side entity is owned by exactly one region from the moment it enters the world |
+| Disarm path | hook goes inert when the engine is disabled or the entity's world is not tracked; registry protocol is thread-safe |
+
+### EntityMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `EntityMixin` |
+| Target | `Entity.setRemoved(RemovalReason)` TAIL (release ownership) and `Entity.setPosRaw(DDD)` TAIL (re-home on chunk-boundary crossing) — the innermost position primitive, so movement, teleports, dismounts and vehicle carrying are all covered |
+| Effect | region ownership follows the entity for its whole lifetime; same-chunk movement never touches the regionizer's structure lock (cached packed-chunk compare) |
+| Disarm path | un-cached entity → hook is a no-op two-field compare |
+
+### MinecraftServerGuiMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `MinecraftServerGuiMixin` |
+| Target | `MinecraftServerGui.showFrameFor(DedicatedServer)` — `@Redirect` of the single `JFrame.setVisible(Z)` call |
+| Transformation | applies the frame icon from the packaged `logo.png` (jar root) via `setIconImage`, then forwards to the real `setVisible` — the Fabric-native equivalent of Folia's upstream "use Folia logo" change (vanilla sets no icon: javap-verified zero `setIconImage`/`ImageIO` references in the class) |
+| Effect when armed | the dedicated-server GUI window displays the Fabric-Folia logo before the window paints |
+| Effect when disarmed / headless / missing resource | `ServerGuiIcon.applyTo` returns false and the frame keeps the platform default; the call is inside the redirect, so nothing else about frame setup changes |
+| Why redirect (not inject) | the frame is a method local in `showFrameFor`; an `@Inject` callback receives only the host method's `DedicatedServer` parameter and cannot reach the frame (the live harness caught exactly this as an InvalidInjectionException on first boot) — the `setVisible` call site is the only point where the frame reference exists |
+| Failure isolation | `applyTo` catches its own runtime failures and logs them; the GUI is a convenience surface, never a startup dependency |
+
+## The seven questions (answered for the mixin that needs them —
+the random-tick interception; the entity/GUI mixins are additive `@Inject`s
+whose case is documented in their table entries)
 
 1. **Why is the mixin required?** Vanilla's random-tick work is inlined at
    this exact call site inside `tickChunks`; there is no event, extension
    point, or Fabric API hook anywhere on this path. Without interception
    there is no way to move per-chunk random ticks off the server thread.
+   (The GUI icon mixin exists for the same reason of necessity, one level
+   up: vanilla never sets a frame icon, and `showFrameFor` keeps the frame
+   in a local, so there is no non-mixin access point.)
 2. **What Minecraft method/class does it modify?**
    `net.minecraft.server.level.ServerChunkCache.tickChunks(ProfilerFiller,long)`
    — one instruction site, verified by javap against the 26.2 jar (the only

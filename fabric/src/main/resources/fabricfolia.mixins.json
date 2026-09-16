@@ -6,7 +6,8 @@
 	"mixins": [
 		"ServerChunkCacheTickMixin",
 		"PersistentEntitySectionManagerMixin",
-		"EntityMixin"
+		"EntityMixin",
+		"MinecraftServerGuiMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
