@@ -130,6 +130,54 @@ forwards unchanged.
 The definitive end-to-end proof — that those worker ticks **mutate world
 state** and that interception **ceases** on unpin — is the next section.
 
+## Entity-ownership live proof (mandate §15 hooks on a real server)
+
+`python compat/entity_live_check.py` boots the dev server and drives the full
+entity lifecycle over RCON. Last run (fresh world, recorded in
+`compat/results/entity-live.json`): **PASS 10/10** —
+
+- add funnel: 5 tagged summons → tracked rises by exactly 5 (with
+  `doMobSpawning false` the delta is exact; every vanilla add path funnels
+  through `PersistentEntitySectionManager.addEntity`, which is the hooked
+  site);
+- canary + teleport: a canary summoned at the destination proves the chunk is
+  loaded, then a cow teleported 4000 blocks across the region boundary shows
+  `migrations 0 → 1` — the registry's atomic migrate on a real crossing;
+- removal: killing everything (cows, their item drops, xp orbs, naturals)
+  returns tracked to the exact boot baseline — `unregister is not retire`
+  (retired stays flat);
+- clean engine shutdown.
+
+Two real defects this live protocol caught that fake-based unit tests could
+not, both fixed:
+
+1. **The removal hook silently ignored every removal.** It gated on
+   `!entity.isRemoved()`, but fires at `setRemoved` TAIL — where the entity
+   is by definition already removed. The registry only ever grew (tracked
+   diverged from vanilla's own `@e` count after a kill and never returned).
+   Discriminating experiment: spawn 5, kill 5 → tracked 11 vs vanilla 5.
+2. **The movement hook missed teleports.** It hooked `setPos(DDD)`, but the
+   teleport path (`Entity.teleportTo` → `teleport(TeleportTransition)` →
+   `teleportSetPosition`) calls `setPosRaw(DDD)` directly — verified in the
+   26.2 bytecode. The hook now sits on `setPosRaw`, the innermost primitive.
+
+Protocol design notes for re-runs: vanilla 26.2 dedicated servers keep only
+spawn chunks loaded without a connected player — chunks beyond it stay
+marked-but-never-loaded (verified against vanilla `forceload`: chunks are
+marked, `setblock` says "not loaded"), so probe groups live at x=0 and
+x=4000, both inside the spawn-chunk area; a canary summon at the destination
+must register before the teleport, else the entity parks as
+UNLOADED_TO_CHUNK. The empty-world control (tracked=0=vanilla `@e` at rest)
+guards against counting drift.
+
+Known-separate issue (recorded, not fixed here): with TWO regions ticking
+random ticks concurrently, the level's shared `LegacyRandomSource` throws
+`ReportedException: Accessing LegacyRandomSource from multiple threads`
+(worker-task failure, isolated to that task — regions keep ticking). Single-
+region operation is unaffected; this is the next engine task (region-local
+world random), pre-existing since the intercept slice, exposed by the second
+pinned region.
+
 ## World-mutation proof (region-worker ticks mutate the world)
 
 The dispatch/worker evidence above proves *where* ticks run; this scenario
@@ -223,14 +271,11 @@ Lithium compiling into `tickChunk`): docs/compatibility/c2me.md.
 
 - **No automated Mixin tests** — the Mixins' behavior is verified by the
   live-server evidence above (mixin apply, vanilla fall-through when
-  disabled, worker-thread execution when enabled) and by unit tests of the
+  disabled, worker-thread execution when enabled, and the entity-lifecycle
+  protocol in `compat/entity_live_check.py`) and by unit tests of the
   machinery they call (the entity registry protocol is storm-tested in
   `common`), not yet by automated gametests; automating the gametest harness
-  is integration-phase work. The new entity add/remove/move hooks are
-  verified to compile against the 26.2 mapped jar and to package into the
-  mod jar; their live-server behavioral validation (ownership following a
-  mob across a region boundary on a real server) is the next validation
-  step.
+  is integration-phase work.
 - **No vanilla-behavior parity tests** — the remaining pipeline partitioning
   (scheduled ticks, block entities, entities) has not begun; parity tests
   become the acceptance tests of that work.

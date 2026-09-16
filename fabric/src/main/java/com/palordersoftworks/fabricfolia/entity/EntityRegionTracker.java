@@ -118,9 +118,19 @@ public final class EntityRegionTracker {
 		return false;
 	}
 
-	/** Entity leaving the world (any removal reason). Server thread. */
+	/**
+	 * Entity leaving the world (any removal reason). Server thread.
+	 *
+	 * <p><strong>The gate must NOT require {@code !isRemoved()}:</strong> the
+	 * removal hook fires at {@code setRemoved} TAIL, where the entity is by
+	 * definition already removed — gating on live-state here silently ignored
+	 * every removal and the registry only ever grew (found by live-server
+	 * validation: tracked diverged from vanilla's own entity count after a
+	 * kill and never returned). The removal path's only requirement is that
+	 * this is a server-side entity.</p>
+	 */
 	public void onEntityRemoved(Entity entity) {
-		if (isTracked(entity)) {
+		if (entity != null && !entity.level().isClientSide()) {
 			registry.unregister(entity);
 		}
 	}

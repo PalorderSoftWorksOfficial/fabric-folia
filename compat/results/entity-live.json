@@ -1,5 +1,5 @@
 {
-  "verdict": "FAIL",
+  "verdict": "PASS",
   "phases": [
     {
       "phase": "dev server boot + RCON ready",
@@ -7,39 +7,39 @@
       "detail": ""
     },
     {
-      "phase": "two regions formed (pin 0 0, pin 400 400)",
+      "phase": "two regions formed (pin 0 0, pin 250 0)",
       "ok": true,
       "detail": "2 region(s)"
     },
     {
       "phase": "entities diagnostics readable",
       "ok": true,
-      "detail": "baseline overworld tracked=0 migrations=0 retired=0"
-    },
-    {
-      "phase": "tagged probe summons succeeded",
-      "ok": true,
-      "detail": "failures=[] probes_visible=True"
+      "detail": "baseline tracked=4 migrations=0 retired=0"
     },
     {
       "phase": "add funnel registers 5 spawns",
       "ok": true,
-      "detail": "tracked 0 -> 5"
+      "detail": "tracked 4 -> 9 (exact delta, spawning disabled)"
     },
     {
-      "phase": "probe physically teleported out",
-      "ok": false,
-      "detail": "tp='Teleported Cow to 400.500000, 120.000000, 400.500000' dest='No entity was found' probes_remaining=4"
+      "phase": "canary proves destination chunk loaded",
+      "ok": true,
+      "detail": "canary=True tracked 9 -> 10"
+    },
+    {
+      "phase": "probe physically teleported",
+      "ok": true,
+      "detail": "tp='Teleported Cow to 4000.500000, 120.000000, 9.500000' dest='Cow has the following entity data: [4000.5d, 120.0d, 9.5d]'"
     },
     {
       "phase": "movement hook migrates across regions",
-      "ok": false,
-      "detail": "migrations 0 -> -1 (teleported=False)"
+      "ok": true,
+      "detail": "migrations 0 -> 1 (teleported=True)"
     },
     {
-      "phase": "removal hook unregisters all probes",
-      "ok": false,
-      "detail": "tracked 9 -> 16 (expect 4)"
+      "phase": "removal hook unregisters every entity",
+      "ok": true,
+      "detail": "tracked base=4 post-kill=4 (cows + canary + drops + naturals all unregistered)"
     },
     {
       "phase": "unregister is not retire",

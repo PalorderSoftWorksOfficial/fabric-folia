@@ -64,7 +64,7 @@ named test. Update it in the same change that moves a status.
 | Subsystem | Status | Evidence / notes |
 |---|---|---|
 | Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
-| Entity migration between regions | TESTED (engine) / IMPLEMENTED (vanilla hooks) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks this release: `ServerLevel.addEntity` funnel capture (all spawn paths), `Entity.setRemoved` release (every removal reason), and server-thread movement re-homing gated on chunk-boundary crossings — fed into the registry protocol by `EntityRegionTracker` |
+| Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (`compat/entity_live_check.py`, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
 | Teleportation (multi-phase, region-safe) | NOT_IMPLEMENTED | |
 | Player login placement | NOT_IMPLEMENTED | |
 | Player respawn | NOT_IMPLEMENTED | |
