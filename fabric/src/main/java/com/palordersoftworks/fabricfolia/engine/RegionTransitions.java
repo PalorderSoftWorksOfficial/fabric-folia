@@ -163,10 +163,14 @@ public final class RegionTransitions {
 
 	/** Metrics lines for /folia metrics. */
 	public static List<String> metricsLines() {
-		return List.of(
-				"transitions dispatched: " + TRANSITIONS.get()
-						+ " (same-region: " + SAME_REGION.get()
-						+ ", dropped: " + DROPPED.get() + ")");
+		java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+		lines.add("transitions dispatched: " + TRANSITIONS.get()
+				+ " (same-region: " + SAME_REGION.get()
+				+ ", dropped: " + DROPPED.get() + ")");
+		lines.add("block broadcasts deferred from workers: "
+				+ ChunkBroadcastDeferral.deferred()
+				+ " (drained: " + ChunkBroadcastDeferral.drained() + ")");
+		return lines;
 	}
 
 	private static String worldKey(ServerLevel level) {
