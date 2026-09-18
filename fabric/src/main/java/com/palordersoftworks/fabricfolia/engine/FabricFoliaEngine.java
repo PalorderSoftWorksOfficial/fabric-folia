@@ -7,6 +7,7 @@ package com.palordersoftworks.fabricfolia.engine;
 
 import com.palordersoftworks.fabricfolia.api.ValidationMode;
 import com.palordersoftworks.fabricfolia.config.FoliaConfig;
+import com.palordersoftworks.fabricfolia.metrics.RegionMetrics;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.RegionizerConfig;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
@@ -44,6 +45,9 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class FabricFoliaEngine {
 
 	private final FoliaConfig config;
+	/** Legacy dispatch policy (mandate §39): where undeclared work runs. */
+	private final com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy legacyDispatchPolicy =
+			new com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy();
 	private final RegionScheduler primaryScheduler;
 	private final WorldRegionizerRegistry regionizers = new WorldRegionizerRegistry();
 	/** Per-world schedulers for worlds attached after the primary (shared pool). */
@@ -66,6 +70,13 @@ public final class FabricFoliaEngine {
 	private final java.util.function.Consumer<String> info;
 	private final java.util.function.Consumer<String> error;
 	private RegionTickInterceptor interceptor;
+	/** Per-world gameplay staging hubs (entity/block-entity bodies to region workers, mandate 27). */
+	private final java.util.concurrent.ConcurrentHashMap<String, RegionStageHub> stagingHubsByWorld =
+			new java.util.concurrent.ConcurrentHashMap<>();
+	/** Server-wide gameplay metrics (mandate 35; reported by /folia metrics). */
+	private RegionMetrics metrics;
+	/** The public mod-facing API (mandate 41); created at bootstrap. */
+	private FabricFoliaApiImpl api;
 	/**
 	 * Why the regionized-random-ticks intercept was suppressed at startup, or
 	 * null when it armed normally. Pure presentation state: the Mixin consults
@@ -84,6 +95,8 @@ public final class FabricFoliaEngine {
 	                          java.util.function.Consumer<String> info,
 	                          java.util.function.Consumer<String> error) {
 		this.config = config;
+		this.metrics = new RegionMetrics(FoliaConfig.WorkerThreads.resolve(config.workerThreads()));
+		this.api = new FabricFoliaApiImpl(this);
 		this.primaryScheduler = primaryScheduler;
 		this.global = global;
 		this.async = async;
@@ -157,8 +170,20 @@ public final class FabricFoliaEngine {
 		globalDispatch.setDaemon(true);
 		globalDispatch.start();
 
-		return new FabricFoliaEngine(config, scheduler, global, async, threadContext, reporter,
-				globalDispatch, info, error);
+		FabricFoliaEngine bootstrapped = new FabricFoliaEngine(config, scheduler, global, async, threadContext,
+				reporter, globalDispatch, info, error);
+		bootstrapped.adoptLegacyDispatchPolicy(
+				com.palordersoftworks.fabricfolia.FabricFoliaMod.pendingDispatchPolicy());
+		// Global-state ownership registration (mandate §11): the global
+		// dispatch context owns the server-wide domains; regions own the rest.
+		GlobalStateRegistry.reset();
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.DAYLIGHT_TIME, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WEATHER, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WORLD_BORDER, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.GAME_RULES, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.PLAYER_LIST, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.SCOREBOARD, "FabricFolia-Global");
+		return bootstrapped;
 	}
 
 	/**
@@ -223,8 +248,7 @@ public final class FabricFoliaEngine {
 					+ " (regionized random ticks ACTIVE on worker threads; "
 					+ "section size " + config.regionSectionSize()
 					+ ", merge/creation radii derived from simulation distance "
-					+ simulationDistanceChunks + "). Entities, block entities, and "
-					+ "scheduled ticks remain on the server thread (see THREADING.md).");
+					+ simulationDistanceChunks + ").");
 		} else {
 			info.accept("World attached: " + worldName
 					+ " (structure-only: regionized random ticks disabled, vanilla execution untouched).");
@@ -265,7 +289,91 @@ public final class FabricFoliaEngine {
 				new com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl(
 						scheduler, entityTrackersByWorld.get(name).resolver()));
 		info.accept("  Entity ownership tracking active for " + worldName
-				+ " (add/remove/move hooks live; ticking stays on the server thread this phase).");
+				+ " (add/remove/move hooks live).");
+
+		// Regionized gameplay staging (mandates 15/27): entity tick bodies
+		// and block-entity tick bodies execute on the owning region's worker.
+		// Vanilla still decides WHAT to tick (its passes run on the server
+		// thread); only the bodies move. The scheduled-tick deferral buffers
+		// worker-side scheduleTick calls and replays them server-thread.
+		if (config.regionizedGameplay()) {
+			RegionStageHub stageHub = stagingHubsByWorld.computeIfAbsent(worldName, name ->
+					new RegionStageHub(level, regionizer, scheduler, metrics, info::accept));
+			ScheduledTickDeferral.registerLevel(level);
+			RegionStageHub.activate(level, stageHub);
+			ScheduledTickDeferral.activate();
+			info.accept("  Regionized gameplay ACTIVE for " + worldName
+					+ " (entity and block-entity tick bodies execute on region workers; "
+					+ "scheduled-tick writes from workers are deferred to the server thread; "
+					+ "see THREADING.md).");
+		}
+	}
+
+	/**
+	 * End-of-server-tick gameplay flush (mandates 15/27/21): dispatch each
+	 * world's staged entity/block-entity bodies to their owning regions and
+	 * replay the scheduled ticks region workers deferred. Server thread
+	 * (the END_SERVER_TICK event fires there). Inert when gameplay staging
+	 * never activated.
+	 */
+	public void flushGameplay() {
+		for (RegionStageHub hub : stagingHubsByWorld.values()) {
+			hub.flushStaged();
+		}
+		com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayOnServerThread();
+	}
+
+	/** @return the server-wide gameplay metrics snapshot (mandate 35). */
+	public RegionMetrics metrics() {
+		return metrics;
+	}
+
+	/** @return the public mod-facing API instance (delivered to entrypoints). */
+	public FabricFoliaApiImpl api() {
+		return api;
+	}
+
+	/** @return the legacy dispatch policy (populated from mod declarations). */
+	public com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy legacyDispatchPolicy() {
+		return legacyDispatchPolicy;
+	}
+
+	/** Routes a subsystem error line to the engine's error sink (any thread). */
+	public void reportError(String message) {
+		error.accept(message);
+	}
+
+	/**
+	 * Adopts the pre-populated policy from mod metadata scanning (called once
+	 * at bootstrap; null keeps this engine's fresh empty instance).
+	 */
+	public void adoptLegacyDispatchPolicy(
+			com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy adopted) {
+		if (adopted == null) {
+			return;
+		}
+		adopted.declarations().forEach(legacyDispatchPolicy::declare);
+		legacyDispatchPolicy.setDefaultDestination(adopted.defaultDestination());
+	}
+
+	/** @return gameplay-staging metrics lines ({@code /folia metrics}). */
+	public List<String> metricsLines() {
+		List<String> lines = new java.util.ArrayList<>(metrics.snapshotLines());
+		lines.addAll(com.palordersoftworks.fabricfolia.engine.RegionTransitions.metricsLines());
+		lines.addAll(com.palordersoftworks.fabricfolia.engine.NetworkDispatch.metricsLines());
+		lines.add("staged bodies total: " + RegionStageHub.stagedTotal());
+		lines.add("staged bodies executed on workers: " + RegionStageHub.executedOnWorkers());
+		lines.add("staged bodies run server-thread (unowned position): "
+				+ (RegionStageHub.stagedTotal() - RegionStageHub.droppedDeadRegion()
+						- RegionStageHub.executedOnWorkers()));
+		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
+		lines.add("scheduled ticks deferred by workers: "
+				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.deferredTotal());
+		lines.add("scheduled ticks replayed server-thread: "
+				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayedTotal());
+		lines.add("scheduled ticks buffered now: "
+				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.pendingCount());
+		return lines;
 	}
 
 	/**
@@ -344,6 +452,14 @@ public final class FabricFoliaEngine {
 		}
 		entitySchedulersByWorld.remove(worldName);
 		hubsByWorld.remove(worldName);
+		RegionStageHub hub = stagingHubsByWorld.remove(worldName);
+		if (hub != null) {
+			// Deactivate this world's staging first (the mixins check per
+			// level), then flush anything already staged so pending work is
+			// dispatched (or server-thread-executed) before the scheduler dies.
+			hub.deactivate();
+			hub.flushStaged();
+		}
 		RegionScheduler scheduler = schedulersByWorld.remove(worldName);
 		if (scheduler != null) {
 			try {
@@ -438,6 +554,13 @@ public final class FabricFoliaEngine {
 		// global cadence, then the pool-owning primary scheduler. The intercept
 		// hooks unregister themselves first (see RegionTickInterceptor.detachAll),
 		// so vanilla falls back to its own pass with no window of lost ticks.
+		// Staging deactivation is first: the capture mixins check activation on
+		// every call, so vanilla resumes its own execution immediately.
+		RegionStageHub.deactivateAll();
+		com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.deactivate();
+		if (api != null) {
+			api.close(); // post-shutdown API calls fail honestly (spec 16)
+		}
 		for (String worldName : List.copyOf(schedulersByWorld.keySet())) {
 			detachWorld(worldName);
 		}

@@ -80,7 +80,8 @@ public final class FoliaCommand {
 							+ "  Engine: ACTIVE\n"
 							+ "  Regionized random ticks: " + randomTickLine + "\n"
 							+ "  Entity ownership tracking: active (add/remove/move hooks; /folia entities)\n"
-							+ "  Still on server thread: entity/block-entity ticking, scheduled ticks, worldgen, spawning\n"
+							+ "  On region workers: entity ticking, block entities, scheduled-tick drains, random ticks\n"
+							+ "  Still on server thread: worldgen, spawning, player ticking\n"
 							+ "  Worker threads: " + engine.primaryWorkerCount() + "\n"
 							+ "  Thread-check mode: " + config.threadCheckMode() + "\n"
 							+ "  Region section size: " + config.regionSectionSize() + " (bookkeeping cell, not region shape)\n"
@@ -141,6 +142,35 @@ public final class FoliaCommand {
 				}
 			}
 			text.append("Workers are not pinned to regions: a region may run on a different worker each tick (see THREADING.md).");
+			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+			return 1;
+		}));
+
+		root.then(Commands.literal("metrics").executes(context -> {
+			FabricFoliaEngine engine = FabricFoliaMod.engine();
+			if (engine == null) {
+				context.getSource().sendSuccess(() -> Component.literal(
+						"Fabric Folia is disabled; no metrics exist."), false);
+				return 1;
+			}
+			StringBuilder text = new StringBuilder("Fabric Folia metrics (mandate \u00a735; see TESTING.md):\n");
+			for (String line : engine.metricsLines()) {
+				text.append("  ").append(line).append("\n");
+			}
+			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+			return 1;
+		}));
+
+		root.then(Commands.literal("global").executes(context -> {
+			if (FabricFoliaMod.engine() == null) {
+				context.getSource().sendSuccess(() -> Component.literal(
+						"Fabric Folia is disabled; no global-state classification exists."), false);
+				return 1;
+			}
+			StringBuilder text = new StringBuilder("Global-state ownership (mandate \u00a711):\n");
+			for (String line : com.palordersoftworks.fabricfolia.engine.GlobalStateRegistry.classificationLines()) {
+				text.append("  ").append(line).append("\n");
+			}
 			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
 			return 1;
 		}));

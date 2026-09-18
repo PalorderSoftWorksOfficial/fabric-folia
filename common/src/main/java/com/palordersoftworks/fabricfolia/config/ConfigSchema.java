@@ -38,6 +38,7 @@ public final class ConfigSchema {
 	// Key name constants — used by schema definition, loader, migration, and save.
 	public static final String KEY_ENABLED = "general.enabled";
 	public static final String KEY_RANDOM_TICKS = "general.regionized-random-ticks";
+	public static final String KEY_GAMEPLAY = "general.regionized-gameplay";
 	public static final String KEY_SECTION_SIZE = "regions.region-section-size";
 	public static final String KEY_WORKER_THREADS = "threads.worker-threads";
 	public static final String KEY_THREAD_CHECK = "threads.thread-check-mode";
@@ -140,6 +141,29 @@ public final class ConfigSchema {
 				"  require a restart (see above)."
 		}));
 
+		add(opt(KEY_GAMEPLAY, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Regionized gameplay execution (mandates 15/21/27/37).",
+				"",
+				"What it does:",
+				"  When true, entity tick bodies and block-entity tick bodies",
+				"  execute on the owning region's worker thread instead of the",
+				"  server thread. Vanilla still decides WHAT to tick (its own",
+				"  passes run unchanged on the server thread); the bodies move.",
+				"",
+				"  Scheduled block/fluid tick DRAINS stay on the server thread",
+				"  this phase: their BiConsumer writes cross regions freely, so",
+				"  server-thread execution is the correct owner-confined choice",
+				"  (the drain itself is already O(due), not O(world)).",
+				"",
+				"  ServerPlayer bodies are never staged (packet processing is",
+				"  server-thread; a player body driven from two contexts would",
+				"  corrupt movement and connection state).",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Restart required: no (takes effect next server start; runtime",
+				"  toggle follows the engine quiescence rules).",
+				"Experimental: no"}));
 		add(opt(KEY_RANDOM_TICKS, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Regionized random-tick execution (the first vanilla interception).",
 				"",

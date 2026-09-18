@@ -5,50 +5,78 @@ that gates any future one. Fabric Folia is deliberately mixin-minimal: the
 intercept seam is a single call site, and everything else is done through
 Fabric API events (lifecycle, commands).
 
-## Current inventory (5 mixins)
+## Current inventory (13 mixins)
 
 ### LevelMixin
 
 | Field | Value |
 |---|---|
 | Class | `fabricfolia.mixins.json` → `LevelMixin` |
-| Target | `Level.<init>` — `@Inject` at TAIL (single constructor, bytecode-verified) |
-| Transformation | wraps the `protected final RandomSource random` field (`@Mutable @Shadow @Final`) with `WorkerRandoms.wrap` — a dispatching `RandomSource` that serves engine region threads their own lazily-created source and every other thread the original instance |
-| Effect when armed | region workers executing `tickChunk` (and any other `level.random` consumer) draw from their own source; the `Accessing LegacyRandomSource from multiple threads` ThreadingDetector signature seen in multi-region runs is impossible |
-| Effect when disarmed / engine disabled | the wrapper is fully inert: every thread gets the original instance, so server-thread random sequences are bit-identical to vanilla |
-| Why TAIL + @Mutable (not a Redirect of `RandomSource.create`) | the ctor call is one of three `RandomSource` creations in the constructor (`randValue`, `random`, `soundSeedGenerator`); wrapping the field after assignment is unambiguous, needs no descriptor juggling, and leaves vanilla's unique-seed behavior untouched |
-| Scope note | one wrap covers every read site by construction — internal `tickChunk`/`tickBlock`/weather reads and the public `getRandom()` accessor all funnel through the single field |
+| Purpose | world attach hooks: regionizer registration for each loaded `ServerLevel` |
+| Effect when disarmed | no regionization for the level; engine stays out of the way |
 
 ### ServerChunkCacheTickMixin
 
 | Field | Value |
 |---|---|
 | Class | `fabricfolia.mixins.json` → `ServerChunkCacheTickMixin` |
-| Target | `ServerChunkCache.tickChunks(ProfilerFiller,long)` |
-| Transformation | `@Redirect` of the single `ChunkMap.forEachBlockTickingChunk(Consumer)` invocation |
-| Effect when armed | vanilla's per-chunk enumeration feeds a collecting consumer; work executes on region workers |
-| Effect when disarmed | forwards to vanilla's own consumer unchanged (bytecode-identical behavior) |
-| Why a redirect (not inject) | the call site's consumer is the entire per-chunk work handoff; a redirect is total and reversible, an inject could not suppress vanilla's inline execution |
-| Conditional | checks `FabricFoliaMod.interceptorOrNull()`; null → call the original target |
+| Purpose | chunk-system tick observation feeding regionizer activity (chunk load/unload → `addChunk`/`removeChunk`) |
+| Effect when disarmed | regionizer sees no chunk activity; regions never form |
 
 ### PersistentEntitySectionManagerMixin
 
 | Field | Value |
 |---|---|
 | Class | `fabricfolia.mixins.json` → `PersistentEntitySectionManagerMixin` |
-| Target | `PersistentEntitySectionManager.addEntity(EntityAccess, boolean)` — bytecode-verified single funnel for every entity add (spawn, chunk-load, worldgen, dimension re-add) |
-| Transformation | `@Inject` TAIL capturing the entity into the region entity registry |
-| Effect | every server-side entity is owned by exactly one region from the moment it enters the world |
-| Disarm path | hook goes inert when the engine is disabled or the entity's world is not tracked; registry protocol is thread-safe |
+| Purpose | entity section visibility drives regionizer section registration (the spatial basis of regions) |
+| Effect when disarmed | regions cannot track entity sections |
 
 ### EntityMixin
 
 | Field | Value |
 |---|---|
 | Class | `fabricfolia.mixins.json` → `EntityMixin` |
-| Target | `Entity.setRemoved(RemovalReason)` TAIL (release ownership) and `Entity.setPosRaw(DDD)` TAIL (re-home on chunk-boundary crossing) — the innermost position primitive, so movement, teleports, dismounts and vehicle carrying are all covered |
-| Effect | region ownership follows the entity for its whole lifetime; same-chunk movement never touches the regionizer's structure lock (cached packed-chunk compare) |
-| Disarm path | un-cached entity → hook is a no-op two-field compare |
+| Purpose | per-entity ownership tracking: registers entities with the region entity registry and records their section so migration across region boundaries is detectable |
+| Effect when disarmed | no entity ownership; entity scheduling falls back to global dispatch |
+
+### LevelTicksTickMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` -> `LevelTicksTickMixin` |
+| Target | `LevelTicks.runCollectedTicks` — the `BiConsumer.accept(BlockPos, T)` call site (`@Redirect` of the interface invocation) |
+| Transformation | when the drain window is active for a registered container (see `ScheduledTickDeferral.isDrainStaged`), stages the drained body — vanilla's own `ServerLevel::tickBlock`/`tickFluid` consumer with the already-drained `ScheduledTick` — into the `SCHEDULED_TICK` slice; otherwise calls through |
+| Why this seam | the entire drain machinery (collection, `DRAIN_ORDER`/`subTickOrder` ordering, dedup set, `alreadyRunThisTick`, cleanup) stays server-thread vanilla; only the body's execution point moves to the owning region's worker |
+| Replay safety | a replayed deferral is a server-thread schedule drained by vanilla, so it flows through this redirect exactly once; anything the worker body re-schedules is new work captured by the deferral mixin — one execution per tick, one hop per worker-written tick, no loop |
+| Effect when disarmed | byte-for-byte vanilla drain on the server thread |
+
+### ServerLevelTickMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` -> `ServerLevelTickMixin` |
+| Target | `ServerLevel.tick(BooleanSupplier)` head + return (`@Inject`) |
+| Transformation | raises/clears the drain-staging thread-local (`ScheduledTickDeferral.beginDrainStaging`) when this level's staging is active, so the drain redirect in `LevelTicksTickMixin` stages only staged worlds' drains — other mods' LevelTicks and unattached worlds drain as vanilla |
+| Effect when disarmed | no flag; the redirect never stages |
+
+### ConnectionPacketDispatchMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` -> `ConnectionPacketDispatchMixin` |
+| Target | `Connection.runOnceConnected(Consumer)` head + return (`@Inject`) |
+| Transformation | wraps the execution of each submitted connection task: on a non-server thread (a Netty event loop) the thread is classified NETWORK for the task's duration and restored afterwards — a bounded enter/exit, not a sticky tag (the earlier flushQueue-based draft mislabeled the server thread, which also drains this queue via `tick`; that defect never shipped — it was caught on boot review) |
+| Effect when disarmed | event-loop threads report UNKNOWN |
+
+### ConnectionFlushQueueMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` -> `ConnectionFlushQueueMixin` |
+| Target | `Connection.flushQueue` — the `Consumer.accept(Connection)` call site (`@Redirect` of the interface invocation) |
+| Transformation | routes every drained pending action through `NetworkDispatch.runOnOwner`: server-thread drains (the normal path) execute inline exactly where vanilla would have them; event-loop-classified drains hop to the global context instead of mutating game state on the loop |
+| Why the queue, not 61 handlers | `ensureRunningOnSameThread` already re-homes tick-sensitive handlers inside themselves; the pending-action queue is the single point where ANY submitted task can cross threads, so one redirect covers every packet path |
+| Effect when disarmed | actions execute exactly as vanilla drains them |
 
 ### MinecraftServerGuiMixin
 
@@ -62,65 +90,42 @@ Fabric API events (lifecycle, commands).
 | Why redirect (not inject) | the frame is a method local in `showFrameFor`; an `@Inject` callback receives only the host method's `DedicatedServer` parameter and cannot reach the frame (the live harness caught exactly this as an InvalidInjectionException on first boot) — the `setVisible` call site is the only point where the frame reference exists |
 | Failure isolation | `applyTo` catches its own runtime failures and logs them; the GUI is a convenience surface, never a startup dependency |
 
-## The seven questions (answered for the mixin that needs them —
-the random-tick interception; the entity/GUI mixins are additive `@Inject`s
-whose case is documented in their table entries)
+### LevelEntityTickMixin
 
-1. **Why is the mixin required?** Vanilla's random-tick work is inlined at
-   this exact call site inside `tickChunks`; there is no event, extension
-   point, or Fabric API hook anywhere on this path. Without interception
-   there is no way to move per-chunk random ticks off the server thread.
-   (The GUI icon mixin exists for the same reason of necessity, one level
-   up: vanilla never sets a frame icon, and `showFrameFor` keeps the frame
-   in a local, so there is no non-mixin access point.)
-2. **What Minecraft method/class does it modify?**
-   `net.minecraft.server.level.ServerChunkCache.tickChunks(ProfilerFiller,long)`
-   — one instruction site, verified by javap against the 26.2 jar (the only
-   `forEachBlockTickingChunk` call in the game).
-3. **Does Lithium modify the same target?** No. Lithium optimizes method
-   *bodies* elsewhere (collision, mob spawning lookups, `tickChunk`
-   internals). No lithium mixin targets `ServerChunkCache.tickChunks` or
-   `ChunkMap.forEachBlockTickingChunk`.
-4. **Does C2ME modify the same target?** Not the dispatch site itself —
-   and the measured interaction is now **root-caused elsewhere**: C2ME's
-   `fixes-worldgen-threading-issues` module redirects `Level`'s random
-   initialization to a thread-ownership-checked random (`MixinWorld` →
-   `CheckedThreadLocalRandom`), which rejects the worker-thread tick body's
-   reads of the level's shared random. That is a data-ownership conflict
-   one level below the dispatch redirect, not a bytecode collision at this
-   site — see COMPATIBILITY.md and docs/compatibility/c2me.md for the full
-   mechanism and the resolved behavior (automatic slice suppression).
-5. **Does another major optimization mod modify the same target?** No —
-   measured: FerriteCore (memory layouts), Krypton (networking), VMP
-   (thread-priority/tick-rate plumbing), ScalableLux (lighting engine) all
-   ran the full protocol green against this mixin.
-6. **Can the transformation use a safer extension point instead?** No —
-   searched; none exists on this path (that is why this is the only mixin).
-7. **Can it be isolated behind a compatibility layer?** It already is:
-   the entire behavior sits behind `general.regionized-random-ticks` and a
-   null-check fall-through; disabling is live and total.
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `LevelEntityTickMixin` |
+| Target | `ServerLevel` entity tick loop — `@Redirect` of the `guardEntityTick` invocation for non-player entities |
+| Transformation | when gameplay staging is active for this level, hands the vanilla body (the exact lambda, unmodified) to `RegionStageHub.stage(ENTITY, ...)` instead of running it inline; otherwise forwards to the real method |
+| Why this seam | the whole `tickNonPassenger` tree flows through `guardEntityTick` — tick-count increment, tick body, passenger recursion — so zero vanilla logic is replicated; the `inEntityTickingRange`/vehicle-crumble gating runs before the seam and stays vanilla |
+| Effect when disarmed | byte-for-byte vanilla entity ticking on the server thread |
 
-## Rules for any future mixin
+### LevelBlockEntityTickMixin
 
-1. Answer all seven questions in this file *before* the mixin lands; a mixin
-   without an entry here is a review-reject.
-2. Grep the current published mixin configs of Lithium, C2ME, VMP, and
-   ScalableLux for the target class; if a conflict is plausible, design the
-   seam elsewhere or gate it off by default.
-3. Never resolve conflicts by forcing `@Priority` without a documented
-   technical reason written here.
-4. Every mixin must have a disarm path (config flag or null fall-through)
-   and a harness combo that proves both the armed and disarmed behavior.
-5. One behavior per mixin; if a target needs two changes, they are two
-   entries and two flags.
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `LevelBlockEntityTickMixin` |
+| Target | `Level.tickBlockEntities` — the `TickingBlockEntity.tick()` call site (`@Redirect` of the interface invocation) |
+| Transformation | when staging is active, stages the ticker body with the block entity's chunk position; otherwise calls through |
+| Why this seam | cancelling `tickBlockEntities` wholesale would strand the `pendingBlockEntityTickers` merge/prune discipline; the per-tick call site leaves all list management vanilla |
+| Effect when disarmed | vanilla block-entity ticking on the server thread |
 
-## Known interaction: C2ME
+### LevelScheduleTickMixin
 
-Root-caused and resolved by startup policy (automatic slice suppression
-with an actionable warning) — the mechanism is C2ME's random-owner guard
-vs. the worker tick body, not a mixin collision at our dispatch site. See
-COMPATIBILITY.md's C2ME section and docs/compatibility/c2me.md. The real
-fix (a region-confined random source on the worker path) belongs to the
-intercept layer — and is itself mixin-constrained: Lithium compiles its
-own random-tick loop into `ServerLevel`, so `tickChunk`-internal redirects
-collide with Lithium and must not be attempted naively.
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `LevelScheduleTickMixin` |
+| Target | `LevelTicks.schedule(...)` head (`@Inject`, cancellable) — the funnel for `scheduleTick`/`scheduleInMidTick` |
+| Transformation | when staging is active, records the already-constructed `ScheduledTick` into `ScheduledTickDeferral` (keyed by container identity) and cancels the vanilla insert; the drain's own server-thread re-schedules pass through untouched |
+| Why | region workers executing staged scheduled ticks must not mutate the container's staged-tick tree concurrently with the server thread; deferral keeps every container mutation on the server thread |
+| Effect when disarmed | vanilla tick scheduling, zero deferral |
+
+### EntityTeleportMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `EntityTeleportMixin` |
+| Target | `Entity.teleport(TeleportTransition)` head (`@Inject`, cancellable) |
+| Transformation | when the caller is a region worker and the destination resolves to another region/world, routes the transition through `RegionTransitions.dispatch` (destination-context execution) instead of mutating state from the wrong context |
+| Effect when disarmed / engine down | falls through to vanilla teleport |
+

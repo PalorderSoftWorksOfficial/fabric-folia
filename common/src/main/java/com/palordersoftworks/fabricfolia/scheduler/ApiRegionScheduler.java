@@ -37,11 +37,16 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 	private final MissingRegionPolicy missingPolicy;
 
 	public ApiRegionScheduler(RegionScheduler engine, WorldRegionizer regionizer,
-	                          MissingRegionPolicy missingPolicy) {
+	                          MissingRegionPolicy missingPolicy,
+	                          com.palordersoftworks.fabricfolia.api.GlobalScheduler globalFallback) {
 		this.engine = engine;
 		this.regionizer = regionizer;
 		this.missingPolicy = missingPolicy;
+		this.globalFallback = globalFallback;
 	}
+
+	/** The live global scheduler for the RUN_ON_GLOBAL missing-region policy. */
+	private final com.palordersoftworks.fabricfolia.api.GlobalScheduler globalFallback;
 
 	@Override
 	public void run(Position position, Runnable task) {
@@ -52,7 +57,7 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 	public void runDelayed(Position position, int delay, Runnable task) {
 		Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
 		if (region == null) {
-			applyMissingPolicy();
+			applyMissingPolicy(task);
 			return;
 		}
 		engine.enqueueDelayed(region, delay, task);
@@ -113,23 +118,22 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 	private void sendOrPolicy(Position position, Runnable task) {
 		Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
 		if (region == null) {
-			applyMissingPolicy();
+			applyMissingPolicy(task);
 			return;
 		}
 		engine.enqueue(region, task);
 	}
 
 	/**
-	 * Applies the configured policy for a position no region owns. Both
-	 * documented policies degrade to a drop for now: the RUN_ON_GLOBAL fallback
-	 * needs the fabric module to hand the API facade a live GlobalScheduler —
-	 * wired at engine bootstrap in the next phase. A silent wrong-context
-	 * execution is never an option.
+	 * Applies the configured policy for a position no region owns:
+	 * RUN_ON_GLOBAL hands the task to the global scheduler (safe for global
+	 * state, per the API contract); DROP lets best-effort work vanish. A
+	 * silent wrong-context execution is never an option.
 	 */
-	private void applyMissingPolicy() {
-		if (missingPolicy == MissingRegionPolicy.RUN_ON_GLOBAL) {
-			// TODO(integration): fall back to the global scheduler once the
-			// fabric module passes it in. Documented gap, not a hidden one.
+	private void applyMissingPolicy(Runnable task) {
+		if (missingPolicy == MissingRegionPolicy.RUN_ON_GLOBAL && globalFallback != null) {
+			globalFallback.run(task);
+			return;
 		}
 		// DROP: task vanishes; the position had no owner (unloaded chunks).
 	}

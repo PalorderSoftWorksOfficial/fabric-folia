@@ -81,9 +81,11 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	private final Map<Region, RegionTaskQueue> queuesByRegion = new ConcurrentHashMap<>();
 
 	/** Engine-provided region tick body. Receives the region, runs in its context. */
-	private final Consumer<Region> regionTickBody;
+	private volatile Consumer<Region> regionTickBody;
 	/** Diagnostics sink for dropped tasks and failures (spec 26 uses this too). */
 	private final Consumer<String> diagnostics;
+	/** Per-region exception isolation policy (mandate §34) — may be null (legacy tests). */
+	private final RegionFailurePolicy failurePolicy;
 
 	private final int poolThreadCount;
 
@@ -118,15 +120,27 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	                       Consumer<Region> regionTickBody,
 	                       Consumer<String> diagnostics) {
 		this(regionizer, sharedPool, workerThreadCount, mode, regionTickBody, diagnostics, false);
+	}	private RegionScheduler(WorldRegionizer regionizer,
+	                       WorkerPool pool,
+	                       int workerThreadCount,
+                       ValidationMode mode,
+                       Consumer<Region> regionTickBody,
+                       Consumer<String> diagnostics,				       boolean ownsPool) {
+		this(regionizer, pool, workerThreadCount, mode, regionTickBody, diagnostics, ownsPool, null);
 	}
 
+	/**
+	 * Full constructor: takes an explicit per-region failure policy (mandate
+	 * §34). Tests use null for the legacy report-only behavior.
+	 */
 	private RegionScheduler(WorldRegionizer regionizer,
 	                       WorkerPool pool,
 	                       int workerThreadCount,
-	                       ValidationMode mode,
-	                       Consumer<Region> regionTickBody,
-	                       Consumer<String> diagnostics,
-	                       boolean ownsPool) {
+                       ValidationMode mode,
+                       Consumer<Region> regionTickBody,
+                       Consumer<String> diagnostics,
+                       boolean ownsPool,
+                       RegionFailurePolicy failurePolicy) {
 		this.regionizer = Objects.requireNonNull(regionizer, "regionizer");
 		this.pool = pool;
 		this.poolThreadCount = workerThreadCount;
@@ -139,6 +153,13 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		});
 		this.regionTickBody = Objects.requireNonNull(regionTickBody, "regionTickBody");
 		this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
+		// Default policy (mandate §34): report and abort after repeated
+		// failure. A null here would NPE inside the tick's own catch site and
+		// kill the worker job mid-region — wedging the region as eternal
+		// TICKING, exactly the failure the policy exists to prevent.
+		this.failurePolicy = failurePolicy != null ? failurePolicy
+				: new RegionFailurePolicy(diagnostics,
+						regionizer::abortTick, RegionFailurePolicy.DEFAULT_MAX_CONSECUTIVE_FAILURES);
 		// Register for regionizer lifecycle so the queue registry tracks merges
 		// and deaths — without this, queued tasks would be silently lost when
 		// their region is absorbed (the listener is the wiring, not decoration).
@@ -377,6 +398,18 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		return regionizer.liveRegions();
 	}
 
+	/**
+	 * Replaces the region tick body (engine lifecycle: the vanilla-interception
+	 * layer composes gameplay slices in after world attach, which happens
+	 * after scheduler construction). The body runs inside the region's thread
+	 * context between the queue drain and the tick-end protocol (see the
+	 * dispatch loop); a null argument resets to a no-op. Workers read this
+	 * field once per tick — volatile write, safe swap mid-run.
+	 */
+	public void composeTickBody(Consumer<Region> body) {
+		this.regionTickBody = body == null ? region -> { } : body;
+	}
+
 	public WorldRegionizer regionizer() {
 		return regionizer;
 	}
@@ -456,14 +489,14 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 							queue.add(task, entry.chunkPos()); // not due yet
 							continue;
 						}
-						task.run();
-					} catch (Throwable t) {
-						diagnostics.accept("Region task failed in " + region + ": " + t);
-						// Spec 26: failures are reported, never silent. The
-						// failure-isolation policy (region vs server halt) is
-						// implemented during the gameplay integration phase,
-						// when region state mutation actually flows through here.
-					}
+					task.run();
+				} catch (Throwable t) {
+					// Spec 26/§34: failures are contained by the per-region
+					// failure policy — reported with full context, never silent;
+					// a region that fails every tick is aborted rather than
+					// wedging its chunks as eternal TICKING.
+					failurePolicy.reportTaskFailure(region, "queued task", t);
+				}
 				}
 			}
 			// 2. The region tick body (engine hook; vanilla integration later).

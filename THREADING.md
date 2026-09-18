@@ -145,6 +145,64 @@ the enforcement machinery on a real work path, not just in tests:
   no attachment and falls through to vanilla's inline consumer, so the
   shutdown window executes no region-thread work at all.
 
+## Staged gameplay slices — the threading contract
+
+Three further vanilla passes now execute on region workers via the staging
+hub (`RegionStageHub`): entity tick bodies, block-entity tickers, and
+scheduled block/fluid tick executions. The contract, per slice:
+
+**Capture (server thread, vanilla's own pass).** Vanilla's loop decides
+*what* to tick exactly as it always has — distance gating, list management,
+the `pendingBlockEntityTickers` merge, the `LevelTicks` drain order. The
+capture mixin hands the already-constructed body to the hub instead of
+running it. No vanilla decision logic is replicated anywhere; the disarmed
+branch is byte-for-byte vanilla.
+
+**Dispatch (server thread, end of tick).** `flushGameplay()` runs in
+END_SERVER_TICK: staged bodies resolve their owning region *at dispatch
+time* (post-migration truth, not capture-time truth), and each body is
+enqueued into its region's task queue. Unowned positions run inline on the
+server thread — zero behavioral delta for work the regionizer does not own.
+A region that dies between lookup and enqueue drops the body (the next
+vanilla pass re-stages; documented, bounded loss).
+
+**Execution (region worker).** Bodies run inside the owning region's thread
+context, under the same STRICT/WARN/OFF enforcement as random ticks. A
+throwing body is contained by the failure policy; it cannot leak a context
+or corrupt a neighbor.
+
+**Scheduled-tick writes.** A region worker executing a staged scheduled
+tick may schedule further ticks — but it must never mutate the `LevelTicks`
+container's staged-tick tree concurrently with the server thread.
+`LevelScheduleTickMixin` therefore defers worker-context schedules into
+`ScheduledTickDeferral`, and the server thread replays them (in capture
+order) at flush time. Container mutation stays single-threaded by
+construction; deadline semantics are preserved because the deferred tick is
+the already-constructed vanilla object.
+
+**Transitions.** An entity teleport issued from a region worker whose
+destination resolves to another region or world does not mutate either
+side's state mid-flight: `RegionTransitions.dispatch` hands the vanilla
+transition to the destination context and returns. Same-region teleports
+stay inline vanilla.
+
+**Network threads.** The packet boundary is the pending-action queue in
+`Connection`: vanilla submits packet handling there from the Netty event
+loop, and the queue drains on the server thread (`Connection.tick`) or, in
+an eager window, on the loop itself. `ConnectionPacketDispatchMixin`
+classifies the executing thread — NETWORK for the bounded duration of an
+event-loop-drained task, restored afterwards; the server-thread path is
+never touched (the earlier draft tagged the flushQueue head, which would
+have mislabeled the server thread that also drains this queue). Each
+drained action then flows through `NetworkDispatch.runOnOwner`
+(`ConnectionFlushQueueMixin`): on the server thread it executes exactly
+where vanilla would have it — zero behavioral delta — and from a network
+context it hops to the global scheduler instead of mutating game state on
+the event loop. Network contexts classify and route; they never mutate.
+Measured evidence is routing-level (unit tests through the real engine)
+plus crash-free drains on a live server; a full client session exercising
+the loop-drain window live remains open.
+
 ## Entity ownership hooks (server-thread capture)
 
 Entity add/remove/move capture (mandate §15) is the second live vanilla

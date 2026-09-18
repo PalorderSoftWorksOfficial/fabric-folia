@@ -11,9 +11,11 @@ import com.palordersoftworks.fabricfolia.console.CompatScanner;
 import com.palordersoftworks.fabricfolia.console.Console;
 import com.palordersoftworks.fabricfolia.engine.FabricFoliaEngine;
 import com.palordersoftworks.fabricfolia.engine.RegionTickInterceptor;
+import com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
@@ -67,10 +69,16 @@ public class FabricFoliaMod implements ModInitializer {
 		Console.info("Scanning installed mods for compatibility declarations...");
 
 		compatEntries = CompatScanner.scanAndReport();
-
+		declareLegacyDestinations();
 		ServerLifecycleEvents.SERVER_STARTING.register(FabricFoliaMod::startEngine);
 		ServerLifecycleEvents.SERVER_STARTED.register(FabricFoliaMod::attachWorlds);
 		ServerLifecycleEvents.SERVER_STOPPING.register(FabricFoliaMod::stopEngine);
+		// End-of-tick gameplay flush (mandates 15/27): after vanilla's passes
+		// (entity loops, block-entity pass, scheduled-tick drains, weather),
+		// hand each world's staged bodies to their owning regions and replay
+		// any scheduled ticks the region workers deferred. No-op when the
+		// engine is down (both calls are inert without activation).
+		ServerTickEvents.END_SERVER_TICK.register(FabricFoliaMod::flushGameplayStaging);
 		com.palordersoftworks.fabricfolia.command.FoliaCommand.register();
 	}
 
@@ -182,8 +190,94 @@ public class FabricFoliaMod implements ModInitializer {
 			current.attachEntityTracking(level);
 		}
 		Console.success("Fabric Folia is ready.");
-		Console.info("  Entity ownership tracking is active (add/remove/move hooks). Still on the server thread in this release: entity/block-entity ticking, scheduled ticks, worldgen, spawning (see THREADING.md).");
+		Console.info("  Regionized gameplay is active (entity ticking, block entities, scheduled-tick drains, and random ticks on region workers). Still on the server thread: worldgen, spawning, player ticking (see THREADING.md).");
+
+		deliverApiEntrypoints(current);
 	}
+
+	/**
+	 * Hands the live {@code FabricFoliaApi} to every mod that declared the
+	 * {@code fabricfolia} entrypoint (mandate 41): region-aware mods get the
+	 * real engine-backed schedulers at server start, on the server thread,
+	 * before any tick runs. A mod entrypoint that throws is reported and
+	 * skipped — one broken mod must not prevent the others from receiving
+	 * the API, and the engine keeps running.
+	 */
+	private static void deliverApiEntrypoints(FabricFoliaEngine current) {
+		com.palordersoftworks.fabricfolia.engine.FabricFoliaApiImpl api = current.api();
+		int delivered = 0;
+		for (var ep : FabricLoader.getInstance().getEntrypointContainers(
+				"fabricfolia",
+				com.palordersoftworks.fabricfolia.api.FabricFoliaApi.Initializer.class)) {
+			String modId = ep.getProvider().getMetadata().getId();
+			if (modId.equals(FabricFoliaMod.MOD_ID)) {
+				continue; // self
+			}
+			try {
+				ep.getEntrypoint().onInitialized(api);
+				Console.info("  Region-aware mod initialized: " + modId);
+				delivered++;
+			} catch (Throwable t) {
+				Console.error("Region-aware mod '" + modId
+						+ "' failed to initialize (the mod may misbehave): " + t);
+			}
+		}
+		if (delivered > 0) {
+			Console.info("  " + delivered + " region-aware mod(s) received the Fabric Folia API.");
+		}
+	}
+
+	/**
+	 * End-of-server-tick gameplay flush (mandates 15/27/21): dispatches each
+	 * world's staged entity/block-entity bodies to their owning regions'
+	 * task queues (they execute on region workers, serialized per region,
+	 * parallel across regions) and replays the scheduled ticks those workers
+	 * deferred, on this thread, through vanilla's own containers.
+	 */
+	private static void flushGameplayStaging(MinecraftServer server) {
+		FabricFoliaEngine current = engine;
+		if (current != null) {
+			current.flushGameplay();
+		}
+	}
+
+	/**
+	 * Populates the legacy dispatch policy (mandate §39) from each mod's
+	 * metadata declaration ({@code custom.fabricfolia.legacy-dispatch}:
+	 * "direct" | "global" | "region"), so a mod that knows its contract
+	 * opts into the cheapest correct context; everything undeclared keeps
+	 * the conservative global default. Runs on the mod-init thread before
+	 * any server exists — pure registry population.
+	 */
+	private static void declareLegacyDestinations() {
+		var policy = engine != null ? engine.legacyDispatchPolicy() : null;
+		if (policy == null) {
+			policy = new com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy();
+		}
+		FabricFoliaMod.pendingPolicy = policy;
+		for (var mod : FabricLoader.getInstance().getAllMods()) {
+			var custom = mod.getMetadata().getCustomValue("fabricfolia");
+			if (!(custom instanceof net.fabricmc.loader.api.metadata.CustomValue.CvObject obj)) {
+				continue;
+			}
+			var dest = obj.get("legacy-dispatch");
+			if (dest == null || dest.getAsString() == null) {
+				continue;
+			}
+			var destination = switch (dest.getAsString()) {
+				case "direct" -> LegacyDispatchPolicy.Destination.RUN_DIRECT;
+				case "region" -> LegacyDispatchPolicy.Destination.RUN_ON_REGION;
+				case "global" -> LegacyDispatchPolicy.Destination.RUN_ON_GLOBAL;
+				default -> null;
+			};
+			if (destination != null) {
+				policy.declare(mod.getMetadata().getId(), destination);
+			}
+		}
+	}
+
+	/** Policy populated at init, handed to the engine at start. */
+	private static volatile LegacyDispatchPolicy pendingPolicy;
 
 	private static void stopEngine(MinecraftServer server) {
 		FabricFoliaEngine current = engine;
@@ -233,5 +327,10 @@ public class FabricFoliaMod implements ModInitializer {
 	/** @return the startup compatibility scan entries (for /folia compat). */
 	public static List<CompatScanner.Entry> compatEntries() {
 		return compatEntries;
+	}
+
+	/** @return the policy populated at init (engine consumes at start). */
+	public static LegacyDispatchPolicy pendingDispatchPolicy() {
+		return pendingPolicy;
 	}
 }

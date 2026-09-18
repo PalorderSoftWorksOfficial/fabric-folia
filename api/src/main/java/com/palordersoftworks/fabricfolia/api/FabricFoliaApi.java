@@ -49,4 +49,17 @@ public interface FabricFoliaApi {
 	 * false while disabled (vanilla single-threaded execution is in place).
 	 */
 	boolean isEnabled();
+
+	/**
+	 * The entrypoint receiver: mods become region-aware by declaring an
+	 * entrypoint of key {@code "fabricfolia"} in their {@code fabric.mod.json}
+	 * whose class implements this interface. It is invoked once per server
+	 * start, on the server thread, before the first tick runs; the given
+	 * {@link FabricFoliaApi} instance remains valid until server shutdown.
+	 */
+	@AnyThread
+	interface Initializer {
+		/** Called once per server start with the live API. */
+		void onInitialized(FabricFoliaApi api);
+	}
 }

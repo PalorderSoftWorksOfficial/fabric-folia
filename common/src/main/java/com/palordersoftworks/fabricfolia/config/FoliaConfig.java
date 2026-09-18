@@ -203,6 +203,16 @@ public final class FoliaConfig {
 	}
 
 	/**
+	 * @return whether regionized gameplay staging is enabled
+	 * ({@code general.regionized-gameplay}; default true). Entity tick bodies
+	 * and block-entity tick bodies execute on the owning region's worker;
+	 * false keeps those bodies on the vanilla server thread.
+	 */
+	public boolean regionizedGameplay() {
+		return (Boolean) values.get(ConfigSchema.KEY_GAMEPLAY);
+	}
+
+	/**
 	 * @return whether regionized random-tick interception is opted in
 	 * ({@code general.regionized-random-ticks}; default false = pure vanilla).
 	 */

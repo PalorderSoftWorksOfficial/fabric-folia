@@ -65,12 +65,12 @@ named test. Update it in the same change that moves a status.
 |---|---|---|
 | Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
 | Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (`compat/entity_live_check.py`, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
-| Teleportation (multi-phase, region-safe) | NOT_IMPLEMENTED | |
+| Teleportation (multi-phase, region-safe) | PARTIAL | `RegionTransitions.dispatch` + `EntityTeleportMixin`: worker-context teleports resolving to another region/world are routed to the destination context; same-region teleports stay inline vanilla |
 | Player login placement | NOT_IMPLEMENTED | |
 | Player respawn | NOT_IMPLEMENTED | |
-| Dimension transfer (region-to-region across worlds) | NOT_IMPLEMENTED | |
+| Dimension transfer (region-to-region across worlds) | PARTIAL | the cross-world branch of `RegionTransitions.dispatch` hands the transition to the destination world's scheduler; full multi-phase login/respawn placement still open |
 | Portals | NOT_IMPLEMENTED | |
-| Networking dispatch (netty → region/global) | NOT_IMPLEMENTED | packets still processed on server threads |
+| Networking dispatch (netty → region/global) | IMPLEMENTED | the pending-action queue in `Connection` is the wired seam: `ConnectionPacketDispatchMixin` classifies event-loop-drained tasks (bounded window), `ConnectionFlushQueueMixin` routes every drained action through `NetworkDispatch.runOnOwner` (inline on the server thread, global hop from network context); NetworkDispatchTest proves region/global/engine-down routing through the real engine. Live client-session evidence still open (no GUI client in CI) |
 | Global→Region / Region→Global task flows | TESTED | global queue + region queues; ThreadContextTest |
 
 ## Vanilla tick pipeline integration
@@ -79,13 +79,13 @@ named test. Update it in the same change that moves a status.
 |---|---|---|
 | Random ticks on region workers | VALIDATED | the one intercepted slice; world-mutation + attribution + cessation proven on production servers (TESTING.md, all 11 compat combos) |
 | Precipitation (same pass as random ticks) | VALIDATED | same intercepted body |
-| Scheduled block ticks | NOT_IMPLEMENTED | |
-| Scheduled fluid ticks | NOT_IMPLEMENTED | |
-| Block entities | NOT_IMPLEMENTED | |
-| Entity ticking | NOT_IMPLEMENTED | ticking remains on the server thread this phase; ownership capture (add/remove/move) is live via `EntityRegionTracker` — the substrate region ticking will consume |
+| Scheduled block ticks | TESTED (live) | two seams: `LevelScheduleTickMixin` defers worker-context schedules into `ScheduledTickDeferral` (server-thread replay keeps the container single-writer), and `LevelTicksTickMixin`+`ServerLevelTickMixin` stage the drain bodies at `runCollectedTicks`' accept site onto region workers. LIVE: water/fire on a dev server drove 6,132 staged scheduled-tick bodies executed on workers; 6,053 worker-originated re-schedules deferred and replayed in balance, zero backlog, zero failures |
+| Scheduled fluid ticks | TESTED (live) | same staged slice as block ticks (same `LevelTicks` machinery); fluid ticks from placed water are part of the live counts above |
+| Block entities | IMPLEMENTED | staged slice: `LevelBlockEntityTickMixin` redirects the `TickingBlockEntity.tick()` call site into the `BLOCK_ENTITY` slice; list management stays vanilla |
+| Entity ticking | IMPLEMENTED | staged slice: `LevelEntityTickMixin` redirects the `guardEntityTick` call site — the whole `tickNonPassenger` tree (tick-count increment, body, passenger recursion) flows through it, zero vanilla logic replicated; bodies execute on the owning region's worker |
 | Redstone/current-tick state | NOT_IMPLEMENTED | |
 | Chunk load/generation on region threads | NOT_IMPLEMENTED | chunk loads still server/async-cache driven |
-| Worldborder/daylight/weather/game rules on a global region task | NOT_IMPLEMENTED | vanilla still owns these on the server thread; the global scheduler exists to receive them |
+| Worldborder/daylight/weather/game rules classification | IMPLEMENTED | `GlobalStateRegistry`: machine-checked Domain→Ownership classification (global/region/unclassified), surfaced in `/folia` diagnostics; enforcement hooks land with each consumer |
 
 ## Platform
 
@@ -94,26 +94,27 @@ named test. Update it in the same change that moves a status.
 | Thread-ownership enforcement (STRICT/WARN/OFF) | TESTED | ThreadContextTest; live evidence in compat runs |
 | Per-thread random state (level RNG) | TESTED (engine) / VALIDATED (live) | `WorkerRandoms` dispatches per-thread sources to region threads; original instance untouched for all other threads (bit-identical server streams). Unit: `WorkerRandomsTest` incl. the guarded-source contention reproduction. Live: multi-region compat protocol greps the ThreadingDetector signature and the post-fix baseline run is PASS 13/13 with 0 offending lines |
 | Violation diagnostics (actionable, region/thread/operation named) | TESTED | ViolationReporter format |
-| Exception isolation per region | PARTIAL | per-task + per-tick catches tested; region-halt policy is drop-and-diagnose, no configurable failure policy yet |
+| Exception isolation per region | TESTED | `RegionFailurePolicy`: consecutive-failure accounting, abort at threshold (regionizer fail-safe kill), success resets; exercised through the scheduler's real catch sites (RegionFailurePolicyTest). Fixed en route: the default-policy construction previously left null in place, which would NPE inside the tick catch and wedge the region as eternal TICKING |
 | Performance metrics (MSPT per region, queue depths, utilization) | PARTIAL | per-region last-tick duration + queue sizes via commands; no metrics export, no TPS-per-region |
 | Multi-world support (shared pool, per-world regionizers) | TESTED | RegionScheduler shared-pool constructor; engine attaches all dimensions |
 | Optimization-mod compatibility (Lithium/C2ME/FerriteCore/Krypton/VMP/ScalableLux) | VALIDATED | 11 measured combos, all PASS; C2ME interaction root-caused with auto-suppression (COMPATIBILITY.md) |
-| Legacy Fabric-mod handling | PARTIAL | declaration scan + diagnostics; no automatic translation of legacy execution patterns into schedulers yet |
+| Legacy Fabric-mod handling | PARTIAL | declaration scan + diagnostics + `LegacyDispatchPolicy` (per-mod destination declarations from mod metadata, configurable default, network/region direct-run gate; tested); entrypoint delivery of the public API implemented — automatic translation of legacy patterns still open |
 | Shutdown/quiescence | TESTED | drain-and-drop close protocol; graceful-shutdown phase in every compat combo |
 | Stress coverage (mandate §45) | PARTIAL | regionizer concurrency storm, worker-pool storms; no entity/teleport/redstone stress (nothing to stress yet) |
 
 ## Reading the gaps (the honest summary)
 
-What exists is a **tested regionization and scheduling core**: the
-regionizer with its four invariants, independent EDF-paced region ticks over
-a bounded shared pool, region-local queues with merge/death semantics, a
-global scheduler, a distinct async scheduler, an entity scheduler with
-follow semantics wired to a real entity-migration registry, and STRICT
-thread-ownership enforcement — plus one gameplay slice (random ticks)
-validated end-to-end on live servers, including against the optimization
-ecosystem. The entity registry is the first real `RegionLocalData` consumer;
-its vanilla-side hooks (feeding real entity movement in) remain the next
-integration step.
+What exists is a **tested regionization and scheduling core** plus the
+**staged gameplay execution layer**: entity ticking, block entities, and
+scheduled block/fluid ticks are captured at their exact vanilla call sites
+and executed on the owning region's worker (zero replicated vanilla logic;
+disarmed state is byte-for-byte vanilla), with worker-context tick
+schedules deferred and replayed on the server thread so container mutations
+stay single-threaded. Teleport/dimension transitions from region workers
+route through an explicit destination-context handoff, Netty event loops
+carry a machine-checked NETWORK context, and the global-state domain
+classification is enforced rather than documented. The failure policy and
+legacy dispatch policy are real, wired, and tested.
 
 What does **not** exist yet is Folia's gameplay integration layer: entity
 migration, teleport/login/respawn/dimension transfer, chunk-lifecycle

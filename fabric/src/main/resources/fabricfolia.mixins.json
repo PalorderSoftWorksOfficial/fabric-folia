@@ -1,16 +1,24 @@
 {
-	"required": true,
-	"minVersion": "0.8",
-	"package": "com.palordersoftworks.fabricfolia.mixin",
-	"compatibilityLevel": "JAVA_25",
-	"mixins": [
-		"ServerChunkCacheTickMixin",
-		"LevelMixin",
-		"PersistentEntitySectionManagerMixin",
-		"EntityMixin",
-		"MinecraftServerGuiMixin"
-	],
-	"injectors": {
-		"defaultRequire": 1
-	}
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.palordersoftworks.fabricfolia.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "ServerChunkCacheTickMixin",
+    "LevelMixin",
+    "LevelEntityTickMixin",
+    "LevelBlockEntityTickMixin",
+    "LevelScheduleTickMixin",
+    "PersistentEntitySectionManagerMixin",
+    "EntityMixin",
+    "MinecraftServerGuiMixin",
+    "EntityTeleportMixin",
+    "LevelTicksTickMixin",
+    "ServerLevelTickMixin",
+    "ConnectionPacketDispatchMixin",
+    "ConnectionFlushQueueMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
 }
