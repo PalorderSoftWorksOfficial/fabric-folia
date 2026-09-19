@@ -56,7 +56,7 @@ named test. Update it in the same change that moves a status.
 | Queue redistribution on split | TESTED | split listener partitions the parent queue by child ownership; re-homed task executes in the child's context |
 
 | Chunk lifecycle: register on activity, release on unload | TESTED (engine) / TESTED (live server) | regionizer position-exact ownership (idempotent re-offers); `ServerLevelUnloadMixin` routes `ServerLevel.unload` → `removeChunk`; live proof: forceload far chunk → region forms (`registered` +1), ticket removal → `unregistered` +1 and the region dies. Per-region chunk-*state* object still open (position lifecycle is owned, state is not) |
-| Block/fluid tick lists per region | NOT_IMPLEMENTED | vanilla's LevelTicks still server-thread-global |
+| Block/fluid tick lists per region | PARTIAL | vanilla's LevelTicks coordinator stays server-thread; the worker-visible half is region-owned: `RegionPendingTicks` ledger (per-region pending counts by chunk) rides the merge/split/destroy lifecycle, records at worker capture, releases at drain execution — 71/71 live-balanced over RCON |
 | Per-region redstone time / current tick semantics | NOT_IMPLEMENTED | current tick counters are per-region (split children inherit; merge re-homes) — redstone-time split from game time not yet done |
 
 ## Inter-region operations

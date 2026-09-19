@@ -14,6 +14,8 @@ import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizerRegistry;
 import com.palordersoftworks.fabricfolia.scheduler.AsyncSchedulerImpl;
 import com.palordersoftworks.fabricfolia.scheduler.GlobalSchedulerImpl;
+import com.palordersoftworks.fabricfolia.scheduler.RegionDataHub;
+import com.palordersoftworks.fabricfolia.scheduler.RegionPendingTicks;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
 import com.palordersoftworks.fabricfolia.thread.ThreadContextImpl;
 import com.palordersoftworks.fabricfolia.thread.ViolationReporter;
@@ -72,6 +74,12 @@ public final class FabricFoliaEngine {
 	private RegionTickInterceptor interceptor;
 	/** Per-world gameplay staging hubs (entity/block-entity bodies to region workers, mandate 27). */
 	private final java.util.concurrent.ConcurrentHashMap<String, RegionStageHub> stagingHubsByWorld =
+			new java.util.concurrent.ConcurrentHashMap<>();
+	/**
+	 * Per-world pending-tick ledgers (mandate 21), keyed "world:container"
+	 * (block / fluid): region-owned accounting of captured scheduled ticks.
+	 */
+	private final java.util.concurrent.ConcurrentHashMap<String, com.palordersoftworks.fabricfolia.scheduler.RegionPendingTicks> pendingTickLedgersByWorld =
 			new java.util.concurrent.ConcurrentHashMap<>();
 	/** Server-wide gameplay metrics (mandate 35; reported by /folia metrics). */
 	private RegionMetrics metrics;
@@ -354,6 +362,18 @@ public final class FabricFoliaEngine {
 			RegionStageHub stageHub = stagingHubsByWorld.computeIfAbsent(worldName, name ->
 					new RegionStageHub(level, regionizer, scheduler, metrics, info::accept));
 			ScheduledTickDeferral.registerLevel(level);
+			// Region-owned pending-tick ledgers (mandate 21): one per
+			// container, registered with the deferral so worker capture
+			// records into them and drain execution releases from them.
+			RegionDataHub worldHub = hubsByWorld.get(worldName);
+			RegionPendingTicks blockLedger = pendingTickLedgersByWorld
+					.computeIfAbsent(worldName + ":block", name ->
+							new RegionPendingTicks(name, regionizer, worldHub));
+			RegionPendingTicks fluidLedger = pendingTickLedgersByWorld
+					.computeIfAbsent(worldName + ":fluid", name ->
+							new RegionPendingTicks(name, regionizer, worldHub));
+			ScheduledTickDeferral.registerLedger(level.getBlockTicks(), blockLedger);
+			ScheduledTickDeferral.registerLedger(level.getFluidTicks(), fluidLedger);
 			RegionStageHub.activate(level, stageHub);
 			ScheduledTickDeferral.activate();
 			info.accept("  Regionized gameplay ACTIVE for " + worldName
@@ -427,6 +447,9 @@ public final class FabricFoliaEngine {
 				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayedTotal());
 		lines.add("scheduled ticks buffered now: "
 				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.pendingCount());
+		lines.add("pending-tick ledger: records="
+				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.ledgerRecords()
+				+ " releases=" + com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.ledgerReleases());
 		return lines;
 	}
 
@@ -506,6 +529,7 @@ public final class FabricFoliaEngine {
 		}
 		entitySchedulersByWorld.remove(worldName);
 		hubsByWorld.remove(worldName);
+		pendingTickLedgersByWorld.keySet().removeIf(name -> name.startsWith(worldName + ":"));
 		RegionStageHub hub = stagingHubsByWorld.remove(worldName);
 		if (hub != null) {
 			// Deactivate this world's staging first (the mixins check per

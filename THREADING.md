@@ -285,6 +285,32 @@ into snapshot buffers that the IO path flushes), with the choice to be
 justified in full here when saving is implemented — the decision is *not*
 being made implicitly by whatever the code happens to do first.
 
+## Pending scheduled ticks — region-owned query state (mandate §21)
+
+Worker-context scheduled-tick **writes** are deferred (see Scheduled-tick
+deferral); but block behaviors running on workers also **read** tick state:
+observers, tripwire, targets and lightning rods call
+`level.getBlockTicks().hasScheduledTick(...)` before re-scheduling. Vanilla's
+coordinator (`LevelTicks.allContainers`) is server-thread state — a worker
+read is a data race.
+
+The worker-visible half of the coordinator is therefore region-owned:
+`RegionPendingTicks` keeps a per-region count of pending ticks by target
+chunk. Capture records into the capturing region's ledger (no regionizer
+lock); drain execution releases the entry (server thread, structural owner).
+The ledger rides the region data lifecycle — merges fold counts, splits
+partition by chunk owner, region death drops the entries — so the accounting
+always matches current ownership.
+
+`LevelTicksQueryMixin` redirects `hasScheduledTick` for worker callers on
+registered containers to this ledger. The answer errs conservative: a
+spurious "yes" only suppresses a duplicate schedule vanilla would dedup
+(`LevelChunkTicks.schedule` is a set-add); it never falsely reports "no" for
+a tick that will run. Server-thread and unregistered-container callers use
+vanilla unchanged. Metrics: `pending-tick ledger: records=N releases=N` —
+a live-balance pair (server-thread-originated ticks never record, so the
+diff stays 0).
+
 ## Chunk lifecycle — ownership release on unload (mandate §20)
 
 Chunk **registration** happens in the entity-ticking pass: every chunk vanilla

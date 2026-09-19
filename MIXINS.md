@@ -39,6 +39,21 @@ Fabric API events (lifecycle, commands).
 | Purpose | per-entity ownership tracking: registers entities with the region entity registry and records their section so migration across region boundaries is detectable |
 | Effect when disarmed | no entity ownership; entity scheduling falls back to global dispatch |
 
+### LevelTicksQueryMixin
+
+**Target:** `net.minecraft.world.ticks.LevelTicks#hasScheduledTick` (HEAD, cancellable)
+
+**Why:** block behaviors that run on region workers — observers, tripwire,
+targets, lightning rods — ask `level.getBlockTicks().hasScheduledTick(...)`
+before re-scheduling. Vanilla's coordinator is server-thread state; a worker
+read is a data race. When the caller is a region worker and the container is
+a staged world's container, the question is answered from the region-owned
+`RegionPendingTicks` ledger instead of the shared map. The answer is
+conservative in the safe direction: a spurious "yes" only skips a duplicate
+schedule vanilla would dedup (`LevelChunkTicks.schedule` is a set-add); it
+can never falsely report "no" for a tick that will actually run. All other
+callers (server thread, unregistered containers) run vanilla unchanged.
+
 ### LevelTicksTickMixin
 
 | Field | Value |

@@ -6,6 +6,7 @@
 package com.palordersoftworks.fabricfolia.engine;
 
 import com.palordersoftworks.fabricfolia.api.ThreadContext;
+import com.palordersoftworks.fabricfolia.scheduler.RegionPendingTicks;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.ticks.LevelTicks;
@@ -64,9 +65,19 @@ public final class ScheduledTickDeferral {
 	/** Registered containers by identity (class identity == reference identity). */
 	private static final Map<LevelTicks<?>, ServerLevel> CONTAINER_LEVELS =
 			Collections.synchronizedMap(new ConcurrentHashMap<>());
+	/**
+	 * Registered pending-tick ledgers by container: the worker-visible,
+	 * region-owned accounting that answers hasScheduledTick-class questions
+	 * without racing the coordinator (mandate 21; see RegionPendingTicks).
+	 */
+	private static final Map<LevelTicks<?>, RegionPendingTicks> CONTAINER_LEDGERS =
+			Collections.synchronizedMap(new ConcurrentHashMap<>());
 	private static final ConcurrentLinkedQueue<Entry<?>> PENDING = new ConcurrentLinkedQueue<>();
 	private static final AtomicLong DEFERRED_TOTAL = new AtomicLong();
 	private static final AtomicLong REPLAYED_TOTAL = new AtomicLong();
+	/** Ledger bookkeeping: capture-side records and drain-side releases. */
+	private static final AtomicLong LEDGER_RECORDS = new AtomicLong();
+	private static final AtomicLong LEDGER_RELEASES = new AtomicLong();
 
 	/** A deferred tick plus the container it belongs to. */
 	private record Entry<T>(LevelTicks<T> container, ScheduledTick<T> tick) {
@@ -81,10 +92,26 @@ public final class ScheduledTickDeferral {
 		CONTAINER_LEVELS.put(level.getFluidTicks(), level);
 	}
 
-	/** Removes a world's containers (world detach). Idempotent. */
+	/**
+	 * Registers the pending-tick ledger for one container (block or fluid)
+	 * at staging activation. Capture records into it; drain execution
+	 * releases from it; the hasScheduledTick mixin queries it.
+	 */
+	public static void registerLedger(LevelTicks<?> container, RegionPendingTicks ledger) {
+		CONTAINER_LEDGERS.put(container, ledger);
+	}
+
+	/** Removes a world's containers and ledgers (world detach). Idempotent. */
 	static void unregisterLevel(ServerLevel level) {
 		CONTAINER_LEVELS.remove(level.getBlockTicks());
 		CONTAINER_LEVELS.remove(level.getFluidTicks());
+		CONTAINER_LEDGERS.remove(level.getBlockTicks());
+		CONTAINER_LEDGERS.remove(level.getFluidTicks());
+	}
+
+	/** @return the pending-tick ledger registered for this container, or null. */
+	public static RegionPendingTicks ledgerOf(LevelTicks<?> container) {
+		return CONTAINER_LEDGERS.get(container);
 	}
 
 	/** Activates capture (engine boot, after staging activation). Idempotent. */
@@ -104,6 +131,7 @@ public final class ScheduledTickDeferral {
 		DRAIN_STAGING.remove();
 		PENDING.clear();
 		CONTAINER_LEVELS.clear();
+		CONTAINER_LEDGERS.clear();
 	}
 
 	/**
@@ -123,6 +151,15 @@ public final class ScheduledTickDeferral {
 		}
 		PENDING.add(new Entry<>(container, tick));
 		DEFERRED_TOTAL.incrementAndGet();
+		// The pending-tick ledger records the capture in the capturing
+		// region's context (mandate 21): from now until drain execution the
+		// tick is visible to that region's hasScheduledTick queries without
+		// touching vanilla's server-thread coordinator.
+		RegionPendingTicks ledger = CONTAINER_LEDGERS.get(container);
+		if (ledger != null) {
+			ledger.record(tick.pos().getX() >> 4, tick.pos().getZ() >> 4);
+			LEDGER_RECORDS.incrementAndGet();
+		}
 		return true;
 	}
 
@@ -175,6 +212,21 @@ public final class ScheduledTickDeferral {
 	private static void scheduleVanilla(Entry<?> entry) {
 		LevelTicks container = entry.container();
 		container.schedule(entry.tick()); // server thread: not captured, vanilla runs
+	}
+
+	/** @return total pending-tick ledger records since engine start (diagnostics). */
+	public static long ledgerRecords() {
+		return LEDGER_RECORDS.get();
+	}
+
+	/** @return total pending-tick ledger releases since engine start (diagnostics). */
+	public static long ledgerReleases() {
+		return LEDGER_RELEASES.get();
+	}
+
+	/** One ledger release (drain-side bookkeeping). */
+	public static void ledgerReleased() {
+		LEDGER_RELEASES.incrementAndGet();
 	}
 
 	/** @return total ticks deferred since engine start (diagnostics). */

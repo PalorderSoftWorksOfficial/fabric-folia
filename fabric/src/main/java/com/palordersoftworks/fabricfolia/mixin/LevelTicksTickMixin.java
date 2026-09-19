@@ -7,6 +7,7 @@ package com.palordersoftworks.fabricfolia.mixin;
 
 import com.palordersoftworks.fabricfolia.engine.RegionStageHub;
 import com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral;
+import com.palordersoftworks.fabricfolia.scheduler.RegionPendingTicks;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.ticks.LevelTicks;
@@ -57,13 +58,27 @@ public abstract class LevelTicksTickMixin {
 					target = "Ljava/util/function/BiConsumer;accept(Ljava/lang/Object;Ljava/lang/Object;)V"),
 			require = 1)
 	private void fabricfolia$stageDrainBody(java.util.function.BiConsumer<?, ?> consumer, Object pos, Object type) {
-		if (ScheduledTickDeferral.isDrainStaged((LevelTicks<?>) (Object) this)) {
+		LevelTicks<?> container = (LevelTicks<?>) (Object) this;
+		// The tick has been DRAINED — its pending window is over whether the
+		// body now runs inline (vanilla) or staged on a worker. Exactly-once:
+		// every drained tick passes this site exactly once.
+		RegionPendingTicks ledger = ScheduledTickDeferral.ledgerOf(container);
+		if (ledger != null) {
+			BlockPos blockPos = (BlockPos) pos;
+			if (ledger.release(blockPos.getX() >> 4, blockPos.getZ() >> 4)) {
+				// Count only real record/release closures: server-thread-
+				// originated ticks have no entry, so counting every drain
+				// would make records−releases meaningless as a balance.
+				ScheduledTickDeferral.ledgerReleased();
+			}
+		}
+		if (ScheduledTickDeferral.isDrainStaged(container)) {
 			@SuppressWarnings("unchecked")
 			java.util.function.BiConsumer<Object, Object> raw =
 					(java.util.function.BiConsumer<Object, Object>) consumer;
 			BlockPos blockPos = (BlockPos) pos;
 			RegionStageHub.stage(
-					ScheduledTickDeferral.levelOf((LevelTicks<?>) (Object) this),
+					ScheduledTickDeferral.levelOf(container),
 					RegionStageHub.Slice.SCHEDULED_TICK,
 					new StagedDrainBody(raw, blockPos, type));
 			return;
