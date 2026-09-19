@@ -713,26 +713,32 @@ public final class WorldRegionizer {
 				return;
 			}
 
-			// 3. Remove dead sections; attempt split. The dead-section count is
-			//    observed before purging so the split gate (recalculation knob)
-			//    sees the load that accumulated, per the reference. (The tick
-			//    counter is NOT advanced here: the executing context advances it
-			//    at tick START via Region#advanceTickCounter — the delayed-task
-			//    time base is "ticks started", uniform across enqueue timing.)
-			int deadSectionsPurged = removeDeadSections(region);
-			if (region.sections.isEmpty()) {
-				// Emptied region: kill unconditionally, BEFORE the READY/
-				// reschedule path. The recalculation gate below exists to limit
-				// split RECALCULATION work, not to keep zombie regions alive;
-				// gating the death behind it stranded queues and region-local
-				// data on zero-section READY regions no dispatcher can serve.
+			// 3. Split recalculation. Dead sections ACCUMULATE IN PLACE between
+			//    recalculations (reference semantics): they are removed only by
+			//    a recalculation pass, so the gate below sees the real gathered
+			//    load. Purging every tick (the previous behavior) meant each
+			//    death was observed alone, one tick after it happened — the
+			//    gate never fired and live splits were unreachable (found in
+			//    live churn validation). Region death stays unconditional and
+			//    UNGATED: a region with zero alive sections has nothing to own
+			//    or tick, and leaving it READY would strand queues and
+			//    region-local data on a region no dispatcher can serve. (The
+			//    tick counter is NOT advanced here: the executing context
+			//    advances it at tick START via Region#advanceTickCounter — the
+			//    delayed-task time base is "ticks started", uniform across
+			//    enqueue timing.)
+			int dead = countDeadSections(region);
+			if (dead == region.sections.size()) {
 				killRegion(region);
 				return;
 			}
 			region.state = RegionState.READY;
 			scheduleNextTick(region);
-			if (region.sections.size() + deadSectionsPurged >= config.recalculationCount()) {
-				attemptSplit(region, deadSectionsPurged);
+			int total = region.sections.size();
+			if (total >= config.recalculationCount()
+					&& dead * 100 >= config.maxDeadSectionPercent() * total) {
+				removeDeadSections(region);
+				attemptSplit(region, dead);
 			}
 		} finally {
 			structureLock.unlock();
@@ -821,6 +827,17 @@ public final class WorldRegionizer {
 	 * reference defers recalculation until "enough" dead sections accumulate —
 	 * counting must happen before they are gone).
 	 */
+	/** @return how many of the region's sections are currently dead (unpurged). */
+	private int countDeadSections(Region region) {
+		int dead = 0;
+		for (RegionSection section : region.sections.values()) {
+			if (!section.alive) {
+				dead++;
+			}
+		}
+		return dead;
+	}
+
 	private int removeDeadSections(Region region) {
 		int removed = 0;
 		Iterator<Map.Entry<Long, RegionSection>> it = region.sections.entrySet().iterator();
@@ -845,17 +862,18 @@ public final class WorldRegionizer {
 	 * a merge; splits appear when buffer sections die off. Running this at tick
 	 * end (per the reference) is sufficient to converge.</p>
 	 */
-	private void attemptSplit(Region region, int deadCountObservedBeforePurge) {
+	private void attemptSplit(Region region, int deadSectionsBeforePurge) {
 		if (region.sections.isEmpty()) {
 			killRegion(region);
 			return;
 		}
-		// Gate on the dead-section load OBSERVED BEFORE the purge (reference:
-		// recalculation runs when enough dead sections accumulated). The alive
+		// The gate was already evaluated by the caller against the
+		// pre-purge load (deadSectionsBeforePurge vs. alive+dead); this
+		// method only recomputes it for defense-in-depth. The alive
 		// remainder is what can actually split.
-		int totalBeforePurge = region.sections.size() + deadCountObservedBeforePurge;
+		int totalBeforePurge = region.sections.size() + deadSectionsBeforePurge;
 		if (totalBeforePurge == 0
-				|| deadCountObservedBeforePurge * 100 < config.maxDeadSectionPercent() * totalBeforePurge) {
+				|| deadSectionsBeforePurge * 100 < config.maxDeadSectionPercent() * totalBeforePurge) {
 			return; // not enough dead sections to justify recalculation
 		}
 		List<List<RegionSection>> components = connectedComponents(region);

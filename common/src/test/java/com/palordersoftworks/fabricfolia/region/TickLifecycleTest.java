@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -104,30 +106,32 @@ class TickLifecycleTest {
 		WorldRegionizer rz = new WorldRegionizer("test:world", cfg,
 				new AtomicLong(1)::getAndIncrement, System::nanoTime);
 
-		// Geometry (2 chunks/section): left cluster sections (-2..-1, 0) are
-		// chunks x -4..-1; right cluster sections (1..2, 0) are chunks x 2..5.
-		// The gap between the clusters' non-empty sections spans sections 0 vs 1
-		// — adjacency distance 1 — so the halo (radius 2) bridges them and both
-		// join one region. After the RIGHT cluster empties, its sections die
-		// (nothing non-empty within radius 2 of section 0 except... section 1
-		// itself is empty), and the remaining region recalculate-splits.
-		for (int x = -4; x <= -1; x++) rz.addChunk(x, 0);   // left cluster: 2 sections
-		for (int x = 2; x <= 5; x++) rz.addChunk(x, 0);     // right cluster: 2 sections
+		// Geometry (2 chunks/section): two single-section blobs (sections 0 and
+		// 9) joined by a 1-wide bridge (sections 1..8) — 10 adopted sections in
+		// one region. After the bridge empties, its middle sections (3..6) are
+		// >= 3 sections from ANY non-empty section (empty radius 2), so they go
+		// dead: 4 dead of 10 = 40% — the gate fires, the purge removes them,
+		// and the flood fill finds two alive components ({0,1,2} and {7,8,9}).
+		for (int x = 0; x <= 19; x++) rz.addChunk(x, 0);
 
-		Region region = rz.ownerOfChunk(-4, 0);
-		Region sameRight = rz.ownerOfChunk(5, 0);
-		assertEquals(region, sameRight, "halo adjacency should unify the clusters into one region");
+		Region region = rz.ownerOfChunk(0, 0);
+		assertEquals(region, rz.ownerOfChunk(19, 0), "bridge should unify everything into one region");
 
-		// The right cluster empties entirely (4 removes). Its sections and the
-		// shared halo go dead; a full tick purges them and runs the split.
-		for (int x = 2; x <= 5; x++) rz.removeChunk(x, 0);
+		// The bridge empties entirely (chunks 2..17 = sections 1..8). Dead
+		// sections ACCUMULATE until a tick-end recalculation, which is what
+		// the gate observes.
+		for (int x = 2; x <= 17; x++) rz.removeChunk(x, 0);
 		assertTrue(rz.tryBeginTick(region));
 		rz.completeTick(region, 1);
 
-		// After recalculation, ownership must not bridge the dead gap.
-		Region left = rz.ownerOfChunk(-4, 0);
-		Region right = rz.ownerOfChunk(5, 0);
-		assertTrue(left != right, "region did not split across the dead gap");
+		// After recalculation, ownership must not bridge the dead gap — and
+		// BOTH sides survive (each retains alive, non-empty sections), so this
+		// is a real split, not one side's death.
+		Region left = rz.ownerOfChunk(0, 0);
+		Region right = rz.ownerOfChunk(19, 0);
+		assertNotNull(left, "left blob must keep a live region");
+		assertNotNull(right, "right blob must keep a live region");
+		assertNotEquals(left, right, "region did not split across the dead gap");
 	}
 
 	private static int countLiveComponents(WorldRegionizer rz, Region region) {
