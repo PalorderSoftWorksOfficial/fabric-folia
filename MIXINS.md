@@ -129,3 +129,23 @@ Fabric API events (lifecycle, commands).
 | Transformation | when the caller is a region worker and the destination resolves to another region/world, routes the transition through `RegionTransitions.dispatch` (destination-context execution) instead of mutating state from the wrong context |
 | Effect when disarmed / engine down | falls through to vanilla teleport |
 
+### ServerChunkCacheMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerChunkCacheMixin` |
+| Target | `ServerChunkCache.blockChanged(ChunkHolder)` head (`@Inject`, cancellable) |
+| Transformation | when the caller is a region worker, queues the holder into a per-level concurrent pending set (ChunkBroadcastDeferral) and cancels the direct `chunkHoldersToBroadcast.add`; the server thread drains the set at `broadcastChangedChunks` HEAD, before vanilla iterates the non-concurrent set |
+| Why | vanilla assumes block changes happen only on the server thread; our worker-context staged bodies call `setBlock`, and a raw add during the server thread's iteration corrupts the fastutil set (`wrapped is null` crash, reproduced live) |
+| Effect when disarmed / engine down | vanilla's direct add — correct on a single-threaded server, racy only under staged worker execution |
+
+### ServerLevelUnloadMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerLevelUnloadMixin` |
+| Target | `ServerLevel.unload(LevelChunk)` TAIL (`@Inject`) |
+| Transformation | routes the departing chunk position to the world regionizer's `removeChunk`, so sections can empty, dead sections accumulate, and the tick-end split path is reachable from real chunk churn |
+| Why this seam | `ServerLevel.unload` is vanilla's definitive per-chunk departure point: called exactly once per holder from `ChunkMap`'s unload lambda, after save, on the server thread (verified against the 26.2 jar bytecode) |
+| Ordering safety | TAIL inject: vanilla has already unregistered the chunk's tick containers and block entities — region ownership release is the last step |
+| Effect when disarmed / engine down | no-op; sections stay owned forever (the defect this hook fixed: merges/splits were unreachable live) |

@@ -17,7 +17,8 @@
     "LevelTicksTickMixin",
     "ServerLevelTickMixin",
     "ConnectionPacketDispatchMixin",
-    "ConnectionFlushQueueMixin"
+    "ConnectionFlushQueueMixin",
+    "ServerLevelUnloadMixin"
   ],
   "injectors": {
     "defaultRequire": 1

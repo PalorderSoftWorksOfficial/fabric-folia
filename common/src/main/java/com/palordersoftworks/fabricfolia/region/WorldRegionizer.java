@@ -93,6 +93,45 @@ public final class WorldRegionizer {
 	/** Structural lifecycle listeners, in registration order. Guarded by structureLock. */
 	private List<Listener> listeners;
 
+	/**
+	 * Chunk lifecycle accounting sink, set once by the host (fabric engine)
+	 * so regionizer-internal events surface in metrics without the regionizer
+	 * importing the metrics layer. Null until installed: counters then simply
+	 * stay silent (unit tests, hosts without metrics).
+	 */
+	public interface ChunkMetricSink {
+		/** A new chunk position became owned (first registration of its section). */
+		void chunkRegistered();
+
+		/** A chunk position's registration became void (unload, last chunk of its section). */
+		void chunkUnregistered();
+	}
+
+	/** Structural lifecycle accounting sink (merges/splits/aborts). */
+	public interface StructuralMetricSink {
+		/** A merge completed (donor absorbed into a survivor). */
+		void regionMerged();
+
+		/** A region split produced one child region. */
+		void regionSplit();
+
+		/** A region was aborted by tick-end protocol failure. */
+		void regionAborted();
+	}
+
+	private volatile ChunkMetricSink chunkMetrics;
+	private volatile StructuralMetricSink structuralMetrics;
+
+	/** Installs the chunk lifecycle metric sink. Idempotent: last write wins. */
+	public void setChunkMetricSink(ChunkMetricSink sink) {
+		this.chunkMetrics = sink;
+	}
+
+	/** Installs the structural lifecycle metric sink (merges/splits/aborts). */
+	public void setStructuralMetricSink(StructuralMetricSink sink) {
+		this.structuralMetrics = sink;
+	}
+
 	public WorldRegionizer(String world, RegionizerConfig config,
 	                       LongSupplier idGenerator, LongSupplier nanoClock) {
 		this.world = world;
@@ -199,11 +238,18 @@ public final class WorldRegionizer {
 		structureLock.lock();
 		try {
 			long sectionPos = sectionKey(sectionX(chunkX), sectionZ(chunkZ));
+			ChunkMetricSink sink = this.chunkMetrics;
 
 			RegionSection target = sections.get(sectionPos);
 			if (target != null && target.isNotEmpty()) {
 				// Fast path: section already exists and is non-empty. Its region
 				// is unchanged (the chunk joins it, invariant 1 preserved).
+				// Ownership is position-exact: a re-offer of an already-owned
+				// chunk (the vanilla entity-ticking pass re-offers every loaded
+				// tick) adds nothing — counts are idempotent per position.
+				if (target.addChunk(chunkX, chunkZ) && sink != null) {
+					sink.chunkRegistered();
+				}
 				return ownerOfSectionLocked(target);
 			}
 
@@ -212,6 +258,12 @@ public final class WorldRegionizer {
 				target = new RegionSection(keyX(sectionPos), keyZ(sectionPos), true);
 				sections.put(sectionPos, target);
 				createdSection = true;
+			}
+			// Slow path: the section was null (fresh) or empty (buffer section
+			// re-activated) — the position is genuinely newly owned either way.
+			target.addChunk(chunkX, chunkZ);
+			if (sink != null) {
+				sink.chunkRegistered();
 			}
 
 			// Create/refresh the buffer halo (empty-section creation radius).
@@ -267,7 +319,7 @@ public final class WorldRegionizer {
 		try {
 			long sectionPos = sectionKey(sectionX(chunkX), sectionZ(chunkZ));
 			RegionSection target = sections.get(sectionPos);
-			if (target == null || target.chunkCount == 0) {
+			if (target == null || target.isEmpty()) {
 				// Defensive no-op: the chunk system's contract is balanced
 				// add/remove, but an unmatched remove (chunk load failure paths,
 				// future integration bugs) must degrade to a no-op rather than
@@ -276,8 +328,14 @@ public final class WorldRegionizer {
 				// reclaimed by dead-section purge at tick end.
 				return;
 			}
-			target.chunkCount--;
-			if (target.chunkCount == 0) {
+			boolean released = target.removeChunk(chunkX, chunkZ);
+			if (!released) {
+				return; // position not owned here: unmatched remove, no-op
+			}
+			ChunkMetricSink sink = this.chunkMetrics;
+			if (sink != null) {
+				sink.chunkUnregistered();
+			}			if (target.isEmpty()) {
 				// Section is now empty: it and its halo may become dead unless
 				// other activity still supports them.
 				haloRelease(target);
@@ -297,7 +355,6 @@ public final class WorldRegionizer {
 	 * section must be alive (invariant 2's physical basis).
 	 */
 	private void haloCreate(RegionSection center) {
-		center.chunkCount++;
 		int radius = config.emptySectionCreationRadius();
 		for (int dx = -radius; dx <= radius; dx++) {
 			for (int dz = -radius; dz <= radius; dz++) {
@@ -467,6 +524,7 @@ public final class WorldRegionizer {
 		}
 
 		killMergedRegion(from, to);
+		recordMerge();
 	}
 
 	private List<Listener> listeners() {
@@ -640,7 +698,7 @@ public final class WorldRegionizer {
 					continue;
 				}
 				// Donors are non-ticking by construction (they downgraded when
-				// they acquired the mergeLater obligation).
+			// they acquired the mergeLater obligation).
 				mergeNowLocked(donor, region);
 			}
 			region.expectingMergeFrom.clear();
@@ -696,6 +754,31 @@ public final class WorldRegionizer {
 		}
 		from.mergeLater.clear();
 		killMergedRegion(from, to);
+		recordMerge();
+	}
+
+	/** Structural metrics: one completed region merge (donor absorbed). */
+	private void recordMerge() {
+		StructuralMetricSink sink = this.structuralMetrics;
+		if (sink != null) {
+			sink.regionMerged();
+		}
+	}
+
+	/** Structural metrics: one region split (a child born). */
+	private void recordSplit() {
+		StructuralMetricSink sink = this.structuralMetrics;
+		if (sink != null) {
+			sink.regionSplit();
+		}
+	}
+
+	/** Structural metrics: one region aborted (tick-end protocol failure). */
+	private void recordAbort() {
+		StructuralMetricSink sink = this.structuralMetrics;
+		if (sink != null) {
+			sink.regionAborted();
+		}
 	}
 
 	/**
@@ -724,6 +807,7 @@ public final class WorldRegionizer {
 				return; // completed or already dead: nothing to abort
 			}
 			killRegion(region);
+			recordAbort();
 		} finally {
 			structureLock.unlock();
 		}
@@ -773,38 +857,40 @@ public final class WorldRegionizer {
 		if (totalBeforePurge == 0
 				|| deadCountObservedBeforePurge * 100 < config.maxDeadSectionPercent() * totalBeforePurge) {
 			return; // not enough dead sections to justify recalculation
-		}			List<List<RegionSection>> components = connectedComponents(region);
-			if (components.size() <= 1) {
-				return; // still one connected area: nothing to split
+		}
+		List<List<RegionSection>> components = connectedComponents(region);
+		if (components.size() <= 1) {
+			return; // still one connected area: nothing to split
+		}
+		// Largest component stays; others become new READY regions. Split
+		// children inherit the parent tick counter (reference: "split children
+		// inherit redstone/current tick; relative deadlines are maintained as
+		// there is no tick number change") — so delayed tasks re-homed or
+		// re-resolved against a child keep their meaning.
+		components.sort((a, b) -> Integer.compare(b.size(), a.size()));
+		List<Region> children = new ArrayList<>();
+		for (int i = 1; i < components.size(); i++) {
+			Region child = newRegion(RegionState.READY);
+			child.origin = "split";
+			for (RegionSection section : components.get(i)) {
+				region.sections.remove(sectionKey(section.x, section.z));
+				child.sections.put(sectionKey(section.x, section.z), section);
 			}
-			// Largest component stays; others become new READY regions. Split
-			// children inherit the parent tick counter (reference: "split children
-			// inherit redstone/current tick; relative deadlines are maintained as
-			// there is no tick number change") — so delayed tasks re-homed or
-			// re-resolved against a child keep their meaning.
-			components.sort((a, b) -> Integer.compare(b.size(), a.size()));
-			List<Region> children = new ArrayList<>();
-			for (int i = 1; i < components.size(); i++) {
-				Region child = newRegion(RegionState.READY);
-				child.origin = "split";
-				for (RegionSection section : components.get(i)) {
-					region.sections.remove(sectionKey(section.x, section.z));
-					child.sections.put(sectionKey(section.x, section.z), section);
-				}
-				child.tickCount = region.tickCount;
-				scheduleNextTick(child);
-				children.add(child);
+			child.tickCount = region.tickCount;
+			scheduleNextTick(child);
+			children.add(child);
+		}
+		// Lifecycle hook BEFORE the parent is dispatchable again (we are
+		// under the structure lock, inside completeTick's tick-end protocol):
+		// listeners redistribute per-region data — queues partition by
+		// chunk ownership, region-local data runs its split handler — so no
+		// child ever starts with stranded ownership (mandate §8).
+		if (!children.isEmpty()) {
+			recordSplit();
+			for (Listener listener : listeners()) {
+				listener.onRegionSplit(region, List.copyOf(children));
 			}
-			// Lifecycle hook BEFORE the parent is dispatchable again (we are
-			// under the structure lock, inside completeTick's tick-end protocol):
-			// listeners redistribute per-region data — queues partition by
-			// chunk ownership, region-local data runs its split handler — so no
-			// child ever starts with stranded ownership (mandate §8).
-			if (!children.isEmpty()) {
-				for (Listener listener : listeners()) {
-					listener.onRegionSplit(region, List.copyOf(children));
-				}
-			}
+		}
 	}
 
 	private List<List<RegionSection>> connectedComponents(Region region) {

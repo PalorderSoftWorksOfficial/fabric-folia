@@ -284,3 +284,34 @@ steps** (region-owned state is serialized by the owning region's context,
 into snapshot buffers that the IO path flushes), with the choice to be
 justified in full here when saving is implemented — the decision is *not*
 being made implicitly by whatever the code happens to do first.
+
+## Chunk lifecycle — ownership release on unload (mandate §20)
+
+Chunk **registration** happens in the entity-ticking pass: every chunk vanilla
+selects for block ticking is regionized via `addChunk` before its work is
+scheduled to a region worker. Chunk **release** happens at vanilla's
+definitive departure point: `ServerLevel.unload(LevelChunk)` (called exactly
+once per holder, after save, on the server thread — verified against the 26.2
+jar bytecode) routes the position to the world regionizer's `removeChunk` via
+`ServerLevelUnloadMixin`.
+
+Ownership is **position-exact**: the vanilla entity-ticking pass re-offers the
+same loaded chunk every tick, so the regionizer records distinct positions per
+section, making `addChunk` idempotent and exactly one `removeChunk` per unload
+able to empty a section. When a section empties, the halo recalculation may
+mark it and its buffer dead; dead sections accumulate until a region's tick
+end purges them — which is what makes the tick-end **split** path (and
+region death) reachable from real chunk churn rather than only from tests.
+
+The observable evidence of the loop closing:
+
+```
+/folia metrics
+  Chunks: registered=<n> unregistered=<m>   # n-m = currently owned positions
+/folia regions
+  # regions appear when chunks register, and die when their last section empties
+```
+
+Both counters are wired from the regionizer's real registration events; before
+this hook existed, unloading never shrank the regionizer and
+registered−unregistered could only drift apart.

@@ -237,6 +237,37 @@ public final class FabricFoliaEngine {
 			return hub;
 		});
 
+		// Structural + chunk lifecycle metrics (mandate §35): the regionizer
+		// fires the sinks; the engine maps them onto the shared metric
+		// registry. Per-world regionizers share one counter set — totals.
+		regionizer.setChunkMetricSink(new WorldRegionizer.ChunkMetricSink() {
+			@Override
+			public void chunkRegistered() {
+					metrics.increment(RegionMetrics.Counter.CHUNK_REGISTRATIONS);
+				}
+
+				@Override
+				public void chunkUnregistered() {
+					metrics.increment(RegionMetrics.Counter.CHUNK_UNREGISTRATIONS);
+				}
+		});
+		regionizer.setStructuralMetricSink(new WorldRegionizer.StructuralMetricSink() {
+			@Override
+			public void regionMerged() {
+				metrics.increment(RegionMetrics.Counter.REGION_MERGES);
+			}
+
+			@Override
+			public void regionSplit() {
+				metrics.increment(RegionMetrics.Counter.REGION_SPLITS);
+			}
+
+			@Override
+			public void regionAborted() {
+				metrics.increment(RegionMetrics.Counter.REGION_ABORTS);
+			}
+		});
+
 		boolean suppressed = interceptSuppressedReason != null;
 		if (interceptActive && suppressed) {
 			info.accept("World attached: " + worldName
@@ -253,6 +284,29 @@ public final class FabricFoliaEngine {
 			info.accept("World attached: " + worldName
 					+ " (structure-only: regionized random ticks disabled, vanilla execution untouched).");
 		}
+	}
+
+	/**
+	 * Routes a vanilla chunk-unload event to the owning world's regionizer
+	 * (mandate §20): the section loses its chunk registration, may empty and
+	 * die, and the tick-end split path gains its real input. Called from the
+	 * server-thread unload hook; defensive no-op when the world is unknown.
+	 *
+	 * @param levelContextHolder the ServerLevel whose chunk unloaded (mixin
+	 *                          {@code this}, cast here to keep MC types out of
+	 *                          mixin signatures)
+	 * @param chunk             the chunk being unloaded
+	 */
+	public void onChunkUnloaded(Object levelContextHolder, net.minecraft.world.level.chunk.LevelChunk chunk) {
+		net.minecraft.server.level.ServerLevel level =
+				(net.minecraft.server.level.ServerLevel) levelContextHolder;
+		String worldName = level.dimension().identifier().toString();
+		WorldRegionizer regionizer = regionizers.get(worldName);
+		if (regionizer == null) {
+			return;
+		}
+		var pos = chunk.getPos();
+		regionizer.removeChunk(pos.x(), pos.z());
 	}
 
 	/**
