@@ -26,8 +26,8 @@ named test. Update it in the same change that moves a status.
 | Invariant 2 — merge-radius buffer around regions | TESTED | empty-section creation radius; invariant tests |
 | Invariant 3 — ticking regions cannot grow | TESTED | TRANSIENT gating; TickLifecycleTest |
 | Invariant 4 — state machine (TRANSIENT/READY/TICKING/DEAD) | TESTED | `RegionState`, TickLifecycleTest |
-| Merge logic (incl. merge-later deferral, transient downgrade) | TESTED | `mergeInto` + deferred-merge protocol; invariant tests |
-| **Split logic (redistribute owned data)** | TESTED | flood-fill split + tick-counter inheritance + queue partitioning + region-local data redistribution — all driven through the real tick-end protocol (see Scheduler/Region data rows) |
+| Merge logic (incl. merge-later deferral, transient downgrade) | VALIDATED | `mergeInto` + deferred-merge protocol; invariant tests + 8 donor merges observed live over RCON (bridge closing two regions) |
+| **Split logic (redistribute owned data)** | VALIDATED | flood-fill split + tick-counter inheritance + queue partitioning + region-local data redistribution — driven through the real tick-end protocol; live RCON run split a 21-section region into two independent ticking regions with balanced ledgers |
 | Merge/split tick-deadline reconciliation (redstone/current-tick offset) | NOT_IMPLEMENTED | requires per-region redstone time (below); queue deadlines use tick counters which already re-home/inherit |
 | Region tick state + lifecycle | TESTED | tryBeginTick/completeTick/abortTick; TickLifecycleTest |
 | Ticking eligibility (READY only, neighbor-free) | TESTED | invariant tests |
