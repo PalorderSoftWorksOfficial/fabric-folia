@@ -9,6 +9,7 @@ import com.palordersoftworks.fabricfolia.metrics.RegionMetrics;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
+import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -92,6 +93,7 @@ public final class RegionStageHub {
 	private static final AtomicLong EXECUTED_ON_WORKERS = new AtomicLong();
 	private static final AtomicLong DROPPED_DEAD_REGION = new AtomicLong();
 	private static final AtomicLong REHOMED_MERGE = new AtomicLong();
+	private static final AtomicLong BOUNCED_TO_SERVER = new AtomicLong();
 
 	/** The gameplay slices, each with its vanilla capture site. */
 	public enum Slice {
@@ -162,6 +164,11 @@ public final class RegionStageHub {
 	/** @return pending pools re-homed by merges (diagnostics). */
 	public static long rehomedByMerge() {
 		return REHOMED_MERGE.get();
+	}
+
+	/** @return staged bodies bounced to the server thread at execution time (diagnostics). */
+	public static long bouncedToServer() {
+		return BOUNCED_TO_SERVER.get();
 	}
 
 	// =================================================================================
@@ -252,6 +259,24 @@ public final class RegionStageHub {
 
 
 	private void runSafely(Slice slice, Runnable body, Region region) {
+		if (region != null
+				&& ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION
+				&& !fabricfolia$bodyNeighborhoodLoaded(body)) {
+			// Execution-time bounce. The staging capture's loadedness check can
+			// go stale when a region's queue is backed up: by the time this body
+			// runs, its edge chunks may have unloaded (a walking player's wake).
+			// Such a body parks a worker on a SYNCHRONOUS chunk load the worker
+			// cannot pump — observed live as a region latched TICKING for
+			// minutes while every packet and movement task for its chunks
+			// starved behind it. The server thread owns the chunk system (it
+			// pumps the load machinery), and vanilla runs these bodies there
+			// anyway, so bounce instead of blocking the worker. Re-entering
+			// runSafely with a null region runs the body under the identical
+			// isolation/metric path, inline, on the server thread.
+			BOUNCED_TO_SERVER.incrementAndGet();
+			level.getServer().execute(() -> runSafely(slice, body, null));
+			return;
+		}
 		try {
 			body.run();
 			EXECUTED_ON_WORKERS.incrementAndGet();
@@ -272,6 +297,31 @@ public final class RegionStageHub {
 					+ (region != null ? " in region " + region.world() + ":" + region.regionId() : "")
 					+ " on " + Thread.currentThread().getName() + ": " + t);
 		}
+	}
+
+	/**
+	 * @return true when every chunk in the body's 3x3 chunk neighborhood is
+	 * loaded now. A probe, not a reservation: this bounds the body's own
+	 * chunk-data reach (collision iteration, fluid interaction, edge block
+	 * queries) to data that is already resident, so executing it cannot park
+	 * on a chunk load. Bodies with no position resolve nothing — run them.
+	 * Called from region workers; reads the same resident-chunk structures
+	 * the body itself would read (the interim boundary the tick interceptor
+	 * already documents).
+	 */
+	private boolean fabricfolia$bodyNeighborhoodLoaded(Runnable body) {
+		if (!(body instanceof Positioned positioned)) {
+			return true;
+		}
+		net.minecraft.world.level.ChunkPos pos = positioned.fabricfolia$position();
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (level.getChunkSource().getChunkNow(pos.x() + dx, pos.z() + dz) == null) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	// =================================================================================

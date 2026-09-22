@@ -436,7 +436,8 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 				}
 				// Duplicate dispatch is made harmless by the two in-job guards
 				// documented on the class — no cross-thread bookkeeping needed.
-				pool.submit(() -> runRegionTick(region));
+				long submittedAt = nanoClock.getAsLong();
+				pool.submit(() -> runRegionTick(region, submittedAt));
 			}
 			// Coordinator cadence: 1ms scan. Regions whose deadline is further
 			// out are skipped cheaply; correctness never depends on scan timing.
@@ -449,7 +450,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		}
 	}
 
-	private void runRegionTick(Region region) {
+	private void runRegionTick(Region region, long submittedAtNanos) {
 		// Guard 1: skip stale duplicates of a still-ticking region.
 		if (region.state() != RegionState.READY) {
 			return;
@@ -465,6 +466,11 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		// contract, not a race to suppress).
 		if (!regionizer.tryBeginTick(region)) {
 			return;
+		}
+		long dispatchLatency = nanoClock.getAsLong() - submittedAtNanos;
+		if (dispatchLatency > 500_000_000L) {
+			diagnostics.accept("DISPATCH LATENCY " + region + ": " + (dispatchLatency / 1_000_000)
+					+ "ms from submit to start, pool queue=" + pool.queuedTaskCount());
 		}
 		long start = nanoClock.getAsLong();
 		ThreadOwnership.Context token = ThreadOwnership.enterRegion(regionInfoOf(region));
@@ -489,7 +495,12 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 							queue.add(task, entry.chunkPos()); // not due yet
 							continue;
 						}
+					long taskStart = nanoClock.getAsLong();
 					task.run();
+					long taskDur = nanoClock.getAsLong() - taskStart;
+					if (taskDur > 1_000_000_000L) {
+						diagnostics.accept("SLOW TASK in " + region + ": " + (taskDur / 1_000_000) + "ms");
+					}
 				} catch (Throwable t) {
 					// Spec 26/§34: failures are contained by the per-region
 					// failure policy — reported with full context, never silent;
@@ -510,6 +521,9 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			//    is not dispatchable until completeTick returns.
 			long duration = nanoClock.getAsLong() - start;
 			region.recordTickDuration(duration);
+			if (duration > 1_000_000_000L) {
+				diagnostics.accept("SLOW TICK " + region + ": " + (duration / 1_000_000) + "ms");
+			}
 			try {
 				regionizer.completeTick(region, duration);
 			} catch (Throwable t) {

@@ -8,6 +8,7 @@ package com.palordersoftworks.fabricfolia.engine;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
+import com.palordersoftworks.fabricfolia.scheduler.RegionTaskQueue;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerChunkCache;
@@ -167,7 +168,14 @@ public final class RegionTickInterceptor {
 			return; // detached between offer and flush: drop (documented)
 		}
 
-		int scheduledJobs = 0;
+		// Group by owning region FIRST, then enqueue ONE batched job per
+		// region per pass. One task per chunk was observed to outrun the
+		// region's 50ms tick cadence under load (~250 chunks/pass on the
+		// server thread vs one drain per tick): the backlog compounded into
+		// multi-second ticks (and, in the extreme, a region latched TICKING
+		// while its queue grew to 455k entries, freezing player movement).
+		// Batching bounds the enqueue rate to one job per region per pass.
+		Map<Region, List<OfferedChunk>> byRegion = new java.util.HashMap<>();
 		for (OfferedChunk oc : offered) {
 			// Regionize: the chunk position joins (or joins an existing)
 			// region. Regionizer ops are thread-safe; this is the ONLY place
@@ -177,24 +185,51 @@ public final class RegionTickInterceptor {
 					ChunkPos.getX(packed), ChunkPos.getZ(packed));
 			oc.region = region;
 
-			// Schedule the per-chunk work into the region's tick context. The
-			// engine's scheduler executes it on a region worker after the
-			// single-owner latch (tryBeginTick) succeeds — or re-homes it on
-			// merge (queue re-homing), never drops it silently while the
-			// region lives.
+			// Edge guard: a chunk whose 3x3 neighborhood is not fully loaded
+			// keeps its work off the worker this pass — vanilla's per-chunk
+			// tick queries edge-adjacent blocks (precipitation heightmap),
+			// and from a worker that request parks on a synchronous chunk
+			// load the worker cannot pump. The next pass re-offers the chunk.
+			if (!fabricfolia$neighborhoodLoaded(oc.level, ChunkPos.getX(packed), ChunkPos.getZ(packed))) {
+				continue;
+			}
+			byRegion.computeIfAbsent(region, r -> new ArrayList<>()).add(oc);
+		}
+
+		int scheduledJobs = 0;
+		int backpressured = 0;
+		for (Map.Entry<Region, List<OfferedChunk>> e : byRegion.entrySet()) {
+			Region region = e.getKey();
+			List<OfferedChunk> batch = e.getValue();
+			// Backpressure: if a region's queue is already carrying more than
+			// ~2 passes' worth of batched work, skip this pass for it. Random
+			// ticks are advisory gameplay — dropping a pass under saturation is
+			// strictly better than starving the region's REAL work (player
+			// movement and packet handling share this queue). The next pass
+			// re-offers the same chunks: nothing is lost but one pass's delay.
+			RegionTaskQueue queue = attachment.scheduler().queueOf(region);
+			if (queue != null && queue.size() > 512) {
+				backpressured++;
+				continue;
+			}
+			// The engine's scheduler executes the batch on a region worker
+			// after the single-owner latch (tryBeginTick) succeeds — or
+			// re-homes it on merge (queue re-homing), never drops it silently
+			// while the region lives.
 			boolean enqueued = attachment.scheduler().enqueue(region, () ->
-					runChunkWork(oc));
+					runChunkWorkBatch(region, batch));
 			if (enqueued) {
 				scheduledJobs++;
 			}
 		}
 
-		if (scheduledJobs > 0) {
+		if (scheduledJobs > 0 || backpressured > 0) {
 			// Per-tick diagnostic (diagnostics.debug-logging): which region got
 			// how much work this pass. Normal operation stays quiet.
 			if (debugLogging()) {
-				info.accept("pass: dispatched " + scheduledJobs
-						+ " chunk-tick job(s) across " + worldName + " regions");
+				info.accept("pass: dispatched " + scheduledJobs + " chunk-tick batch(es)"
+						+ (backpressured > 0 ? " (backpressure skipped " + backpressured + ")" : "")
+						+ " across " + worldName + " regions");
 			}
 		}
 	}
@@ -205,13 +240,26 @@ public final class RegionTickInterceptor {
 		return current != null && current.config().debugLogging();
 	}
 
+	/** @return true when every chunk in the 3x3 neighborhood is loaded now (server thread; non-blocking probe). */
+	private boolean fabricfolia$neighborhoodLoaded(ServerLevel level, int chunkX, int chunkZ) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (level.getChunkSource().getChunkNow(chunkX + dx, chunkZ + dz) == null) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	/**
 	 * The work executed ON the region worker thread: the vanilla per-chunk
-	 * random tick, in the region's context, with ownership re-validation.
+	 * random tick for every chunk in one pass's batch, in the region's
+	 * context. The scheduler entered the region's context before draining the
+	 * queue, so the whole batch runs under one ownership acquisition.
 	 */
-	private void runChunkWork(OfferedChunk oc) {
-		Region region = oc.region;
-		if (region == null || region.isDead()) {
+	private void runChunkWorkBatch(Region region, List<OfferedChunk> batch) {
+		if (region.isDead()) {
 			return; // region died between schedule and execution: documented drop
 		}
 		// STRICT diagnostics: the following access is legal only from this
@@ -222,18 +270,33 @@ public final class RegionTickInterceptor {
 			engine.threadContext().assertRegionAccess("Chunk random-tick execution", region);
 		}
 
-		ServerLevel level = oc.level;
-		// The vanilla body: precipitation + random ticks for this chunk —
-		// exactly the code vanilla would have run inline on the server thread.
+		ServerLevel level = batch.get(0).level;
+		// The vanilla body: precipitation + random ticks per chunk — exactly
+		// the code vanilla would have run inline on the server thread.
 		int randomTickSpeed = level.getGameRules()
 				.get(net.minecraft.world.level.gamerules.GameRules.RANDOM_TICK_SPEED);
-		long count = executedChunkWork.incrementAndGet();
-		if (debugLogging() && (count == 1 || count % 100 == 0)) {
+		long count = executedChunkWork.addAndGet(batch.size());
+		if (debugLogging() && (count <= batch.size() || count % 2000 < batch.size())) {
 			info.accept("WORKER-EVIDENCE: " + count + " chunk random-tick execution(s) on '"
 					+ Thread.currentThread().getName() + "' (region " + region.world() + ":"
-					+ region.regionId() + ")");
+					+ region.regionId() + ", batch=" + batch.size() + ")");
 		}
-		level.tickChunk(oc.chunk, randomTickSpeed);
+		for (OfferedChunk oc : batch) {
+			// Execution-time edge check: the capture-time guard can go stale
+			// when the region's queue is backed up (the walking player's wake
+			// unloads edge chunks between capture and run). tickChunk queries
+			// edge-adjacent blocks, and from a worker that request parks on a
+			// synchronous chunk load the worker cannot pump — so such a chunk
+			// bounces to the server thread, the chunk system's owner, exactly
+			// where vanilla would have run it. The next pass re-offers loaded
+			// chunks; a bounced chunk is a vanilla-consistent delayed pass.
+			if (!fabricfolia$neighborhoodLoaded(level,
+					oc.chunk.getPos().x(), oc.chunk.getPos().z())) {
+				level.getServer().execute(() -> level.tickChunk(oc.chunk, randomTickSpeed));
+				continue;
+			}
+			level.tickChunk(oc.chunk, randomTickSpeed);
+		}
 	}
 
 	/** Builds the region tick body hook the engine's scheduler executes per tick. */

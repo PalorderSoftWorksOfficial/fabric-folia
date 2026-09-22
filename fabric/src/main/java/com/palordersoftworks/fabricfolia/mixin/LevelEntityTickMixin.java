@@ -59,7 +59,8 @@ public abstract class LevelEntityTickMixin {
 	private void fabricfolia$stageEntityTick(java.util.function.Consumer<?> consumer, Object entity) {
 		if (!(entity instanceof net.minecraft.server.level.ServerPlayer)
 				&& ThreadOwnership.current().kind() != ThreadContext.Kind.REGION
-				&& RegionStageHub.isStaging((Level) (Object) this, RegionStageHub.Slice.ENTITY)) {
+				&& RegionStageHub.isStaging((Level) (Object) this, RegionStageHub.Slice.ENTITY)
+				&& fabricfolia$neighborhoodLoaded((Entity) entity)) {
 			// Stage the vanilla body; the region worker executes it in
 			// REGION context via the hub's guarded runner.
 			RegionStageHub.stage((Level) (Object) this, RegionStageHub.Slice.ENTITY,
@@ -71,6 +72,35 @@ public abstract class LevelEntityTickMixin {
 		@SuppressWarnings("unchecked")
 		java.util.function.Consumer<Object> raw = (java.util.function.Consumer<Object>) consumer;
 		raw.accept(entity);
+	}
+
+	/**
+	 * An entity whose 3x3 chunk neighborhood is not fully loaded keeps the
+	 * vanilla inline path this phase. Its tick body can legitimately ask for
+	 * edge-adjacent chunk data (fluid interactions, collision iteration,
+	 * portal search); from a region worker such a request parks on a
+	 * SYNCHRONOUS chunk load that the worker cannot pump — observed live as a
+	 * region latched TICKING for the load's duration with every packet and
+	 * movement task for its chunks starved behind it (a walking player at the
+	 * loaded edge rubber-banded; workers' dumps showed Mob.tick waiting in
+	 * ServerChunkCache.getChunk().join()). Vanilla runs these bodies on the
+	 * server thread — the chunk system's owner — so edge entities stay there
+	 * until chunk access is region-safe. Runs on the server thread (staging
+	 * decision); getChunkNow is a non-blocking loaded-chunk probe.
+	 */
+	private boolean fabricfolia$neighborhoodLoaded(Entity entity) {
+		if (!(((Object) this) instanceof net.minecraft.server.level.ServerLevel level)) {
+			return true; // non-server levels are not regionized anyway
+		}
+		net.minecraft.world.level.ChunkPos center = entity.chunkPosition();
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (level.getChunkSource().getChunkNow(center.x() + dx, center.z() + dz) == null) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/**
