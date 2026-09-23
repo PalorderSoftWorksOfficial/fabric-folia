@@ -1,5 +1,5 @@
 Fabric-Folia
-
+[![Build Status](https://jenkins.palorderhosting.net/buildStatus/icon?job=fabric-folia%2Fmain)](https://jenkins.palorderhosting.net/job/fabric-folia/job/main/)
 Regionized multithreaded server execution for vanilla Minecraft under Fabric Loader.
 
 Fabric-Folia partitions the server's world into dynamically-sized, independently-ticking
@@ -27,7 +27,6 @@ fresh build on the project's dedicated build machine. Builds run the complete
 Gradle test suite and archive the resulting Fabric mod JAR.
 
 Build Status
-[![Build Status](https://jenkins.palorderhosting.net/job/fabric-folia/job/main/badge/icon?subject=fabric-folia)](https://jenkins.palorderhosting.net/job/fabric-folia/job/main/)
 Jenkins: https://jenkins.palorderhosting.net/
 
 The CI pipeline currently performs:
