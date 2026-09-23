@@ -20,7 +20,6 @@
     "PacketProcessorMixin",
     "PacketUtilsMixin",
     "PersistentEntitySectionManagerMixin",
-    "ReportTypeMixin",
     "ServerChunkCacheMixin",
     "ServerChunkCacheTickMixin",
     "ServerConnectionTickMixin",
