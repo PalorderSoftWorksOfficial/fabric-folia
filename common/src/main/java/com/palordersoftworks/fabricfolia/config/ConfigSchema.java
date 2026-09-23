@@ -49,6 +49,8 @@ public final class ConfigSchema {
 	public static final String KEY_WATCHDOG = "diagnostics.watchdog";
 	public static final String KEY_PLAYER_PATH = "gameplay.stage-player-path";
 	public static final String KEY_VERSION = "config-version";
+	public static final String KEY_SERVER_BRAND = "general.server-brand";
+	public static final String KEY_SERVER_BRAND_NAME = "general.server-brand-name";
 
 	private final Map<String, Option<?>> options = new LinkedHashMap<>();
 
@@ -142,7 +144,35 @@ public final class ConfigSchema {
 				"Restart required: no for false (live quiescence); re-enable may",
 				"  require a restart (see above)."
 		}));
-
+		add(opt(KEY_SERVER_BRAND, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Controls whether Fabric-Folia overrides the Minecraft server brand.",
+				"",
+				"What it does:",
+				"  When true, getServerModName() returns the configured server-brand-name.",
+				"  When false, Fabric-Folia does not modify the server brand and",
+				"  Minecraft's normal server brand is returned.",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Performance: no measurable impact.",
+				"Compatibility: disabling this restores vanilla server branding.",
+				"Restart required: no."
+		}));
+		add(opt(KEY_SERVER_BRAND_NAME, String.class, "fabricFolia", v -> {
+			if (v == null || v.isBlank()) {
+				throw new ConfigException("server-brand-name must not be empty");
+			}
+			if (v.length() > 64) {
+				throw new ConfigException("server-brand-name must be 64 characters or fewer");
+			}
+			return v;
+		}, new String[] {
+				"Name returned by MinecraftServer#getServerModName() when server-brand is enabled.",
+				"",
+				"Default: fabricFolia",
+				"Valid values: any non-empty string up to 64 characters.",
+				"Restart required: no."
+		}));
 		add(opt(KEY_GAMEPLAY, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"Regionized gameplay execution (mandates 15/21/27/37).",
 				"",

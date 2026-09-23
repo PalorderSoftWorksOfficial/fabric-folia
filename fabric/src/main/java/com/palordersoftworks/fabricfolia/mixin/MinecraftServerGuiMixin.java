@@ -10,6 +10,8 @@ import javax.swing.JFrame;
 import net.minecraft.server.gui.MinecraftServerGui;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Constant;
+import org.spongepowered.asm.mixin.injection.ModifyConstant;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
@@ -46,5 +48,21 @@ public abstract class MinecraftServerGuiMixin {
 	private static void fabricfolia$applyIconThenShow(JFrame frame, boolean visible) {
 		ServerGuiIcon.applyTo(frame);
 		frame.setVisible(visible);
+	}
+
+	@ModifyConstant(
+			method = "showFrameFor(Lnet/minecraft/server/dedicated/DedicatedServer;)Lnet/minecraft/server/gui/MinecraftServerGui;",
+			constant = @Constant(stringValue = "Minecraft server")
+	)
+	private static String fabricfolia$changeTitle(String original) {
+		return "Fabric Folia";
+	}
+
+	@ModifyConstant(
+			method = "showFrameFor(Lnet/minecraft/server/dedicated/DedicatedServer;)Lnet/minecraft/server/gui/MinecraftServerGui;",
+			constant = @Constant(stringValue = "Minecraft server - shutting down!")
+	)
+	private static String fabricfolia$changeShutdownTitle(String original) {
+		return "Fabric Folia - shutting down!";
 	}
 }

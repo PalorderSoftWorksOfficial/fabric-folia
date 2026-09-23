@@ -269,6 +269,14 @@ public final class FoliaConfig {
 		return values.get(key);
 	}
 
+	public boolean serverBrand() {
+		return (Boolean) values.get(ConfigSchema.KEY_SERVER_BRAND);
+	}
+
+	public String serverBrandName() {
+		return (String) values.get(ConfigSchema.KEY_SERVER_BRAND_NAME);
+	}
+
 	/** Resolves the {@code auto} sentinel for worker threads (also used by tests). */
 	public static final class WorkerThreads {
 		private WorkerThreads() {
