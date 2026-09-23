@@ -1,5 +1,8 @@
-Fabric-Folia
 [![Build Status](https://jenkins.palorderhosting.net/buildStatus/icon?job=fabric-folia%2Fmain)](https://jenkins.palorderhosting.net/job/fabric-folia/job/main/)
+
+
+Fabric-Folia
+
 Regionized multithreaded server execution for vanilla Minecraft under Fabric Loader.
 
 Fabric-Folia partitions the server's world into dynamically-sized, independently-ticking
