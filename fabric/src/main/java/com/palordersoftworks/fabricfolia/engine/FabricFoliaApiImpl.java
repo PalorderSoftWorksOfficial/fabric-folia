@@ -170,6 +170,13 @@ public final class FabricFoliaApiImpl implements FabricFoliaApi {
 			delegateFor(asEntity(entityHandle)).runDelayed(entityHandle, delay, task, retired);
 		}
 
+		@Override
+		public RegionScheduler.CancelHandle runAtFixedRate(Object entityHandle, int initialDelayTicks, int periodTicks,
+				Runnable task, Runnable retired) {
+			return delegateFor(asEntity(entityHandle))
+					.runAtFixedRate(entityHandle, initialDelayTicks, periodTicks, task, retired);
+		}
+
 		private Entity asEntity(Object handle) {
 			if (!(handle instanceof Entity entity)) {
 				throw new IllegalArgumentException(

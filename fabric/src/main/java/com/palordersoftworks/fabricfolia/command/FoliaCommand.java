@@ -18,8 +18,8 @@ import net.minecraft.network.chat.Component;
 import java.util.List;
 
 /**
- * The /folia command tree: /folia, /folia status, /folia regions,
- * /folia threads, /folia compat, /folia pin|unpin.
+ * The /folia command tree: /folia, /folia status, /folia shutdown,
+ * /folia regions, /folia threads, /folia compat, /folia pin|unpin.
  *
  * <p><strong>Command context policy (spec 22):</strong> these commands are
  * diagnostics, not gameplay mutation: they read scheduler/regionizer state and
@@ -48,10 +48,28 @@ public final class FoliaCommand {
 		root.executes(context -> {
 			context.getSource().sendSuccess(
 					() -> Component.literal(
-							"Fabric-Folia — regionized multithreaded execution. Use /folia status, /folia regions, /folia threads."),
+							"Fabric-Folia — regionized multithreaded execution. Use /folia status, /folia regions, /folia threads, /folia shutdown."),
 					false);
 			return 1;
 		});
+
+		root.then(Commands.literal("shutdown")
+				.requires(source -> source.permissions().hasPermission(
+						net.minecraft.server.permissions.Permissions.COMMANDS_OWNER))
+				.executes(context -> {
+					FabricFoliaEngine engine = FabricFoliaMod.engine();
+					if (engine == null) {
+						context.getSource().sendSuccess(() -> Component.literal(
+								"Fabric Folia is disabled (vanilla execution); use /stop."), false);
+						return 0;
+					}
+					context.getSource().sendSuccess(() -> Component.literal(
+							"Stopping the server: region work will drain and worlds will be saved (vanilla shutdown lifecycle)."), false);
+					// Vanilla's own graceful stop (the /stop path): the engine
+					// drains in SERVER_STOPPING, so one trigger covers both.
+					context.getSource().getServer().halt(false);
+					return 1;
+				}));
 
 		root.then(Commands.literal("status").executes(context -> {
 			FabricFoliaEngine engine = FabricFoliaMod.engine();
@@ -75,13 +93,17 @@ public final class FoliaCommand {
 			} else {
 				randomTickLine = "enabled (per-chunk random ticks on region workers)";
 			}
+			String playerPathLine = FabricFoliaMod.playerPathStaging()
+					? "staged (connection ticks on the player's owning region)"
+					: "disabled (vanilla server-thread execution)";
 			context.getSource().sendSuccess(() -> Component.literal(
 					"Fabric Folia status:\n"
 							+ "  Engine: ACTIVE\n"
 							+ "  Regionized random ticks: " + randomTickLine + "\n"
 							+ "  Entity ownership tracking: active (add/remove/move hooks; /folia entities)\n"
-							+ "  On region workers: entity ticking, block entities, scheduled-tick drains, random ticks\n"
-							+ "  Still on server thread: worldgen, spawning, player ticking\n"
+						+ "  On region workers: entity ticking (players included), block entities, scheduled-tick drains, random ticks\n"
+						+ "  Player path: " + playerPathLine + "\n"
+						+ "  Still on server thread: worldgen, spawning\n"
 							+ "  Worker threads: " + engine.primaryWorkerCount() + "\n"
 							+ "  Thread-check mode: " + config.threadCheckMode() + "\n"
 							+ "  Region section size: " + config.regionSectionSize() + " (bookkeeping cell, not region shape)\n"
@@ -172,6 +194,20 @@ public final class FoliaCommand {
 				text.append("  ").append(line).append("\n");
 			}
 			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+			return 1;
+		}));
+
+		root.then(Commands.literal("watchdog").executes(context -> {
+			FabricFoliaEngine engine = FabricFoliaMod.engine();
+			if (engine == null) {
+				context.getSource().sendSuccess(() -> Component.literal(
+						"Fabric Folia is disabled; no watchdog exists."), false);
+				return 1;
+			}
+			context.getSource().sendSuccess(() -> Component.literal(
+					"Region stall watchdog: active (config diagnostics.watchdog)\n"
+							+ "  Scans every 10s for regions TICKING far past their own next-tick deadline;\n"
+						+ "  one stalled region never masks another (no single main thread exists)."), false);
 			return 1;
 		}));
 

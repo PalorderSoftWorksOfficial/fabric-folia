@@ -34,6 +34,11 @@ import com.palordersoftworks.fabricfolia.api.annotations.AnyThread;
  * "owns" the current execution context right now? It is exposed publicly so other
  * mods can assert their own thread-safety assumptions instead of guessing.</p>
  *
+ * <p><strong>Context kinds:</strong> REGION, GLOBAL, NETWORK, IO, ASYNC, and
+ * UNKNOWN. ASYNC (Folia's async context) owns no region or global state —
+ * async code reaches world/server state only through the scheduler handoffs
+ * (ASYNC→REGION, ASYNC→GLOBAL).</p>
+ *
  * <p><strong>Threading contract:</strong> all methods are {@code @AnyThread} and
  * non-blocking. They read thread-local ownership state and compare it to targets
  * passed in; they never mutate gameplay state.</p>
@@ -52,6 +57,8 @@ public interface ThreadContext {
 		NETWORK,
 		/** Executing chunk/entity save-load work on an IO worker. */
 		IO,
+		/** Executing on the async scheduler's dedicated pool (Folia's async context). */
+		ASYNC,
 		/** Any other thread: unknown mod executor, plugin pool, etc. */
 		UNKNOWN
 	}

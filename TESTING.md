@@ -23,8 +23,8 @@ classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
   `loadFrameIcon` follows the environment (null headless, real image on a
   desktop JVM); **`applyTo` on a real `JFrame`** sets the icon and fully
   decodes it (the exact code the server window runs); null-frame safety.
-  Plus the live protocol: `compat/gui_icon_check.py` (or
-  `./gradlew :fabric:verifyServerGui`) boots the assembled baseline
+  Plus the live protocol: `./gradlew :fabric:verifyServerGui` boots the
+  assembled baseline
   production server **without `nogui`** and asserts the "Server GUI icon set
   from logo.png (512x512)" line, zero GUI-scope errors, and clean shutdown.
 
@@ -156,7 +156,7 @@ state** and that interception **ceases** on unpin — is the next section.
 
 ## Multi-region live proof and the per-thread random-state fix
 
-The compat protocol (`compat/validate.py`) pins TWO regions 3000 chunks apart
+The compat protocol pins TWO regions 3000 chunks apart
 (chunks 12000,0 and 15000,0), asserts both form and both mutate on worker
 threads over one shared 75s window, and greps the full log for the
 ThreadingDetector signature as part of `diagnostics-clean` — a
@@ -165,15 +165,14 @@ This is the configuration under which the shared-`Level.random` defect first
 surfaced; the run is therefore both the regression gate and the evidence.
 
 Last baseline run after the `WorkerRandoms` fix:
-**PASS 13/13** (`compat/results/baseline.json`) — multi-region PASS, both
+**PASS 13/13** (recorded baseline run) — multi-region PASS, both
 regions' grass dying under worker attribution (8 distinct workers),
 **0 offending log lines**, graceful shutdown.
 
 ## Entity-ownership live proof (mandate §15 hooks on a real server)
 
-`python compat/entity_live_check.py` boots the dev server and drives the full
-entity lifecycle over RCON. Last run (fresh world, recorded in
-`compat/results/entity-live.json`): **PASS 10/10** —
+The entity-ownership live protocol boots the dev server and drives the full
+entity lifecycle over RCON. Last run (fresh world): **PASS 10/10** —
 
 - add funnel: 5 tagged summons → tracked rises by exactly 5 (with
   `doMobSpawning false` the delta is exact; every vanilla add path funnels
@@ -260,13 +259,12 @@ unforced read reported 0, re-pinned read reported the true 17).
 
 ## Compatibility validation (production instances, measured)
 
-`compat/validate.py` assembles real production server instances (Fabric
+The compatibility harness assembles real production server instances (Fabric
 launcher + mod jars from Modrinth), boots them cold, and drives the same
 protocol the dev-server proof uses: scenario build (verified present),
 baseline read, worker-tick mutation, worker attribution, dispatch cessation,
-diagnostics cleanliness, graceful shutdown — 11 phases. Results live in
-`compat/results/*.json`; the matrix and per-mod pages live in
-`COMPATIBILITY.md` and `docs/compatibility/`.
+diagnostics cleanliness, graceful shutdown — 11 phases. The matrix and
+per-mod pages live in `COMPATIBILITY.md` and `docs/compatibility/`.
 
 All 11 combos (baseline, 6 single mods, lithium+c2me, full stack, 2
 intercept-off isolation runs) were re-measured 2026-09-15 with
@@ -277,8 +275,8 @@ all non-C2ME combos PASS (11/11); the three C2ME-containing combos PASS
 (8/8) **with the random-tick slice auto-suppressed** — the harness asserts
 the suppression warning in both log and status and exercises the vanilla
 server-thread tick path instead. The combo definitions are permanent
-regression tests: re-run any of them with
-`python compat/validate.py --combo <name>`.
+regression tests: re-run any of them through the harness
+(see COMPATIBILITY.md).
 
 The harness caught real engine defects that are now regression-tested in
 `FoliaConfigTest`: the non-UTF-8 config error message (encoding
@@ -310,9 +308,9 @@ Lithium compiling into `tickChunk`): docs/compatibility/c2me.md.
 
 - **No automated Mixin tests** — the Mixins' behavior is verified by the
   live-server evidence above (mixin apply, vanilla fall-through when
-  disabled, worker-thread execution when enabled, and the entity-lifecycle
-  protocol in `compat/entity_live_check.py`), by the GUI-icon protocol in
-  `compat/gui_icon_check.py` (which caught a real invalid-descriptor mixin
+  disabled, worker-thread execution when enabled, and the recorded
+  entity-lifecycle protocol), by the GUI-icon protocol
+  (which caught a real invalid-descriptor mixin
   apply failure that compile+package checks cannot see), and by unit tests
   of the machinery they call (the entity registry protocol is storm-tested
   in `common`), not yet by automated gametests; automating the gametest

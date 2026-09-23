@@ -65,4 +65,26 @@ public interface EntityScheduler {
 	 * @param retired      fallback run if the entity no longer exists, or null
 	 */
 	void runDelayed(Object entityHandle, int delay, Runnable task, Runnable retired);
+
+	/**
+	 * Executes the task on the entity's owning region's context roughly every
+	 * {@code periodTicks} ticks of that region's counter until cancelled or
+	 * the entity retires. Each firing re-resolves the owning region (the task
+	 * follows the entity through migrations); an entity that goes away runs
+	 * {@code retired} once and stops.
+	 *
+	 * <p><strong>Thread contract:</strong> callable from any thread; runs on
+	 * the owner's context; a region merge keeps the task (the deadline
+	 * re-homes with the queue); cancellation stops future firings; retired
+	 * callback contract as in {@link #run}.</p>
+	 *
+	 * @param entityHandle opaque entity handle
+	 * @param initialDelayTicks delay before first execution, in owner ticks
+	 * @param periodTicks  period between executions, in owner ticks
+	 * @param task         the work to run
+	 * @param retired      fallback run if the entity no longer exists, or null
+	 * @return a handle that cancels future executions; safe from any thread
+	 */
+	RegionScheduler.CancelHandle runAtFixedRate(Object entityHandle, int initialDelayTicks, int periodTicks,
+			Runnable task, Runnable retired);
 }

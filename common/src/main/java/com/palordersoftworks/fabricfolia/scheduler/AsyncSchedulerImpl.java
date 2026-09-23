@@ -6,6 +6,7 @@
 package com.palordersoftworks.fabricfolia.scheduler;
 
 import com.palordersoftworks.fabricfolia.api.AsyncScheduler;
+import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 
 import java.util.Objects;
@@ -136,7 +137,7 @@ public final class AsyncSchedulerImpl implements AsyncScheduler, AutoCloseable {
 			workers.execute(() -> {
 				activeWorkers.incrementAndGet();
 				ThreadOwnership.Context token = ThreadOwnership.enterSide(
-						com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.IO);
+						com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.ASYNC);
 				try {
 					task.run();
 				} catch (Throwable t) {
@@ -165,6 +166,35 @@ public final class AsyncSchedulerImpl implements AsyncScheduler, AutoCloseable {
 		} catch (RejectedExecutionException e) {
 			diagnostics.accept(e.getMessage());
 		}
+	}
+
+	/**
+	 * ASYNC → REGION handoff (mandate §6): schedules world-mutating work onto
+	 * the region owning {@code (chunkX, chunkZ)} at call time. The task runs
+	 * in the owning region's context on a later tick — never on an async
+	 * thread. Safe from any thread.
+	 *
+	 * @return true when the task was enqueued into a live region; false when
+	 *         no region owns the position (caller decides policy)
+	 */
+	public boolean runOnRegion(RegionScheduler engine, int chunkX, int chunkZ, Runnable task) {
+		java.util.Objects.requireNonNull(engine, "engine");
+		java.util.Objects.requireNonNull(task, "task");
+		Region region = engine.regionizer().ownerOfChunk(chunkX, chunkZ);
+		if (region == null) {
+			return false;
+		}
+		return engine.enqueue(region, task);
+	}
+
+	/**
+	 * ASYNC → GLOBAL handoff: schedules server-wide work onto the global
+	 * execution context, where global state may be mutated. Safe from any
+	 * thread.
+	 */
+	public void runOnGlobal(GlobalSchedulerImpl global, Runnable task) {
+		java.util.Objects.requireNonNull(global, "global");
+		global.run(task);
 	}
 
 	/** @return configured worker count (diagnostics). */

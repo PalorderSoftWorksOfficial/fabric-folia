@@ -55,6 +55,11 @@ class WorkerRandomsTest {
 		public String stateName() {
 			return "READY";
 		}
+
+		@Override
+		public int[] sectionCenter() {
+			return new int[] {0, 0};
+		}
 	};
 
 	@AfterEach

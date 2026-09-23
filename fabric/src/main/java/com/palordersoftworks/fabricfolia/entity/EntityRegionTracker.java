@@ -22,25 +22,26 @@ import java.util.function.Consumer;
  * {@link RegionEntityRegistry} migration protocol — the first live consumer
  * of the regionized entity ownership system (mandate §15).
  *
- * <p><strong>Thread discipline (load-bearing):</strong> every public entry
- * point here runs on the SERVER THREAD — vanilla calls {@code addEntity} and
- * {@code setPos} from its tick, chunk-load, and worldgen paths on that one
- * thread, and the mixin hooks forward synchronously. That single-writer
- * discipline makes the resolve→register/migrate sequence race-free against
- * the regionizer: {@link WorldRegionizer#ownerOfChunk} takes the structure
- * lock itself, and the registry's protocol is atomic per entity. If entity
- * ticks ever move OFF the server thread (the next integration phase), these
- * entry points must be re-plumbed onto region contexts — the registry
- * protocol stays valid, the callers change. Documented, not pretended.</p>
+ * <p><strong>Thread discipline (load-bearing):</strong> entry points run on
+ * whichever thread drives vanilla's entity lifecycle. With regionized
+ * gameplay active that is BOTH the server thread (spawning, chunk-load adds,
+ * worldgen) AND region workers (staged entity tick bodies move positions on
+ * the owning region's thread). The protocol is therefore built any-thread:
+ * {@link WorldRegionizer#ownerOfChunk} takes the structure lock itself, and
+ * the registry's register/migrate/unregister are stripe-locked per handle —
+ * a region worker migrating its entity never races the server thread
+ * spawning into the same region. What callers must NOT do is touch another
+ * region's per-region entity set directly ({@link RegionLocalData} enforces
+ * the context check); the registry's structural path is for transition code
+ * under the regionizer lock only.</p>
  *
  * <p><strong>What is wired (honest scope):</strong> entity add (all vanilla
  * spawn paths via the {@code ServerLevel.addEntity} funnel), removal (every
- * {@code setRemoved} reason), and server-thread movement re-homing via the
- * registry's atomic {@code migrate}. Entity TICKING stays on the server
- * thread this phase; the registry's per-region sets and the entity
- * scheduler's follow semantics are live for scheduling and diagnostics now,
- * so when ticking moves onto region workers the ownership substrate is
- * already proven.</p>
+ * {@code setRemoved} reason), and movement re-homing via the registry's
+ * atomic {@code migrate} — from the server thread and from region workers
+ * (staged entity bodies call {@code setPosRaw} on the owning region's
+ * thread). The registry's per-region sets and the entity scheduler's
+ * follow-at-execution-time semantics are live.</p>
  *
  * <p><strong>The chunk cache:</strong> region ownership can only change when
  * an entity crosses a CHUNK boundary — within-chunk movement cannot change
@@ -104,7 +105,8 @@ public final class EntityRegionTracker {
 	}
 
 	/**
-	 * Entity entering the world (any vanilla add path). Server thread.
+	 * Entity entering the world (any vanilla add path). Server thread
+	 * (spawning/worldgen) or the owning region's worker (staged bodies).
 	 *
 	 * @return true if the entity was newly registered with an owning region
 	 * (false when trackable-but-unowned: the mixin still watches it, and
@@ -136,10 +138,11 @@ public final class EntityRegionTracker {
 	}
 
 	/**
-	 * Entity crossed a chunk boundary. Server thread. Resolves the new
-	 * owning region and runs the registry's atomic migrate when it changed —
-	 * the §15 protocol: remove-from-old, add-to-new, repoint, one critical
-	 * section.
+ * Entity crossed a chunk boundary. Server thread or the ticking region's
+	 * worker. Resolves the new owning region and runs the registry's atomic
+	 * migrate when it changed — the §15 protocol: remove-from-old,
+	 * add-to-new, repoint, one stripe-locked critical section, safe from any
+	 * thread.
 	 */
 	public void onEntityMoved(Entity entity) {
 		if (!isTracked(entity)) {

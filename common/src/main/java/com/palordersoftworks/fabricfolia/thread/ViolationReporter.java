@@ -82,6 +82,52 @@ public final class ViolationReporter {
 		sink.accept(message, null);
 	}
 
+	/**
+	 * Renders and reports a violation through this reporter's mode and sink.
+	 * The static entry point for check facades that hold no reporter of their
+	 * own (RegionChecks): the engine installs this reporter as the process-wide
+	 * policy at bootstrap. In STRICT mode this THROWS after rendering; in WARN
+	 * it sinks and returns; OFF is a no-op.
+	 */
+	public void report(String operation, ThreadOwnership.Context current, RegionInfo target) {
+		if (mode == ValidationMode.OFF) {
+			return;
+		}
+		String message = render(operation, current, target);
+		if (mode == ValidationMode.STRICT) {
+			throw new ThreadContextViolationException(message);
+		}
+		sink.accept(message, null);
+	}
+
+	/** @return the currently installed process-wide reporter, or null. */
+	public static ViolationReporter processReporter() {
+		return PROCESS_REPORTER;
+	}
+
+	private static volatile ViolationReporter PROCESS_REPORTER;
+
+	/**
+	 * Installs the process-wide reporter (engine bootstrap, once). Check
+	 * facades without their own reporter route through it so STRICT/WARN/OFF
+	 * is one configured policy for the whole engine.
+	 */
+	public static void installProcessReporter(ViolationReporter reporter) {
+		PROCESS_REPORTER = reporter;
+	}
+
+	/**
+	 * Static reporting entry for check facades: renders and reports through
+	 * the installed process-wide reporter. A no-op when none is installed
+	 * (unit-test contexts without engine wiring).
+	 */
+	public static void renderAndReport(String operation, ThreadOwnership.Context current, RegionInfo target) {
+		ViolationReporter reporter = PROCESS_REPORTER;
+		if (reporter != null) {
+			reporter.report(operation, current, target);
+		}
+	}
+
 	/** Renders the full diagnostic (spec 8 format). */
 	public static String render(String operation, ThreadOwnership.Context current, RegionInfo target) {
 		String currentDesc;
@@ -93,6 +139,7 @@ public final class ViolationReporter {
 				case GLOBAL -> "Global context";
 				case NETWORK -> "Network thread";
 				case IO -> "IO thread";
+				case ASYNC -> "Async scheduler thread";
 				default -> "Unknown context";
 			};
 		}

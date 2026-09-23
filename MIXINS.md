@@ -5,7 +5,7 @@ that gates any future one. Fabric Folia is deliberately mixin-minimal: the
 intercept seam is a single call site, and everything else is done through
 Fabric API events (lifecycle, commands).
 
-## Current inventory (13 mixins)
+## Current inventory (18 mixins)
 
 ### LevelMixin
 
@@ -164,3 +164,34 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 | Why this seam | `ServerLevel.unload` is vanilla's definitive per-chunk departure point: called exactly once per holder from `ChunkMap`'s unload lambda, after save, on the server thread (verified against the 26.2 jar bytecode) |
 | Ordering safety | TAIL inject: vanilla has already unregistered the chunk's tick containers and block entities — region ownership release is the last step |
 | Effect when disarmed / engine down | no-op; sections stay owned forever (the defect this hook fixed: merges/splits were unreachable live) |
+
+### ServerConnectionTickMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerConnectionTickMixin` |
+| Target | `ServerConnectionListener.tick()` — `@Redirect` of the per-connection `Connection.tick()` call |
+| Transformation | when player-path staging is on, hands the per-connection body (packet drain, `SGPLI.tick` → `doTick` physics, outbound flush) to `RegionPlayerRouting.stageConnectionTick`, which stages it into the hub's PLAYER slice; otherwise forwards to the real method |
+| Why this seam | the physics chain is driven from the connection tick (`doTick` → `Player.tick`), not the entity pass — staging the whole connection body keeps packets, connection state, and physics on the ONE region owning the player; vanilla still decides WHICH connections tick |
+| Ordering safety | PLAYER slice is declared last in `Slice`: flush runs entity bodies before connection bodies per region, preserving vanilla's intra-tick pass order (entity pass, then `tickConnection`) |
+| Effect when disarmed / gate off / fallback | vanilla's server-thread connection tick, byte-for-byte (fallbacks are whole: the packet route consults the same gate) |
+
+### PacketProcessorMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `PacketProcessorMixin` |
+| Target | `PacketProcessor.scheduleIfPossible(PacketListener, Packet)` HEAD (`@Inject`, cancellable) |
+| Transformation | when a re-homing packet handler's listener belongs to a player whose chunks a region owns, routes the handler to that region's queue (in REGION context, with vanilla's error triage preserved in `RegionPlayerRouting.safelyHandle`) and cancels the vanilla server-thread queue add; otherwise falls through untouched |
+| Why this seam | `scheduleIfPossible` is the single funnel of vanilla's `ensureRunningOnSameThread` re-home protocol — capturing it routes handlers to the same owner as the staged connection tick, preserving per-player ordering |
+| Effect when disarmed / fallback | vanilla's shared server-thread packet queue |
+
+### PacketUtilsMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `PacketUtilsMixin` |
+| Target | `PacketUtils.ensureRunningOnSameThread(Packet, PacketListener, PacketProcessor)` — `@Redirect` of the `isSameThread()` call site |
+| Transformation | returns true when the handler is already executing in the REGION context of the region owning the listener's player (drained from that region's queue); otherwise forwards to the real `isSameThread` — server-thread, event-loop, and unowned behavior unchanged |
+| Why this seam | without it, handlers drained on their owning region would re-throw `RunningOnDifferentThreadException` and ping-pong back to the server thread, defeating ownership; the covered overload is the one the `ServerLevel` convenience overload delegates to, so every game handler is handled |
+| Effect when disarmed / gate off | vanilla's exact thread comparison everywhere |

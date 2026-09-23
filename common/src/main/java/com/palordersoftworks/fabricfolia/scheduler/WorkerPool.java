@@ -56,15 +56,38 @@ public final class WorkerPool {
 	private final java.util.ArrayDeque<Task> handoff = new java.util.ArrayDeque<>();
 	private final AtomicBoolean running = new AtomicBoolean(true);
 	private final CountDownLatch terminated;
+	/** Per-worker keepalive: index → nanoTime when that worker last took a task. */
+	private final long[] lastTaskStartNanos;
 
 	public WorkerPool(int threadCount, String namePrefix) {
 		this.terminated = new CountDownLatch(threadCount);
+		this.lastTaskStartNanos = new long[threadCount];
 		for (int i = 0; i < threadCount; i++) {
-			Thread worker = new Thread(this::workerLoop, namePrefix + "-" + (i + 1));
+			final int index = i;
+			Thread worker = new Thread(() -> workerLoop(index), namePrefix + "-" + (i + 1));
 			worker.setDaemon(false);
 			workers.add(worker);
 			worker.start();
 		}
+	}
+
+	/**
+	 * @return a snapshot of per-worker keepalive timestamps (nanoTime of each
+	 * worker's most recent task start). Diagnostics/watchdog data: a worker
+	 * far behind now is either idle (queue empty) or stuck (task running
+	 * long) — the watchdog distinguishes via queue depth.
+	 */
+	public long[] keepaliveSnapshot() {
+		long[] snapshot = new long[lastTaskStartNanos.length];
+		for (int i = 0; i < snapshot.length; i++) {
+			snapshot[i] = lastTaskStartNanos[i];
+		}
+		return snapshot;
+	}
+
+	/** @return the worker count (diagnostics). */
+	public int workerCount() {
+		return lastTaskStartNanos.length;
 	}
 
 	/**
@@ -120,7 +143,7 @@ public final class WorkerPool {
 		});
 	}
 
-	private void workerLoop() {
+	private void workerLoop(int workerIndex) {
 		ThreadOwnership.clear();
 		try {
 			while (running.get()) {
@@ -128,6 +151,7 @@ public final class WorkerPool {
 				if (task == null) {
 					continue;
 				}
+				lastTaskStartNanos[workerIndex] = System.nanoTime();
 				try {
 					task.run();
 				} catch (Throwable t) {

@@ -152,14 +152,10 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 
 	/**
 	 * Drains and runs ALL pending tasks immediately in the global context,
-	 * ignoring delays. Quiescence path only (spec 16): used at shutdown after
-	 * the tick cadence has stopped, where "drop everything" is worse than
-	 * "finish everything once".
-	 *
-	 * @deprecated superseded by {@link #tick()}; retained for the quiescence
-	 *             drain until the disable state machine (spec 16) lands.
+	 * ignoring delays. Quiescence path (spec 16): called once by the engine at
+	 * shutdown after the tick cadence has stopped, where "drop everything" is
+	 * worse than "finish everything once".
 	 */
-	@Deprecated
 	public void dispatchPending() {
 		List<Runnable> pending;
 		lock.lock();
@@ -206,22 +202,8 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 		}
 	}
 
-	/**
-	 * Mutable view over a {@link CancelHandle}: the API type exposes only
-	 * {@code cancel()}, so the repeating-task machinery needs this adapter to
-	 * read back the cancelled flag. Single-purpose, created per schedule.
-	 */
-	private static final class CancelHandleView implements
-			com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandle {
-		private volatile boolean cancelled;
-
-		boolean isCancelled() {
-			return cancelled;
-		}
-
-		@Override
-		public void cancel() {
-			cancelled = true;
-		}
+	/** Repeating tasks read the cancelled flag through the shared API view. */
+	private static final class CancelHandleView
+			extends com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandleView {
 	}
 }

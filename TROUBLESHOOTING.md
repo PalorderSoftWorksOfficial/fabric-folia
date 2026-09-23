@@ -31,7 +31,9 @@ line names the exact issue — the two most common are:
 
 **Also check:** the `Unknown key` warning line, which lists keys Fabric Folia
 kept but did not recognize (kept, flagged, never dropped — usually a typo or
-a very old file).
+a very old file). If the same key appears twice in the file, Fabric Folia
+collapses it on load: the **last** value wins and the duplicate is removed on
+the next save (first occurrence's position and comments are kept).
 
 ## "Failed to load configuration - Fabric Folia is DISABLED. Problem: ..."
 
@@ -171,4 +173,4 @@ count) on demand; nothing prints per-region information continuously.
 | C2ME interaction detail | `docs/compatibility/c2me.md` |
 | Mixin register and policy | `MIXINS.md` |
 | What is tested and how | `TESTING.md` |
-| Reproducing a compatibility run | `python compat/validate.py --combo <name>` |
+| Reproducing a compatibility run | see COMPATIBILITY.md (measured matrix and protocol) |

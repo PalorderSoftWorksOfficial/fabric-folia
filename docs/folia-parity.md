@@ -64,7 +64,7 @@ named test. Update it in the same change that moves a status.
 | Subsystem | Status | Evidence / notes |
 |---|---|---|
 | Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
-| Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (`compat/entity_live_check.py`, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
+| Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (recorded protocol, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
 | Teleportation (multi-phase, region-safe) | PARTIAL | `RegionTransitions.dispatch` + `EntityTeleportMixin`: worker-context teleports resolving to another region/world are routed to the destination context; same-region teleports stay inline vanilla |
 | Player login placement | NOT_IMPLEMENTED | |
 | Player respawn | NOT_IMPLEMENTED | |
@@ -99,6 +99,7 @@ named test. Update it in the same change that moves a status.
 | Multi-world support (shared pool, per-world regionizers) | TESTED | RegionScheduler shared-pool constructor; engine attaches all dimensions |
 | Optimization-mod compatibility (Lithium/C2ME/FerriteCore/Krypton/VMP/ScalableLux) | VALIDATED | 11 measured combos, all PASS; C2ME interaction root-caused with auto-suppression (COMPATIBILITY.md) |
 | Legacy Fabric-mod handling | PARTIAL | declaration scan + diagnostics + `LegacyDispatchPolicy` (per-mod destination declarations from mod metadata, configurable default, network/region direct-run gate; tested); entrypoint delivery of the public API implemented — automatic translation of legacy patterns still open |
+| Player path (connection tick + packets on the owning region) | VALIDATED (live, MC 26.2 + protocol bot) | `ServerConnectionTickMixin` stages the per-connection body (packet drain, `SGPLI.tick` → `doTick` physics, flush) into the hub's PLAYER slice — flushed last, preserving vanilla's entity-pass-then-connection intra-tick order per region; `PacketProcessorMixin` routes `ensureRunningOnSameThread` re-homes to the owning region's queue; `PacketUtilsMixin` makes the same-thread check pass on the owning region (the covered overload is the one the `ServerLevel` overload delegates to); `ServerPlayerTickMixin` bounces the two verified server-thread couplings in `ServerPlayer.tick` (`ServerChunkCache.move`, `ServerPlayerGameMode.tick`) to the server thread; event-loop packet drains hop via `NetworkDispatch.runForConnection` to the player's region (global fallback for handshake listeners). Fallbacks are whole (same gate everywhere): edge players, memory connections, disconnecting connections, unowned chunks stay fully server-thread. Gated by `gameplay.stage-player-path` |
 | Shutdown/quiescence | TESTED | drain-and-drop close protocol; graceful-shutdown phase in every compat combo |
 | Stress coverage (mandate §45) | PARTIAL | regionizer concurrency storm, worker-pool storms; no entity/teleport/redstone stress (nothing to stress yet) |
 
@@ -116,9 +117,12 @@ carry a machine-checked NETWORK context, and the global-state domain
 classification is enforced rather than documented. The failure policy and
 legacy dispatch policy are real, wired, and tested.
 
-What does **not** exist yet is Folia's gameplay integration layer: entity
-migration, teleport/login/respawn/dimension transfer, chunk-lifecycle
-ownership, block/fluid/redstone tick state per region, the network dispatch
-boundary, and the per-region tick pipeline beyond random ticks. Those are
-the mandate's remaining bulk, and this checklist will say so until each
-survives tests at its claimed strength.
+What does **not** exist yet is Folia's full gameplay integration layer:
+entity migration tooling beyond the tracker's live hooks, teleport/login/
+respawn/dimension transfer as first-class regionized flows, chunk-lifecycle
+ownership beyond the unload hook, and per-region tick state beyond the
+staged slices. The player path now stages (connection tick, packets,
+physics on the owning region, gated by `gameplay.stage-player-path`),
+which was the last major tick surface on the server thread. Those
+remaining integration flows are the mandate's remaining bulk, and this
+checklist will say so until each survives tests at its claimed strength.

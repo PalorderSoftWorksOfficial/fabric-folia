@@ -78,6 +78,15 @@ public final class CommentedYaml {
 				throw new ConfigException("Config root must be a YAML mapping, found: " + single.getTag());
 			}
 			validateSupported(map, 0);
+			// The low-level Composer does NOT enforce the loader's duplicate-key
+			// policy (setAllowDuplicateKeys is a Loader-layer setting), so a file
+			// with the same key twice parses into two sibling tuples. Everything
+			// downstream reads the FIRST occurrence, so later values were
+			// silently dead — a live server once ran on the wrong master switch
+			// because of exactly this. Collapse here: keep the first tuple's
+			// position and comments, take the LAST value (standard YAML load
+			// semantics), recursively for nested mappings.
+			collapseDuplicates(map);
 			return new CommentedYaml(map);
 		} catch (ConfigException e) {
 			throw e;
@@ -160,6 +169,63 @@ public final class CommentedYaml {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Collapses same-key sibling tuples throughout the mapping tree: the
+	 * first tuple wins for position, comments, and nested-merge target; the
+	 * LAST tuple's value wins for scalars (standard YAML load semantics).
+	 * Runs after parse, before any read or save, so every consumer sees one
+	 * key and the duplicate never round-trips through a save.
+	 */
+	private static void collapseDuplicates(MappingNode map) {
+		java.util.Map<String, Integer> firstIndexByKey = new java.util.HashMap<>();
+		List<NodeTuple> tuples = map.getValue();
+		List<NodeTuple> result = new ArrayList<>(tuples.size());
+		for (NodeTuple tuple : tuples) {
+			if (!(tuple.getKeyNode() instanceof ScalarNode key)) {
+				result.add(tuple);
+				continue;
+			}
+			String name = key.getValue();
+			Integer existing = firstIndexByKey.get(name);
+			if (existing == null) {
+				firstIndexByKey.put(name, result.size());
+				if (tuple.getValueNode() instanceof MappingNode nested) {
+					collapseDuplicates(nested);
+				}
+				result.add(tuple);
+				continue;
+			}
+			NodeTuple kept = result.get(existing);
+			Node value = tuple.getValueNode();
+			if (value instanceof MappingNode nested
+					&& kept.getValueNode() instanceof MappingNode keptNested) {
+				collapseDuplicates(nested);
+				for (NodeTuple entry : nested.getValue()) {
+					String entryKey = keyName(entry);
+					if (entryKey != null && child(keptNested, entryKey) == null) {
+						keptNested.getValue().add(entry);
+					}
+				}
+				// A bare operator key above a documented repair key would lose
+				// the docs if we kept the first key node; prefer commented.
+				if (kept.getKeyNode().getBlockComments().isEmpty()
+						&& !tuple.getKeyNode().getBlockComments().isEmpty()) {
+					result.set(existing, new NodeTuple(tuple.getKeyNode(), keptNested));
+				}
+			} else {
+				// Later tuple wholesale: its key node carries its comments and
+				// its value is what YAML load semantics would deliver.
+				result.set(existing, new NodeTuple(tuple.getKeyNode(), value));
+			}
+		}
+		tuples.clear();
+		tuples.addAll(result);
+	}
+
+	private static String keyName(NodeTuple tuple) {
+		return tuple.getKeyNode() instanceof ScalarNode scalar ? scalar.getValue() : null;
 	}
 
 	private static Object scalarValue(ScalarNode scalar) {

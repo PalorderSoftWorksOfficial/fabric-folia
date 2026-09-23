@@ -41,6 +41,7 @@ public final class RegionMetrics {
 		SCHEDULED_TICKS_EXECUTED,
 		ENTITY_TICKS_EXECUTED,
 		BLOCK_ENTITY_TICKS_EXECUTED,
+		PLAYER_CONNECTION_TICKS,
 		CHUNK_REGISTRATIONS,
 		CHUNK_UNREGISTRATIONS,
 		GLOBAL_TASKS_EXECUTED,
@@ -59,6 +60,14 @@ public final class RegionMetrics {
 	/** Deepest queue depth observed between polls (peak watermark). */
 	private final AtomicLong peakQueueDepth = new AtomicLong();
 	private final long createdNanos = System.nanoTime();
+
+	/**
+	 * @return a metrics instance wired to nothing — used by schedulers that
+	 * run outside the engine (tests) until real metrics are installed.
+	 */
+	public static RegionMetrics detached() {
+		return new RegionMetrics(1);
+	}
 
 	public RegionMetrics(int workerCount) {
 		for (Counter c : Counter.values()) {
@@ -119,7 +128,8 @@ public final class RegionMetrics {
 				+ " aborts=" + value(Counter.REGION_ABORTS));
 		lines.add("Work: entityTicks=" + value(Counter.ENTITY_TICKS_EXECUTED)
 				+ " blockEntityTicks=" + value(Counter.BLOCK_ENTITY_TICKS_EXECUTED)
-				+ " scheduledTicks=" + value(Counter.SCHEDULED_TICKS_EXECUTED));
+				+ " scheduledTicks=" + value(Counter.SCHEDULED_TICKS_EXECUTED)
+				+ " playerConnectionTicks=" + value(Counter.PLAYER_CONNECTION_TICKS));
 		lines.add("Cross-region: tasks=" + value(Counter.CROSS_REGION_TASKS)
 				+ " migrations=" + value(Counter.ENTITY_MIGRATIONS));
 		lines.add("Chunks: registered=" + value(Counter.CHUNK_REGISTRATIONS)

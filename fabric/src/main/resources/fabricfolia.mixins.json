@@ -8,6 +8,7 @@
     "ServerChunkCacheTickMixin",
     "LevelMixin",
     "LevelEntityTickMixin",
+    "ServerPlayerTickMixin",
     "LevelBlockEntityTickMixin",
     "LevelScheduleTickMixin",
     "PersistentEntitySectionManagerMixin",
@@ -17,9 +18,13 @@
     "LevelTicksTickMixin",
     "ServerLevelTickMixin",
     "ConnectionPacketDispatchMixin",
+    "ServerConnectionTickMixin",
+    "PacketProcessorMixin",
+    "PacketUtilsMixin",
     "ConnectionFlushQueueMixin",
     "ServerLevelUnloadMixin",
-    "LevelTicksQueryMixin"
+    "LevelTicksQueryMixin",
+    "CommandsMixin"
   ],
   "injectors": {
     "defaultRequire": 1

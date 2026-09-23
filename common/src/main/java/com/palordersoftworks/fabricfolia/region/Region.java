@@ -51,14 +51,21 @@ public final class Region implements com.palordersoftworks.fabricfolia.api.Regio
 	 */
 	volatile RegionState state = RegionState.TRANSIENT;
 
-	/** Sections currently owned, keyed by "x,z". Guarded by the regionizer structure lock. */
-	final java.util.Map<Long, RegionSection> sections = new java.util.HashMap<>();
+	/**
+	 * Sections currently owned, keyed by packed section coordinate. MUTATION
+	 * is guarded by the regionizer structure lock (all writers hold it); the
+	 * concurrent map exists so lock-free READS from diagnostics (section
+	 * counts, representative centers) are race-free instead of iterating a
+	 * plain HashMap mid-resize.
+	 */
+	final java.util.Map<Long, RegionSection> sections = new java.util.concurrent.ConcurrentHashMap<>();
 
 	/**
-	 * Regions this region must merge INTO when its current tick ends
-	 * (merge-later targets). Only non-empty while TICKING — a ticking region
-	 * cannot merge immediately without violating invariant 3, so the merge is
-	 * deferred to tick-end (Folia's documented "merge later" logic, clean-room).
+	 * Regions this region must merge INTO at a future tick end (merge-later
+	 * targets). A region carrying obligations is TRANSIENT — it cannot tick
+	 * while a merge into another region is pending (Folia's documented
+	 * "merge later" logic, clean-room). Emptied either by absorption into a
+	 * target or by {@code releaseObligationsOn} when a target dies first.
 	 */
 	final Set<Region> mergeLater = new LinkedHashSet<>();
 
@@ -244,6 +251,27 @@ public final class Region implements com.palordersoftworks.fabricfolia.api.Regio
 	@Override
 	public String stateName() {
 		return state.name();
+	}
+
+	@Override
+	public int[] sectionCenter() {
+		// Reads the structural section map without the structure lock: the
+		// map is only mutated under that lock, and this is a best-effort
+		// representative point — a concurrent merge/split yields a slightly
+		// stale center, which is fine for diagnostics and distance decisions
+		// (the values are internally consistent ints from live sections).
+		long sumX = 0;
+		long sumZ = 0;
+		int n = 0;
+		for (Long key : sections.keySet()) {
+			sumX += (int) (key >> 32);
+			sumZ += (int) (key & 0xFFFFFFFFL);
+			n++;
+		}
+		if (n == 0) {
+			return null;
+		}
+		return new int[] {(int) (sumX / n), (int) (sumZ / n)};
 	}
 
 	@Override

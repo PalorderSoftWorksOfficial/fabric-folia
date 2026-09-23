@@ -32,24 +32,24 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *   server thread keeps its server context.</li>
  * </ul>
  *
- * <p>The flag is a bounded enter/exit (not a sticky tag): a Netty event
- * loop also runs non-packet work, and mislabeling it permanently would
- * poison unrelated context checks. The previous-context token captured at
- * enter is restored at exit; on an event loop the previous context is
- * UNKNOWN (the loop owns nothing), on the server thread it is whatever the
- * server had — though the enter handler does not fire there (see guard).</p>
+ * <p>The flag is a bounded enter/exit with a captured token (not a sticky
+ * tag): a Netty event loop also runs non-packet work, and mislabeling it
+ * permanently would poison unrelated context checks. The guard fires only
+ * on UNKNOWN contexts — event loops idle there; the server thread is
+ * GLOBAL (engine-registered); region workers carry REGION during the
+ * staged connection tick, and a worker draining connection work inside a
+ * region context must keep that context, not be relabeled NETWORK.</p>
  */
 @Mixin(Connection.class)
 public abstract class ConnectionPacketDispatchMixin {
 
 	@Inject(method = "runOnceConnected(Ljava/util/function/Consumer;)V", at = @At("HEAD"))
 	private void fabricfolia$enterNetworkContext(CallbackInfo ci) {
-		if (ThreadOwnership.current().kind() != ThreadContext.Kind.GLOBAL
-				&& !isServerThread()) {
-			// Non-server thread executing connection work: the network
-			// context. (The server thread reaches this method via tick();
-			// isServerThread distinguishes it from event loops cheaply and
-			// without vanilla references.)
+		if (ThreadOwnership.current().kind() == ThreadContext.Kind.UNKNOWN) {
+			// Unknown contexts are Netty event loops (and other unowned
+			// threads). The server thread is GLOBAL (engine registration),
+			// region workers are REGION inside the staged connection tick —
+			// both must keep their contexts, which own this work already.
 			ThreadOwnership.enterSide(ThreadContext.Kind.NETWORK);
 			NetworkDispatch.noteNetworkExecution();
 		}
@@ -57,24 +57,13 @@ public abstract class ConnectionPacketDispatchMixin {
 
 	@Inject(method = "runOnceConnected(Ljava/util/function/Consumer;)V", at = @At("RETURN"))
 	private void fabricfolia$exitNetworkContext(CallbackInfo ci) {
-		if (NetworkDispatch.isNetworkContext()) {
-			// Only our enter sets NETWORK on this thread's current window;
-			// restore to UNKNOWN (the pre-existing default for event loops).
+		if (ThreadOwnership.current().kind() == ThreadContext.Kind.NETWORK) {
+			// This mixin is enterSide(NETWORK)'s only caller, so NETWORK on
+			// this thread's current window means WE tagged it: restore the
+			// event-loop idle default. Thread-local, so concurrent
+			// runOnceConnected entries on one connection cannot clobber
+			// each other's restore.
 			ThreadOwnership.exit(ThreadOwnership.Context.UNKNOWN);
 		}
-	}
-
-	/**
-	 * The vanilla server thread is the thread running the server tick loop;
-	 * Fabric Folia's engine enters GLOBAL context there at tick start, so
-	 * the GLOBAL check above already exempts it. This extra guard is for
-	 * the pre-tick window (login processing before the first tick): the
-	 * engine's global-thread registration names it, and only network loops
-	 * remain. Kept as a name check rather than a vanilla reference to stay
-	 * mixin-minimal.
-	 */
-	private static boolean isServerThread() {
-		String name = Thread.currentThread().getName();
-		return name.equals("Server thread");
 	}
 }

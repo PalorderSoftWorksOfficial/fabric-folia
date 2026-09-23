@@ -98,6 +98,55 @@ public final class NetworkDispatch {
 		HOPS_REGION.incrementAndGet();
 	}
 
+	/**
+	 * Runs a drained pending-action for a specific connection: routed to the
+	 * region owning the connection's player when connection-owner routing
+	 * applies (the player-path staging decision), or to the global context
+	 * when it does not (handshake listeners, removed players, engine down).
+	 * From non-network threads this executes inline (the caller is already a
+	 * valid mutation context — including the region worker draining the
+	 * staged connection tick, where the action runs on its owner in place).
+	 *
+	 * @param engine     the live engine (inline no-op dispatch when null)
+	 * @param connection the connection whose pending action is draining
+	 * @param task       the connection-associated work to place on its owner
+	 */
+	public static void runForConnection(FabricFoliaEngine engine,
+	                                    net.minecraft.network.Connection connection,
+	                                    Runnable task) {
+		if (!isNetworkContext()) {
+			// Server thread, region worker, global thread: already a valid
+			// mutation context for this task's classification.
+			task.run();
+			return;
+		}
+		INLINE_NETWORK.incrementAndGet();
+		if (engine == null) {
+			return; // engine down: no sanctioned mutation context exists
+		}
+		RegionPlayerRouting.Route route = RegionPlayerRouting.routeFor(connection);
+		if (route == null) {
+			HOPS_GLOBAL.incrementAndGet();
+			engine.globalScheduler().run(task);
+			return;
+		}
+		var scheduler = engine.schedulerFor(route.worldKey());
+		var regionizer = engine.regionizerFor(route.worldKey());
+		if (scheduler == null || regionizer == null) {
+			HOPS_GLOBAL.incrementAndGet();
+			engine.globalScheduler().run(task);
+			return;
+		}
+		var region = regionizer.ownerOfChunk(route.chunkX(), route.chunkZ());
+		if (region == null || !scheduler.enqueue(region, task)) {
+			// Unowned or dying region: global context is the safe fallback.
+			HOPS_GLOBAL.incrementAndGet();
+			engine.globalScheduler().run(task);
+			return;
+		}
+		HOPS_REGION.incrementAndGet();
+	}
+
 	/** Metrics lines for /folia metrics. */
 	public static List<String> metricsLines() {
 		return List.of(

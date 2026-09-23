@@ -66,11 +66,10 @@ public final class CompatScanner {
 	}
 
 	/**
-	 * Mods whose interaction with Fabric-Folia has been measured by the
-	 * compatibility harness (compat/validate.py; results in
-	 * COMPATIBILITY.md). Keys are mod ids. A status here is always
-	 * version-pinned in the docs; it is updated only by re-running the
-	 * harness, never by assumption.
+	 * Mods whose interaction with Fabric-Folia has been measured at
+	 * runtime (recorded in COMPATIBILITY.md). Keys are mod ids. A status
+	 * here is always version-pinned in the docs; it is updated only by
+	 * re-running the measurements, never by assumption.
 	 */
 	private static final Map<String, String> MEASURED = Map.of(
 			"lithium", "runtime-tested by the Fabric Folia compatibility harness (see COMPATIBILITY.md for versions and result)",

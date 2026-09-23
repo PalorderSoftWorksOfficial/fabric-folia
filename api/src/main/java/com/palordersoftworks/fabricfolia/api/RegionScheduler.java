@@ -173,4 +173,24 @@ public interface RegionScheduler {
 		/** Cancels the task if it has not yet run; repeating tasks stop firing. */
 		void cancel();
 	}
+
+	/**
+	 * Reusable cancel handle: the scheduling machinery needs to READ the
+	 * cancelled flag (to stop a repeating task's next firing); the public
+	 * type exposes only {@code cancel()}.
+	 */
+	@AnyThread
+	class CancelHandleView implements CancelHandle {
+		private volatile boolean cancelled;
+
+		/** @return whether {@code cancel()} has been called. */
+		public final boolean isCancelled() {
+			return cancelled;
+		}
+
+		@Override
+		public final void cancel() {
+			cancelled = true;
+		}
+	}
 }

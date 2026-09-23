@@ -112,7 +112,7 @@ public final class LegacyDispatchPolicy {
 	public static boolean mayRunDirect(ThreadContext.Kind kind) {
 		return switch (kind) {
 			case GLOBAL, UNKNOWN -> true;   // global context IS the legacy model
-			case REGION, NETWORK, IO -> false; // hop decisions apply
+			case REGION, NETWORK, IO, ASYNC -> false; // hop decisions apply
 		};
 	}
 

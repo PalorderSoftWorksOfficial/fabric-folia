@@ -15,6 +15,7 @@ import org.snakeyaml.engine.v2.nodes.ScalarNode;
 import org.snakeyaml.engine.v2.nodes.Tag;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,19 +44,25 @@ public final class ConfigWriter {
 	 */
 	public static MappingNode buildDefaultTree(ConfigSchema schema) {
 		MappingNode root = newMapping();
-		MappingNode currentSection = null;
-		String currentSectionName = null;
+		// Group by section NAME, not by consecutive schema runs: a schema
+		// option inserted between another section's entries must merge into
+		// that section's node, not open a duplicate one. (Duplicate section
+		// keys made the generated template self-destruct on parse — first-run
+		// generation produced a file its own validation rejected.) First-
+		// appearance order keeps the template layout stable as the schema
+		// grows; schema order is preserved within each section.
+		Map<String, MappingNode> sections = new LinkedHashMap<>();
 
 		appendVersionEntry(root, schema);
 
 		for (ConfigSchema.Option<?> option : schema.options()) {
 			String section = sectionOf(option.key());
-			if (!section.equals(currentSectionName)) {
-				currentSection = newMapping();
-				currentSectionName = section;
-				root.getValue().add(new NodeTuple(stringKey(section), currentSection));
-			}
-			appendOptionEntry(currentSection, option, null);
+			MappingNode sectionNode = sections.computeIfAbsent(section, name -> {
+				MappingNode created = newMapping();
+				root.getValue().add(new NodeTuple(stringKey(name), created));
+				return created;
+			});
+			appendOptionEntry(sectionNode, option, null);
 		}
 		return root;
 	}

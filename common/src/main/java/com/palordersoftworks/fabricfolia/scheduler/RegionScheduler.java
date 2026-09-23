@@ -67,7 +67,7 @@ import java.util.function.Consumer;
 public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Listener {
 
 	/** Tick period: 50ms per region tick (spec 6: 20 TPS per region). */
-	public static final long TICK_NANOS = 50_000_000L;
+	public static final long TICK_NANOS = com.palordersoftworks.fabricfolia.region.RegionizerConfig.TICK_PERIOD_NANOS;
 
 	private final WorldRegionizer regionizer;
 	private final WorkerPool pool;
@@ -88,6 +88,9 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	private final RegionFailurePolicy failurePolicy;
 
 	private final int poolThreadCount;
+
+	/** Engine metrics (may be detached until start() wires the shared one). */
+	private volatile com.palordersoftworks.fabricfolia.metrics.RegionMetrics metrics;
 
 	private Thread coordinator;
 
@@ -112,20 +115,22 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	 * spec 10). The sharing scheduler's coordinator dispatches independently;
 	 * only the pool (and its threads) is shared. Closing a shared scheduler
 	 * stops its coordinator and drops its queues but leaves the pool running.
-	 */
-	public RegionScheduler(WorldRegionizer regionizer,
+	 */	public RegionScheduler(WorldRegionizer regionizer,
 	                       WorkerPool sharedPool,
 	                       int workerThreadCount,
 	                       ValidationMode mode,
 	                       Consumer<Region> regionTickBody,
 	                       Consumer<String> diagnostics) {
 		this(regionizer, sharedPool, workerThreadCount, mode, regionTickBody, diagnostics, false);
-	}	private RegionScheduler(WorldRegionizer regionizer,
+	}
+
+	private RegionScheduler(WorldRegionizer regionizer,
 	                       WorkerPool pool,
 	                       int workerThreadCount,
-                       ValidationMode mode,
-                       Consumer<Region> regionTickBody,
-                       Consumer<String> diagnostics,				       boolean ownsPool) {
+	                       ValidationMode mode,
+	                       Consumer<Region> regionTickBody,
+	                       Consumer<String> diagnostics,
+	                       boolean ownsPool) {
 		this(regionizer, pool, workerThreadCount, mode, regionTickBody, diagnostics, ownsPool, null);
 	}
 
@@ -171,9 +176,21 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		if (!running.compareAndSet(false, true)) {
 			return;
 		}
+		if (metrics == null) {
+			metrics = com.palordersoftworks.fabricfolia.metrics.RegionMetrics.detached();
+		}
 		coordinator = new Thread(this::coordinateLoop, "Fabric-Folia-Scheduler");
 		coordinator.setDaemon(true);
 		coordinator.start();
+	}
+
+	/**
+	 * Installs the engine's shared metrics (engine wiring, before start).
+	 * Without it the scheduler feeds a detached metrics instance — visible
+	 * nowhere, harmless.
+	 */
+	public void setMetrics(com.palordersoftworks.fabricfolia.metrics.RegionMetrics metrics) {
+		this.metrics = metrics;
 	}
 
 	@Override
@@ -365,6 +382,14 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			queue.removeTask(task);
 			return false;
 		}
+		com.palordersoftworks.fabricfolia.metrics.RegionMetrics m = metrics;
+		if (m != null) {
+			ThreadOwnership.Context current = ThreadOwnership.current();
+			if (current.kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION
+					&& current.region() != region) {
+				m.increment(com.palordersoftworks.fabricfolia.metrics.RegionMetrics.Counter.CROSS_REGION_TASKS);
+			}
+		}
 		return true;
 	}
 
@@ -521,6 +546,12 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			//    is not dispatchable until completeTick returns.
 			long duration = nanoClock.getAsLong() - start;
 			region.recordTickDuration(duration);
+			com.palordersoftworks.fabricfolia.metrics.RegionMetrics m = metrics;
+			if (m != null) {
+				// Per-worker index for the busy-tick counters; a non-worker
+				// executor (tests) records with index -1.
+				m.recordRegionTick(region.id, workerIndexOfThread(), duration);
+			}
 			if (duration > 1_000_000_000L) {
 				diagnostics.accept("SLOW TICK " + region + ": " + (duration / 1_000_000) + "ms");
 			}
@@ -546,6 +577,19 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		// Regions implement RegionInfo directly in the engine (the API type is
 		// structural: world + id + state).
 		return region;
+	}
+
+	/** @return the 0-based index of a named FabricFolia-Worker-N thread, else -1. */
+	private int workerIndexOfThread() {
+		String name = Thread.currentThread().getName();
+		if (!name.startsWith("FabricFolia-Worker-")) {
+			return -1;
+		}
+		try {
+			return Integer.parseInt(name.substring("FabricFolia-Worker-".length())) - 1;
+		} catch (NumberFormatException e) {
+			return -1;
+		}
 	}
 
 	/** @return how many worker threads the pool has (diagnostics). */

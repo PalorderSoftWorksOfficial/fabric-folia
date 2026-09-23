@@ -41,6 +41,8 @@ public record RegionizerConfig(
 		/** Percent of dead sections required before recalculation runs (0-100). */
 		int maxDeadSectionPercent
 ) {
+	/** Region tick period: 20 TPS per region, independent of every other region. */
+	public static final long TICK_PERIOD_NANOS = 50_000_000L;
 	public RegionizerConfig {
 		if (Integer.bitCount(sectionSizeChunks) != 1 || sectionSizeChunks < 1 || sectionSizeChunks > 32) {
 			throw new IllegalArgumentException("sectionSizeChunks must be a power of two in [1,32]: "

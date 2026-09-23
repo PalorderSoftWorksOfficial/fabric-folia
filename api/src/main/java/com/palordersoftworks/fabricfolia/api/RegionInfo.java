@@ -67,4 +67,13 @@ public interface RegionInfo {
 	 * {@link RegionScheduler} instead.
 	 */
 	String stateName();
+
+	/**
+	 * @return the section-space center of the region's owned sections
+	 * ({@code [sectionX, sectionZ]}), or null when the region owns nothing
+	 * (a dying/dead region). The representative position for diagnostics and
+	 * distance decisions; NOT an ownership statement — ownership lives in
+	 * the regionizer, query it per position.
+	 */
+	int[] sectionCenter();
 }

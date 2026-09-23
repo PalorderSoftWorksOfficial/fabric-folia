@@ -29,8 +29,9 @@ import java.util.function.Consumer;
  * execute it, per region, in the owning region's thread context.
  *
  * <p><strong>The staging architecture and why it is shaped this way:</strong>
- * the three gameplay slices — entity bodies, block-entity ticks, and (via
- * their own vanilla drain) scheduled block/fluid ticks — are captured at
+ * the four gameplay slices — entity bodies (players included), block-entity
+ * ticks, scheduled block/fluid ticks (via their own vanilla drain), and
+ * player connection bodies — are captured at
  * their exact vanilla execution sites by redirect mixins and staged here as
  * runnables instead of running on the server thread. At end of server tick
  * the engine flushes each staged batch: every runnable is grouped by the
@@ -63,9 +64,19 @@ import java.util.function.Consumer;
  *       against the post-merge ownership picture and lands everything on
  *       the survivor (the scheduler's own queue re-homing carries already-
  *       flushed work).</li>
- *   <li>ServerPlayer bodies are never staged (packet processing stays
- *       server-thread this phase; double-driving a player body would
- *       corrupt it) — the capture mixins pass them straight through.</li>
+ *   <li>The player connection body (SCL tick → {@code Connection.tick()}:
+ *       packet drain, {@code SGPLI.tick} → {@code doTick} physics, outbound
+ *       flush) is staged as the LAST slice. Within a tick vanilla runs the
+ *       entity pass BEFORE {@code tickConnection}; the EnumMap's declaration
+ *       order keeps that order at flush, so a region executes its entity
+ *       bodies first, then its players' connection bodies — vanilla's
+ *       intra-tick order, per region. The two verified server-thread
+ *       couplings inside {@code ServerPlayer.tick()} —
+ *       {@code ServerChunkCache.move} (chunk-view bookkeeping, the chunk
+ *       system's owner) and {@code ServerPlayerGameMode.tick} (break
+ *       progress against the mining ticket machinery) — are bounced to the
+ *       server thread by {@code ServerPlayerTickMixin} when the body runs
+ *       on a region worker.</li>
  * </ul>
  *
  * <p><strong>Thread-context discipline (spec 8):</strong> {@link #stage}
@@ -102,7 +113,23 @@ public final class RegionStageHub {
 		/** Block-entity ticks (vanilla {@code tickBlockEntities}). */
 		BLOCK_ENTITY,
 		/** Scheduled block/fluid tick executions (vanilla's LevelTicks drains). */
-		SCHEDULED_TICK
+		SCHEDULED_TICK,
+		/**
+		 * Player connection bodies (vanilla SCL tick → {@code Connection.tick()}).
+		 * Declared LAST: flush iterates in declaration order, and vanilla runs
+		 * the entity pass before {@code tickConnection} within a tick.
+		 */
+		PLAYER
+	}
+
+	/** Staging slice counter for {@link Slice} bodies (none for scheduled ticks' generic path). */
+	private static RegionMetrics.Counter counterOf(Slice slice) {
+		return switch (slice) {
+			case ENTITY -> RegionMetrics.Counter.ENTITY_TICKS_EXECUTED;
+			case BLOCK_ENTITY -> RegionMetrics.Counter.BLOCK_ENTITY_TICKS_EXECUTED;
+			case SCHEDULED_TICK -> RegionMetrics.Counter.SCHEDULED_TICKS_EXECUTED;
+			case PLAYER -> RegionMetrics.Counter.PLAYER_CONNECTION_TICKS;
+		};
 	}
 
 	/** @return true when the calling level's slice is staged to regions this session. */
@@ -280,11 +307,7 @@ public final class RegionStageHub {
 		try {
 			body.run();
 			EXECUTED_ON_WORKERS.incrementAndGet();
-			metrics.increment(slice == Slice.ENTITY
-					? RegionMetrics.Counter.ENTITY_TICKS_EXECUTED
-					: slice == Slice.BLOCK_ENTITY
-							? RegionMetrics.Counter.BLOCK_ENTITY_TICKS_EXECUTED
-							: RegionMetrics.Counter.SCHEDULED_TICKS_EXECUTED);
+			metrics.increment(counterOf(slice));
 			if (region != null) {
 				// Execution-time success feedback for the failure policy.
 				// (The scheduler's policy already observes queue-level tasks;

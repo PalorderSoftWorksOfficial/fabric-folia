@@ -89,7 +89,6 @@ public final class WorldRegionizer {
 
 	private long nextRegionId = 1;
 
-	/** The lifecycle listener, if any (guarded by structureLock). */
 	/** Structural lifecycle listeners, in registration order. Guarded by structureLock. */
 	private List<Listener> listeners;
 
@@ -489,9 +488,15 @@ public final class WorldRegionizer {
 			// ticking (it exclusively owns its sections until tick end). The
 			// NON-TICKING side ('to') carries the obligation: it merges into
 			// 'from' at from's tick end — reference: "x runs the merge later
-			// logic into y" where x is non-ticking and y is ticking.
+			// logic into y" where x is non-ticking and y is ticking. 'to' is
+			// downgraded so it cannot tick while carrying the obligation: it
+			// may be absorbed (with all its state) the moment 'from' ends its
+			// tick, and a region executing game work against state that is
+			// about to change owners mid-flight is exactly the race the state
+			// machine exists to prevent.
 			to.mergeLater.add(from);
 			from.expectingMergeFrom.add(to);
+			to.state = RegionState.TRANSIENT;
 			return;
 		}
 
@@ -511,15 +516,14 @@ public final class WorldRegionizer {
 		}
 		from.mergeLater.clear();
 
-		// Downgrade rule: if 'from' had merge-later targets other than 'to',
-		// 'to' must re-buffer (become TRANSIENT) before ticking again.
+		// Downgrade rule (reference): 'to' is marked transient only if 'from'
+		// contained merge-later targets that were NOT 'to' — forwarded above,
+		// so a non-empty forwarded set is exactly that condition. Absorbing a
+		// transient donor whose only obligation was this merge must NOT
+		// downgrade: nothing would ever re-ready the absorber (there is no
+		// TRANSIENT→READY transition for a region with empty mergeLater) and
+		// the region would sit undispatchable forever.
 		if (!to.mergeLater.isEmpty()) {
-			to.state = RegionState.TRANSIENT;
-		} else if (from.state == RegionState.TRANSIENT) {
-			// Absorbing a transient region: 'to' cannot be sure it satisfies the
-			// buffer invariant until its own recalculation; conservative downgrade.
-			// (Folia's documented rule: the region y should be marked as
-			// transient if region x contained merge later targets that were not y.)
 			to.state = RegionState.TRANSIENT;
 		}
 
@@ -538,9 +542,38 @@ public final class WorldRegionizer {
 	private void killRegion(Region region) {
 		region.state = RegionState.DEAD;
 		region.sections.clear();
+		region.mergeLater.clear();
+		region.expectingMergeFrom.clear();
 		liveRegions.remove(region);
+		releaseObligationsOn(region);
 		for (Listener listener : listeners()) {
 			listener.onRegionDead(region);
+		}
+	}
+
+	/**
+	 * A dead region can never honor its pending merge obligations. Every live
+	 * region that was waiting to merge INTO it (mergeLater) or waiting for it
+	 * to merge in (expectingMergeFrom) is released — completeTick's DEAD-donor
+	 * skip only covers the donor side lazily, and the waiting side must not
+	 * keep a dead target.
+	 *
+	 * <p>A region whose ONLY reason for being TRANSIENT was such an obligation
+	 * returns to READY with a fresh deadline: the merge machinery is the sole
+	 * producer of mergeLater-driven TRANSIENT states, so an emptied set restores
+	 * exactly the pre-obligation state. Without this, the region sits
+	 * undispatchable forever (tryBeginTick fails on TRANSIENT and no other
+	 * path re-readies it) — its chunks and queue strand with it.</p>
+	 */
+	private void releaseObligationsOn(Region dead) {
+		for (Region live : liveRegions) {
+			if (live.mergeLater.remove(dead)
+					&& live.mergeLater.isEmpty()
+					&& live.state == RegionState.TRANSIENT) {
+				live.state = RegionState.READY;
+				scheduleNextTick(live);
+			}
+			live.expectingMergeFrom.remove(dead);
 		}
 	}
 
@@ -794,7 +827,7 @@ public final class WorldRegionizer {
 	 * itself.
 	 */
 	private void scheduleNextTick(Region region) {
-		region.nextTickDeadlineNanos = nanoClock.getAsLong() + 50_000_000L;
+		region.nextTickDeadlineNanos = nanoClock.getAsLong() + RegionizerConfig.TICK_PERIOD_NANOS;
 	}
 
 	/**
@@ -819,14 +852,6 @@ public final class WorldRegionizer {
 		}
 	}
 
-	/**
-	 * Removes dead sections from a region's ownership (tick-end step 3).
-	 * Sections marked dead (empty + unsupported) are dropped from the region's
-	 * map; the region keeps all alive sections. The removal count is returned
-	 * so the split gate can see the dead-section load BEFORE purging (the
-	 * reference defers recalculation until "enough" dead sections accumulate —
-	 * counting must happen before they are gone).
-	 */
 	/** @return how many of the region's sections are currently dead (unpurged). */
 	private int countDeadSections(Region region) {
 		int dead = 0;

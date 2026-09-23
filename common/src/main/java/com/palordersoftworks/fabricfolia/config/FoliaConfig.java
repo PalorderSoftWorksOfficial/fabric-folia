@@ -256,6 +256,19 @@ public final class FoliaConfig {
 		return (Boolean) values.get(ConfigSchema.KEY_METRICS);
 	}
 
+	/** @return whether the region stall watchdog runs ({@code diagnostics.watchdog}). */
+	public boolean watchdog() {
+		return (Boolean) values.get(ConfigSchema.KEY_WATCHDOG);
+	}
+
+	/**
+	 * @return the raw typed value at {@code key}, or null when absent (for
+	 * optional keys: callers resolve their own defaults).
+	 */
+	public Object valueOrNull(String key) {
+		return values.get(key);
+	}
+
 	/** Resolves the {@code auto} sentinel for worker threads (also used by tests). */
 	public static final class WorkerThreads {
 		private WorkerThreads() {

@@ -190,7 +190,11 @@ public class FabricFoliaMod implements ModInitializer {
 			current.attachEntityTracking(level);
 		}
 		Console.success("Fabric Folia is ready.");
-		Console.info("  Regionized gameplay is active (entity ticking, block entities, scheduled-tick drains, and random ticks on region workers). Still on the server thread: worldgen, spawning, player ticking (see THREADING.md).");
+		Console.info("  Regionized gameplay is active (entity ticking - players included - block entities, scheduled-tick drains, and random ticks on region workers). Still on the server thread: worldgen, spawning. Player path: "
+				+ (playerPathStaging()
+						? "staged (connection ticks on the player's owning region)."
+						: "disabled (vanilla server-thread execution).")
+				+ " (see THREADING.md).");
 
 		deliverApiEntrypoints(current);
 	}
@@ -315,6 +319,22 @@ public class FabricFoliaMod implements ModInitializer {
 				+ " in " + worldName + "): " + e
 				+ " - the hook is inert for this entity; gameplay continues on vanilla execution.");
 		Console.error("  Stack trace for the Fabric Folia issue tracker:", e);
+	}
+
+	/**
+	 * Whether the player path (connection tick + packet re-home) stages onto
+	 * owning regions. Resolution order: the config gate
+	 * ({@code gameplay.stage-player-path}) when the engine is live; true when
+	 * the engine is live but the config is not yet bound (the default);
+	 * false when the engine is down (vanilla threading).
+	 */
+	public static boolean playerPathStaging() {
+		FabricFoliaEngine current = engine;
+		if (current == null) {
+			return false;
+		}
+		Boolean gate = current.playerPathGate();
+		return gate == null || gate;
 	}
 
 	/** @return the intercept layer, or null when the engine is disabled. */

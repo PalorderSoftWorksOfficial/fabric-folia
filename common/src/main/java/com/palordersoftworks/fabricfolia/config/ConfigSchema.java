@@ -46,6 +46,8 @@ public final class ConfigSchema {
 	public static final String KEY_DEBUG_LOGGING = "diagnostics.debug-logging";
 	public static final String KEY_PROFILING = "diagnostics.profiling";
 	public static final String KEY_METRICS = "diagnostics.metrics";
+	public static final String KEY_WATCHDOG = "diagnostics.watchdog";
+	public static final String KEY_PLAYER_PATH = "gameplay.stage-player-path";
 	public static final String KEY_VERSION = "config-version";
 
 	private final Map<String, Option<?>> options = new LinkedHashMap<>();
@@ -337,6 +339,40 @@ public final class ConfigSchema {
 				"Valid values: true, false",
 				"Performance: small constant overhead per region tick.",
 				"Restart required: no - applies live."
+		}));
+
+		add(opt(KEY_WATCHDOG, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Region-aware stall watchdog.",
+				"",
+				"What it does: scans every 10s for regions stuck in the TICKING",
+				"state far past their own next-tick deadline and reports them with",
+				"region id, tick count, last duration, and overdue time - the",
+				"information needed to find the blocking frame in a thread dump.",
+				"There is no single main thread to watch; each region is watched",
+				"independently, and one stalled region never masks another.",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Performance: one lock-free region scan per 10s.",
+				"Restart required: no - applies at next engine start."
+		}));
+
+		add(opt(KEY_PLAYER_PATH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Regionize the player path: stage each player's connection tick",
+				"(packet drain, connection state, physics chain) onto the region",
+				"owning the player's chunk, and route re-homed packet handlers",
+				"there too.",
+				"",
+				"What it does: gives a player exactly one owning context per tick",
+				"(the region), so packet handling and movement are serialized with",
+				"the region's other work and parallel across regions. Two verified",
+				"server-thread couplings inside the staged body (chunk-view move,",
+				"game-mode tick) are bounced to the server thread automatically.",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Performance: one region-queue enqueue per player per tick.",
+				"Restart required: no - applies at next engine start."
 		}));
 
 		add(opt(KEY_METRICS, Boolean.class, Boolean.FALSE, v -> v, new String[] {

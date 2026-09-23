@@ -50,6 +50,10 @@ public final class ThreadOwnership {
 			return new Context(Kind.IO, null, threadName);
 		}
 
+		public static Context async(String threadName) {
+			return new Context(Kind.ASYNC, null, threadName);
+		}
+
 		public static Context region(RegionInfo region, String threadName) {
 			return new Context(Kind.REGION, region, threadName);
 		}
@@ -82,13 +86,14 @@ public final class ThreadOwnership {
 		return previous;
 	}
 
-	/** Enters a network or IO context; returns the previous context token. */
+	/** Enters a network, IO, or ASYNC context; returns the previous context token. */
 	public static Context enterSide(Kind kind) {
 		Context previous = CURRENT.get();
 		CURRENT.set(switch (kind) {
 			case NETWORK -> Context.network(Thread.currentThread().getName());
 			case IO -> Context.io(Thread.currentThread().getName());
-			default -> throw new IllegalArgumentException("enterSide requires NETWORK or IO");
+			case ASYNC -> Context.async(Thread.currentThread().getName());
+			default -> throw new IllegalArgumentException("enterSide requires NETWORK, IO, or ASYNC");
 		});
 		return previous;
 	}

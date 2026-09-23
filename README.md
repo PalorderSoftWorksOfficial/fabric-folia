@@ -66,14 +66,16 @@ template. Every option documents purpose, default, valid values, performance,
 compatibility and safety implications, and restart-vs-live behavior. **Administrator
 comments survive saves** (round-trip tested); unknown keys are preserved and flagged,
 never silently dropped; missing keys are backfilled from the schema automatically
-(partial configs self-repair). The file must be UTF-8 (no BOM); a non-UTF-8 file
-produces an actionable error, never silent misbehavior. `config-version` carries an
-explicit migration contract — future versions fail closed rather than guessing.
+(partial configs self-repair), and a duplicated key is collapsed to one on load —
+the last value wins and the duplicate never round-trips through a save. `config-version`
+carries an explicit migration contract — future versions fail closed rather than guessing.
 
 ## Commands
 
 - `/folia` — overview
 - `/folia status` — engine state, worker count, thread-check mode, intercept state
+- `/folia shutdown` — graceful server stop (admin): region work drains, worlds save,
+  then the process exits — the vanilla `/stop` lifecycle triggered from chat/console
 - `/folia regions` — live per-region detail (state, ticks executed, chunks)
 - `/folia threads` — Fabric Folia's worker threads
 - `/folia compat` — the startup compatibility scan, on demand (measured results in
@@ -108,8 +110,8 @@ every administrator-facing message explained.
 - `TROUBLESHOOTING.md` — symptom-first fixes for administrators, with the real
   console strings
 - `TESTING.md` — test coverage, the world-mutation proof, and how to reproduce it
-- `compat/` — the automated compatibility harness (`python compat/validate.py
-  --combo <name>`) and committed result JSONs
+- `docs/folia-parity.md` — the parity ledger: Folia behavior vs. what is
+  implemented and live-verified here
 
 ## License
 

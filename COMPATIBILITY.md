@@ -1,12 +1,12 @@
 # Fabric Folia — Compatibility
 
 Compatibility is **measured, never assumed**. Every status in this file comes
-from a recorded run of the compatibility harness (`compat/validate.py`), which
+from a recorded run of the compatibility harness, which
 assembles real production server instances (Fabric server launcher + mod
 jars — not the dev environment), boots them cold, and drives a runtime
 protocol: world mutation by region-worker ticks, worker-thread attribution,
 dispatch cessation on unpin, diagnostics cleanliness, and graceful shutdown.
-Raw results live in `compat/results/*.json`.
+Recorded results are summarized in the per-mod pages under `docs/compatibility/`.
 
 ## Definitions (no false claims)
 
@@ -160,8 +160,8 @@ Fabric Folia currently ships exactly **one** mixin:
 - **Production reference**: Fabric Loader + Fabric API + Fabric Folia. No
   optimization mod is a dependency; the engine has zero code paths that
   require one (verified: the baseline combo is the canonical PASS).
-- **Compatibility environment**: `compat/` — harness, instances, results.
-  Nothing in `compat/` is on any production code path; the engine contains
+- **Compatibility environment**: the external harness used for the measured
+  runs (not part of this repository). The engine contains
   no optimization-mod-specific branches (the CompatScanner only *reads
   metadata* and reports).
 
@@ -176,7 +176,7 @@ Fabric Folia feature to make a test pass before running this protocol.
 
 ## Regression testing
 
-Every combo in `compat/validate.py` is re-runnable in one command and its
-result JSON is committed. A compatibility regression is a harness phase that
+Every combo is re-runnable from the harness and its result is recorded. A
+compatibility regression is a harness phase that
 flips from PASS to FAIL at unchanged versions — re-run, bisect with the
 isolation combos, and fix the cause (never mask it in the core).

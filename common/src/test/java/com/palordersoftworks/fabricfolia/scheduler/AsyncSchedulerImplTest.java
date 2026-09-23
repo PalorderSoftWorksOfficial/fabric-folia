@@ -57,8 +57,9 @@ class AsyncSchedulerImplTest {
 			assertTrue(ran.await(10, TimeUnit.SECONDS));
 			assertTrue(threadName.get().startsWith("FabricFolia-Async-"),
 					"must run on a dedicated async worker, got " + threadName.get());
-			assertEquals(Kind.IO, contextKind.get(),
-					"async tasks must carry the IO context so diagnostics classify them");
+			assertEquals(Kind.ASYNC, contextKind.get(),
+					"async tasks carry the distinct ASYNC context (not IO) so diagnostics "
+							+ "classify async work and ownership checks can reject it");
 		}
 	}
 

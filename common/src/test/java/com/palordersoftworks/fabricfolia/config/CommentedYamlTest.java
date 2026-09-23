@@ -115,6 +115,43 @@ class CommentedYamlTest {
 	}
 
 	@Test
+	void duplicateKeysCollapseToLastValue() {
+		// The low-level Composer does not enforce duplicate-key policy, so a
+		// duplicated key parses into two sibling tuples. Load must collapse:
+		// last value wins (YAML load semantics), the merge must not see two,
+		// and the saved file must contain the key exactly once.
+		String duplicated = String.join("\n",
+				"config-version: 1",
+				"general:",
+				"  enabled: true",
+				"  enabled: false",
+				"");
+		CommentedYaml parsed = CommentedYaml.load(new StringReader(duplicated));
+		assertEquals(false, parsed.get("general.enabled"),
+				"last duplicate value must win");
+
+		var merged = ConfigWriter.mergePreservingComments(parsed, ConfigSchema.get());
+		String text = YamlWriter.write(merged);
+		assertEquals(1, countKey(text, "enabled:"),
+				"duplicate must not survive a save");
+		assertTrue(text.contains("enabled: false"));
+	}
+
+	private static int countKey(String haystack, String needle) {
+		int count = 0;
+		int idx = 0;
+		while ((idx = haystack.indexOf(needle, idx)) != -1) {
+			count++;
+			idx += needle.length();
+			if (idx < haystack.length() && !Character.isWhitespace(haystack.charAt(idx))) {
+				// Part of a longer key like enabled-foo — not a duplicate.
+				count--;
+			}
+		}
+		return count;
+	}
+
+	@Test
 	void generatedDefaultIsCompleteAndDocumented() throws IOException {
 		MappingNodeHelper helper = new MappingNodeHelper();
 		String template = helper.renderDefault();

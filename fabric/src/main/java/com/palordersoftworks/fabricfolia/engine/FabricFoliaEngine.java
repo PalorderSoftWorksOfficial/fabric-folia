@@ -21,7 +21,6 @@ import com.palordersoftworks.fabricfolia.thread.ThreadContextImpl;
 import com.palordersoftworks.fabricfolia.thread.ViolationReporter;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Fabric-side holder for the engine: the shared worker pool with one scheduler
@@ -50,9 +49,11 @@ public final class FabricFoliaEngine {
 	/** Legacy dispatch policy (mandate §39): where undeclared work runs. */
 	private final com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy legacyDispatchPolicy =
 			new com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy();
-	private final RegionScheduler primaryScheduler;
+	/** The one bounded worker pool every world's scheduler dispatches onto. */
+	private final com.palordersoftworks.fabricfolia.scheduler.WorkerPool workerPool;
+	private final int workerThreadCount;
 	private final WorldRegionizerRegistry regionizers = new WorldRegionizerRegistry();
-	/** Per-world schedulers for worlds attached after the primary (shared pool). */
+	/** Per-world schedulers sharing {@link #workerPool} (one per dimension). */
 	private final java.util.concurrent.ConcurrentHashMap<String, RegionScheduler> schedulersByWorld =
 			new java.util.concurrent.ConcurrentHashMap<>();
 	/** Per-world region-data hubs (region-local data lifecycle fan-out). */
@@ -92,9 +93,12 @@ public final class FabricFoliaEngine {
 	 * exactly what runs.
 	 */
 	private volatile String interceptSuppressedReason;
+	/** Region-aware stall watchdog (created+started at bootstrap). */
+	private com.palordersoftworks.fabricfolia.scheduler.RegionWatchdog watchdog;
 
 	private FabricFoliaEngine(FoliaConfig config,
-	                          RegionScheduler primaryScheduler,
+	                          com.palordersoftworks.fabricfolia.scheduler.WorkerPool workerPool,
+	                          int workerThreadCount,
 	                          GlobalSchedulerImpl global,
 	                          AsyncSchedulerImpl async,
 	                          ThreadContextImpl threadContext,
@@ -105,7 +109,8 @@ public final class FabricFoliaEngine {
 		this.config = config;
 		this.metrics = new RegionMetrics(FoliaConfig.WorkerThreads.resolve(config.workerThreads()));
 		this.api = new FabricFoliaApiImpl(this);
-		this.primaryScheduler = primaryScheduler;
+		this.workerPool = workerPool;
+		this.workerThreadCount = workerThreadCount;
 		this.global = global;
 		this.async = async;
 		this.threadContext = threadContext;
@@ -127,15 +132,11 @@ public final class FabricFoliaEngine {
 		ValidationMode mode = ValidationMode.valueOf(config.threadCheckMode());
 		int workerThreads = FoliaConfig.WorkerThreads.resolve(config.workerThreads());
 
-		// The primary scheduler exists to own the shared worker pool; worlds
-		// attach through attachWorld() and share it. Its regionizer is a
-		// placeholder that never receives chunks.
-		RegionizerConfig placeholderConfig = RegionizerConfig.derive(8);
-		WorldRegionizer placeholderRegionizer = new WorldRegionizer("<pool-owner>", placeholderConfig,
-				new AtomicLong(1)::getAndIncrement, System::nanoTime);
-		RegionScheduler scheduler = new RegionScheduler(placeholderRegionizer, workerThreads, mode,
-				region -> { /* pool-owner scheduler runs no tick bodies */ },
-				info::accept);
+		// The engine owns the shared worker pool directly: worlds attach through
+		// attachWorld() and their schedulers share it. There is no primary
+		// scheduler — a pool owner that never receives chunks is not a concept.
+		com.palordersoftworks.fabricfolia.scheduler.WorkerPool workerPool =
+				new com.palordersoftworks.fabricfolia.scheduler.WorkerPool(workerThreads, "FabricFolia-Worker");
 
 		GlobalSchedulerImpl global = new GlobalSchedulerImpl();
 
@@ -153,9 +154,9 @@ public final class FabricFoliaEngine {
 						info.accept(String.valueOf(throwable));
 					}
 				});
+		ViolationReporter.installProcessReporter(reporter);
 		ThreadContextImpl threadContext = new ThreadContextImpl(reporter);
 
-		scheduler.start();
 		// Region workers get their own RandomSource instances while the engine
 		// lives (measured LegacyRandomSource cross-thread defect — see
 		// WorkerRandoms); deactivation restores vanilla's single-instance
@@ -178,10 +179,28 @@ public final class FabricFoliaEngine {
 		globalDispatch.setDaemon(true);
 		globalDispatch.start();
 
-		FabricFoliaEngine bootstrapped = new FabricFoliaEngine(config, scheduler, global, async, threadContext,
-				reporter, globalDispatch, info, error);
+		FabricFoliaEngine bootstrapped = new FabricFoliaEngine(config, workerPool, workerThreads,
+				global, async, threadContext, reporter, globalDispatch, info, error);
 		bootstrapped.adoptLegacyDispatchPolicy(
 				com.palordersoftworks.fabricfolia.FabricFoliaMod.pendingDispatchPolicy());
+		// Region-aware stall detection (mandate §26): watches all attached
+		// worlds' regions for overdue TICKING states and reports with
+		// region/ownership context.
+		bootstrapped.watchdog = new com.palordersoftworks.fabricfolia.scheduler.RegionWatchdog(
+				() -> {
+					java.util.List<com.palordersoftworks.fabricfolia.region.Region> all =
+							new java.util.ArrayList<>();
+					for (RegionScheduler s : bootstrapped.schedulersByWorld.values())	{
+						all.addAll(s.liveRegions());
+					}
+					return all;
+				},
+				workerPool::keepaliveSnapshot,
+				info::accept,
+				com.palordersoftworks.fabricfolia.scheduler.RegionWatchdog.DEFAULT_INTERVAL_MILLIS);
+		if (config.watchdog()) {
+			bootstrapped.watchdog.start();
+		}
 		// Global-state ownership registration (mandate §11): the global
 		// dispatch context owns the server-wide domains; regions own the rest.
 		GlobalStateRegistry.reset();
@@ -227,11 +246,12 @@ public final class FabricFoliaEngine {
 
 		RegionScheduler scheduler = schedulersByWorld.computeIfAbsent(worldName, name -> {
 			RegionScheduler shared = new RegionScheduler(regionizer,
-					primaryScheduler.workerPool(),
-					primaryScheduler.workerCount(),
+					workerPool,
+					workerThreadCount,
 					ValidationMode.valueOf(config.threadCheckMode()),
 					interceptActive ? interceptor.regionTickBody(worldName) : region -> { },
 					message -> info.accept(message));
+			shared.setMetrics(metrics);
 			shared.start();
 			return shared;
 		});
@@ -244,6 +264,10 @@ public final class FabricFoliaEngine {
 			hub.attachTo(regionizer);
 			return hub;
 		});
+
+		// Ownership-check authority (mandates §7/§8): the regionizer is the
+		// single source for reverse ownership lookups (checks, commands).
+		com.palordersoftworks.fabricfolia.thread.RegionChecks.installAuthority(worldName, regionizer);
 
 		// Structural + chunk lifecycle metrics (mandate §35): the regionizer
 		// fires the sinks; the engine maps them onto the shared metric
@@ -350,6 +374,11 @@ public final class FabricFoliaEngine {
 		entitySchedulersByWorld.computeIfAbsent(worldName, name ->
 				new com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl(
 						scheduler, entityTrackersByWorld.get(name).resolver()));
+		// Ownership-check entity resolver (mandate §7): the registry's
+		// migration protocol is the entity-ownership authority.
+		com.palordersoftworks.fabricfolia.scheduler.EntitySchedulerImpl.EntityResolver resolver =
+				entityTrackersByWorld.get(worldName).resolver();
+		com.palordersoftworks.fabricfolia.thread.RegionChecks.installEntityResolver(resolver::apply);
 		info.accept("  Entity ownership tracking active for " + worldName
 				+ " (add/remove/move hooks live).");
 
@@ -435,6 +464,7 @@ public final class FabricFoliaEngine {
 		List<String> lines = new java.util.ArrayList<>(metrics.snapshotLines());
 		lines.addAll(com.palordersoftworks.fabricfolia.engine.RegionTransitions.metricsLines());
 		lines.addAll(com.palordersoftworks.fabricfolia.engine.NetworkDispatch.metricsLines());
+		lines.add(com.palordersoftworks.fabricfolia.engine.RegionPlayerRouting.metricsLine());
 		lines.add("staged bodies total: " + RegionStageHub.stagedTotal());
 		lines.add("staged bodies executed on workers: " + RegionStageHub.executedOnWorkers());
 		lines.add("staged bodies run server-thread (unowned position): "
@@ -530,6 +560,7 @@ public final class FabricFoliaEngine {
 		entitySchedulersByWorld.remove(worldName);
 		hubsByWorld.remove(worldName);
 		pendingTickLedgersByWorld.keySet().removeIf(name -> name.startsWith(worldName + ":"));
+		com.palordersoftworks.fabricfolia.thread.RegionChecks.removeAuthority(worldName);
 		RegionStageHub hub = stagingHubsByWorld.remove(worldName);
 		if (hub != null) {
 			// Deactivate this world's staging first (the mixins check per
@@ -571,7 +602,7 @@ public final class FabricFoliaEngine {
 
 	/** @return the size of the shared worker pool (diagnostics). */
 	public int primaryWorkerCount() {
-		return primaryScheduler.workerCount();
+		return workerThreadCount;
 	}
 
 	public ThreadContextImpl threadContext() {
@@ -580,6 +611,16 @@ public final class FabricFoliaEngine {
 
 	public FoliaConfig config() {
 		return config;
+	}
+
+	/**
+	 * The player-path staging gate ({@code gameplay.stage-player-path}), or
+	 * null when the config does not carry the key (older config versions):
+	 * the mod's default-on resolution treats null as enabled.
+	 */
+	public Boolean playerPathGate() {
+		Object value = config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH);
+		return value instanceof Boolean b ? b : null;
 	}
 
 	/** @return live region count across ALL attached worlds (diagnostics). */
@@ -648,7 +689,13 @@ public final class FabricFoliaEngine {
 		com.palordersoftworks.fabricfolia.thread.WorkerRandoms.deactivate();
 		globalDispatchThread.interrupt();
 		globalDispatchThread.join(1000);
+		// Quiescence (spec 16): the cadence is stopped, so drain whatever the
+		// last ticks queued once on this thread instead of dropping it.
+		global.dispatchPending();
+		if (watchdog != null) {
+			watchdog.close();
+		}
 		async.close();
-		primaryScheduler.close();
+		workerPool.shutdown(5000);
 	}
 }

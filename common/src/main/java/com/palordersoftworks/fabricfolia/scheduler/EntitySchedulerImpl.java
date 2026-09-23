@@ -90,6 +90,35 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 				executeFollowing(entityHandle, task, retired));
 	}
 
+	@Override
+	public com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandle runAtFixedRate(
+			Object entityHandle, int initialDelayTicks, int periodTicks, Runnable task, Runnable retired) {
+		Objects.requireNonNull(entityHandle, "entityHandle");
+		if (periodTicks <= 0) {
+			throw new IllegalArgumentException("periodTicks must be positive");
+		}
+		com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandleView handle =
+				new com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandleView();
+		scheduleRepeating(entityHandle, initialDelayTicks, periodTicks, task, retired, handle);
+		return handle;
+	}
+
+	private void scheduleRepeating(Object entityHandle, int delay, int period, Runnable task,
+			Runnable retired, com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandleView handle) {
+		runDelayed(entityHandle, delay, () -> {
+			if (handle.isCancelled()) {
+				return;
+			}
+			try {
+				task.run();
+			} finally {
+				if (!handle.isCancelled()) {
+					scheduleRepeating(entityHandle, period, period, task, retired, handle);
+				}
+			}
+		}, retired);
+	}
+
 	/**
 	 * The execution-time gate shared by immediate and delayed variants: runs
 	 * the task only if the entity still exists AND its current owner is this
@@ -114,7 +143,14 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 			// owner's queue: follow the entity — re-enqueue into the NEW
 			// owner (documented contract). The old owner never executes
 			// entity state mutation it no longer owns.
-			engine.enqueue(current, () -> executeFollowing(entityHandle, task, retired));
+			boolean followed = engine.enqueue(current, () ->
+					executeFollowing(entityHandle, task, retired));
+			if (!followed && retired != null) {
+				// The new owner died in the resolve→enqueue window: the entity's
+				// owner no longer exists, so the task retires rather than
+				// vanishing silently.
+				retired.run();
+			}
 			return;
 		}
 		task.run();

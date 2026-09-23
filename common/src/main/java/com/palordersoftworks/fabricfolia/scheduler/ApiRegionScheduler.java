@@ -144,17 +144,8 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 		return Optional.ofNullable(region);
 	}
 
-	/** Simple cancel handle: monotonic, safe from any thread. */
-	static final class ApiCancelHandle implements CancelHandle {
-		private volatile boolean cancelled;
-
-		boolean isCancelled() {
-			return cancelled;
-		}
-
-		@Override
-		public void cancel() {
-			cancelled = true;
-		}
+	/** Cancel handle: the shared API view (readable by the repeating machinery). */
+	static final class ApiCancelHandle
+			extends com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandleView {
 	}
 }

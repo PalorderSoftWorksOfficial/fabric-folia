@@ -23,14 +23,15 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * ({@code runOnceConnected} submits from {@code channelRead0}).
  *
  * <p>This redirect routes every drained action through
- * {@code NetworkDispatch.runOnOwner}: on the server thread (the normal
- * path) the action executes exactly where vanilla would have it — zero
- * behavioral delta, and the global scheduler's dispatch is skipped because
- * the context check runs first. On a network-classified thread the action
- * is hopped to the global context (the server thread's serialization)
- * instead of mutating game state on the event loop. No packet content is
- * parsed, classified, or delayed; the boundary is the thread, which is the
- * only thing that can race.</p>
+ * {@code NetworkDispatch.runForConnection}: on the server thread or a
+ * region worker (the normal paths — the latter is the staged connection
+ * tick draining its own queue) the action executes exactly where vanilla
+ * would have it — zero behavioral delta. On a network-classified thread
+ * the action is hopped to the region owning the connection's player when
+ * connection-owner routing applies, or to the global context otherwise
+ * (handshake listeners, removed players) — never mutated on the event
+ * loop. No packet content is parsed, classified, or delayed; the boundary
+ * is the thread, which is the only thing that can race.</p>
  *
  * <p>Why not wrap the packet handler bodies: vanilla's
  * {@code ensureRunningOnSameThread} already re-homes tick-sensitive
@@ -49,7 +50,7 @@ public abstract class ConnectionFlushQueueMixin {
 			require = 1)
 	private void fabricfolia$dispatchDrainedAction(java.util.function.Consumer action,
 	                                               Object connection) {
-		NetworkDispatch.runOnOwner(FabricFoliaMod.engine(), null, 0, 0,
+		NetworkDispatch.runForConnection(FabricFoliaMod.engine(), (Connection) connection,
 				() -> action.accept(connection));
 	}
 }
