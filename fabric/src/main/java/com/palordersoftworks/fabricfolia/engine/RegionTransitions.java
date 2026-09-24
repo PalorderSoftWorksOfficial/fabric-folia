@@ -58,6 +58,16 @@ public final class RegionTransitions {
 	private static final AtomicLong TRANSITIONS = new AtomicLong();
 	private static final AtomicLong SAME_REGION = new AtomicLong();
 	private static final AtomicLong DROPPED = new AtomicLong();
+	/**
+	 * Transitions refused because the destination world is not attached to
+	 * the engine (no scheduler/regionizer for its key). A DIFFERENT failure
+	 * mode from {@link #DROPPED}: unattached is a standing configuration
+	 * gap (the engine never serves that dimension), while dropped is a
+	 * transient race the caller's vanilla path re-derives next tick.
+	 * Separate counters so an operator can tell "fix your world attachment"
+	 * from "expected unload race" at a glance.
+	 */
+	private static final AtomicLong UNATTACHED = new AtomicLong();
 	/** Transitions captured from the ServerPlayer.teleport override. */
 	private static final AtomicLong PLAYER_TRANSITIONS = new AtomicLong();
 
@@ -102,8 +112,10 @@ public final class RegionTransitions {
 
 		String worldKey = worldKey(destination);
 		RegionScheduler scheduler = engine.schedulerFor(worldKey);
-		if (scheduler == null) {
-			DROPPED.incrementAndGet();
+		if (scheduler == null || engine.regionizerFor(worldKey) == null) {
+			// World not attached (engine never served this dimension): a
+			// configuration gap, not an unload race — counted separately.
+			UNATTACHED.incrementAndGet();
 			return false;
 		}
 
@@ -158,7 +170,9 @@ public final class RegionTransitions {
 		RegionScheduler scheduler = engine.schedulerFor(worldKey);
 		WorldRegionizer regionizer = engine.regionizerFor(worldKey);
 		if (scheduler == null || regionizer == null) {
-			DROPPED.incrementAndGet();
+			// World not attached (engine never served this dimension): a
+			// configuration gap, not an unload race — counted separately.
+			UNATTACHED.incrementAndGet();
 			return false;
 		}
 
@@ -266,12 +280,28 @@ public final class RegionTransitions {
 		PLAYER_TRANSITIONS.incrementAndGet();
 	}
 
+	/**
+	 * Immutable counter snapshot for tests and diagnostics. Plain volatile
+	 * reads (mandate §35: counters are not safety state — a racy snapshot is
+	 * accepted and documented, same as the command output).
+	 */
+	public record Snapshot(long transitions, long sameRegion, long dropped,
+	                       long unattached, long playerTransitions) {
+	}
+
+	/** @return a best-effort point-in-time read of all transition counters. */
+	public static Snapshot snapshot() {
+		return new Snapshot(TRANSITIONS.get(), SAME_REGION.get(), DROPPED.get(),
+				UNATTACHED.get(), PLAYER_TRANSITIONS.get());
+	}
+
 	/** Metrics lines for /folia metrics. */
 	public static List<String> metricsLines() {
 		java.util.ArrayList<String> lines = new java.util.ArrayList<>();
 		lines.add("transitions dispatched: " + TRANSITIONS.get()
 				+ " (same-region: " + SAME_REGION.get()
-				+ ", dropped: " + DROPPED.get() + ")");
+				+ ", dropped: " + DROPPED.get()
+				+ ", unattached-world: " + UNATTACHED.get() + ")");
 		lines.add("player transitions dispatched: " + PLAYER_TRANSITIONS.get());
 		lines.add("block broadcasts deferred from workers: "
 				+ ChunkBroadcastDeferral.deferred()

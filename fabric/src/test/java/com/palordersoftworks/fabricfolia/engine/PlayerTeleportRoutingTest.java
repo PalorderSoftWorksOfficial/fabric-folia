@@ -113,6 +113,31 @@ class PlayerTeleportRoutingTest {
 	}
 
 	@Test
+	void unattachedWorldRefusalIsCountedSeparatelyFromDrops() throws Exception {
+		FabricFoliaEngine engine = bootEngine();
+		try {
+			long before = RegionTransitions.snapshot().unattached();
+
+			// The engine is live and its own world works…
+			engine.attachWorld("minecraft:overworld", 10, null);
+			assertTrue(RegionTransitions.dispatchKeyed(engine, "minecraft:overworld",
+					0, 0, null, () -> { }), "attached world must dispatch");
+
+			// …but a dimension the engine never attached must be refused as
+			// UNATTACHED, not folded into the transient unload-race counter:
+			// an operator reading the metrics line must be able to tell "fix
+			// the world attachment" from "expected enqueue race".
+			assertFalse(RegionTransitions.dispatchKeyed(engine, "minecraft:the_nether",
+					0, 0, null, () -> { }),
+					"unattached world must be refused, not dispatched");
+			assertEquals(before + 1, RegionTransitions.snapshot().unattached(),
+					"exactly one unattached refusal must be counted");
+		} finally {
+			engine.shutdown(5000);
+		}
+	}
+
+	@Test
 	void everyAcceptedDispatchRunsItsBodyExactlyOnce() throws Exception {
 		FabricFoliaEngine engine = bootEngine();
 		try {
