@@ -30,9 +30,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * the staged connection tick — behind it on the same region queue,
  * preserving per-player ordering. Vanilla's shared server-thread queue is
  * the fallback in every other case: non-player listeners (login, config,
- * status), unowned chunks, dead/closed regions, engine down. The thrown
- * exception and the catch in {@code Connection.channelRead0} are vanilla's
- * own — the packet flow outside the funnel is untouched.</p>
+ * status), unowned chunks, dead/closed regions, engine down. The
+ * {@code PERFORM_RESPAWN} client command is an intentional additional
+ * fallback: its replacement-player/global-list body is left in vanilla's
+ * queue, which {@code MinecraftServer.processPacketsAndTick} drains on the
+ * server thread. The thrown exception and the catch in
+ * {@code Connection.channelRead0} are vanilla's own — the packet flow
+ * outside the funnel is untouched.</p>
  */
 @Mixin(PacketProcessor.class)
 public abstract class PacketProcessorMixin {

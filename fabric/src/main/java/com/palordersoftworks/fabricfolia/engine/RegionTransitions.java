@@ -5,9 +5,13 @@
 
 package com.palordersoftworks.fabricfolia.engine;
 
+import com.palordersoftworks.fabricfolia.FabricFoliaMod;
+import com.palordersoftworks.fabricfolia.api.ThreadContext;
 import com.palordersoftworks.fabricfolia.metrics.RegionMetrics;
 import com.palordersoftworks.fabricfolia.region.Region;
+import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
+import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -54,6 +58,8 @@ public final class RegionTransitions {
 	private static final AtomicLong TRANSITIONS = new AtomicLong();
 	private static final AtomicLong SAME_REGION = new AtomicLong();
 	private static final AtomicLong DROPPED = new AtomicLong();
+	/** Transitions captured from the ServerPlayer.teleport override. */
+	private static final AtomicLong PLAYER_TRANSITIONS = new AtomicLong();
 
 	/** In-flight transition guard: entity id -> stamp of the enqueued one. */
 	private static final ConcurrentHashMap<Integer, Long> IN_FLIGHT = new ConcurrentHashMap<>();
@@ -124,6 +130,100 @@ public final class RegionTransitions {
 		return true;
 	}
 
+	/**
+	 * World-key variant of {@link #dispatch} for callers that already hold
+	 * the destination world's key (the player teleport mixin computes it
+	 * before its dispatch decision) and for unit tests, which cannot build
+	 * a live {@link ServerLevel}. {@code entity} may be null: the
+	 * idempotence window is keyed by entity id, so a null entity skips it
+	 * (documented — the capture mixins always pass the entity).
+	 *
+	 * @return true when the transition was dispatched, false when dropped
+	 */
+	public static boolean dispatchKeyed(FabricFoliaEngine engine,
+			String worldKey, int chunkX, int chunkZ,
+			Entity entity, Runnable vanillaBody) {
+		if (engine == null || worldKey == null || vanillaBody == null) {
+			return false;
+		}
+		if (entity != null) {
+			long now = System.nanoTime();
+			Long prior = IN_FLIGHT.put(entity.getId(), now);
+			if (prior != null && now - prior < TICK_WINDOW_NANOS) {
+				return true; // duplicate of a just-dispatched transition
+			}
+			IN_FLIGHT.values().removeIf(stamp -> now - stamp >= TICK_WINDOW_NANOS);
+		}
+
+		RegionScheduler scheduler = engine.schedulerFor(worldKey);
+		WorldRegionizer regionizer = engine.regionizerFor(worldKey);
+		if (scheduler == null || regionizer == null) {
+			DROPPED.incrementAndGet();
+			return false;
+		}
+
+		TRANSITIONS.incrementAndGet();
+
+		// Unowned destination: no region has a claim there; raw mutation
+		// from a worker would be exactly the race this class prevents, so
+		// hop to the global scheduler (serialized single-consumer queue).
+		Region owner = regionizer.ownerOfChunk(chunkX, chunkZ);
+		if (owner == null) {
+			engine.globalScheduler().run(guardedKeyed(engine, worldKey, entity, vanillaBody));
+			return true;
+		}
+
+		boolean enqueued = scheduler.enqueue(owner,
+				guardedKeyed(engine, worldKey, entity, vanillaBody));
+		if (!enqueued) {
+			// Region died between resolution and enqueue (unload race):
+			// documented drop — the caller's vanilla path re-derives the
+			// destination next tick (portal processors re-enter).
+			DROPPED.incrementAndGet();
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * True when the CURRENT thread's owning region is also the owner of
+	 * {@code (chunkX, chunkZ)} in {@code worldKey} — the caller is already
+	 * executing on the destination context. This is the re-entrance gate
+	 * for dispatched transition bodies: the re-invoked teleport inside the
+	 * body must run its vanilla mutation inline, not dispatch again (an
+	 * infinite enqueue loop otherwise).
+	 */
+	public static boolean isCurrentContextOwner(String worldKey,
+			int chunkX, int chunkZ) {
+		ThreadOwnership.Context current = ThreadOwnership.current();
+		if (current.kind() != ThreadContext.Kind.REGION || current.region() == null) {
+			return false;
+		}
+		FabricFoliaEngine engine = FabricFoliaMod.engine();
+		if (engine == null) {
+			return false;
+		}
+		WorldRegionizer regionizer = engine.regionizerFor(worldKey);
+		return regionizer != null
+				&& regionizer.ownerOfChunk(chunkX, chunkZ) == current.region();
+	}
+
+	/** Wraps a keyed transition body with the engine's exception isolation. */
+	private static Runnable guardedKeyed(FabricFoliaEngine engine,
+			String worldKey, Entity entity, Runnable body) {
+		String who = entity == null ? "?" : String.valueOf(entity.getId());
+		return () -> {
+			try {
+				body.run();
+			} catch (Throwable t) {
+				// Same isolation convention as staged gameplay bodies: log
+				// world/entity context, never kill the executing worker.
+				engine.reportError("Entity transition failed in world "
+						+ worldKey + " (entity " + who + "): " + t);
+			}
+		};
+	}
+
 	/** Wraps a transition body with the engine's exception isolation. */
 	private static Runnable guarded(FabricFoliaEngine engine,
 			ServerLevel destination, Entity entity, Runnable body) {
@@ -161,12 +261,18 @@ public final class RegionTransitions {
 		return false;
 	}
 
+	/** Records a player teleport capture (the player mixin's diagnostics counter). */
+	public static void recordPlayerTransition() {
+		PLAYER_TRANSITIONS.incrementAndGet();
+	}
+
 	/** Metrics lines for /folia metrics. */
 	public static List<String> metricsLines() {
 		java.util.ArrayList<String> lines = new java.util.ArrayList<>();
 		lines.add("transitions dispatched: " + TRANSITIONS.get()
 				+ " (same-region: " + SAME_REGION.get()
 				+ ", dropped: " + DROPPED.get() + ")");
+		lines.add("player transitions dispatched: " + PLAYER_TRANSITIONS.get());
 		lines.add("block broadcasts deferred from workers: "
 				+ ChunkBroadcastDeferral.deferred()
 				+ " (drained: " + ChunkBroadcastDeferral.drained() + ")");

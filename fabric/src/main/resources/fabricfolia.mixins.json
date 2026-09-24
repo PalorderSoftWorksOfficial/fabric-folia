@@ -25,6 +25,7 @@
     "ServerConnectionTickMixin",
     "ServerLevelTickMixin",
     "ServerLevelUnloadMixin",
+    "ServerPlayerTeleportMixin",
     "ServerPlayerTickMixin"
   ],
   "injectors": {

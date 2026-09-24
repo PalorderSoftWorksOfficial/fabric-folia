@@ -65,11 +65,11 @@ named test. Update it in the same change that moves a status.
 |---|---|---|
 | Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
 | Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (recorded protocol, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
-| Teleportation (multi-phase, region-safe) | PARTIAL | `RegionTransitions.dispatch` + `EntityTeleportMixin`: worker-context teleports resolving to another region/world are routed to the destination context; same-region teleports stay inline vanilla |
+| Teleportation (multi-phase, region-safe) | PARTIAL | `RegionTransitions.dispatch` + `EntityTeleportMixin`: worker-context teleports resolving to another region/world are routed to the destination context; same-region teleports stay inline vanilla. `ServerPlayerTeleportMixin` closes the player hole: `ServerPlayer` overrides `teleport(TeleportTransition)` (covariant return), so every player dimension change/portal crossing funnels through an override the Entity-level mixin could not see — player captures now dispatch through the same keyed destination-context path (region hop, global fallback for unowned chunks, re-entrance-safe) |
 | Player login placement | NOT_IMPLEMENTED | |
-| Player respawn | NOT_IMPLEMENTED | |
-| Dimension transfer (region-to-region across worlds) | PARTIAL | the cross-world branch of `RegionTransitions.dispatch` hands the transition to the destination world's scheduler; full multi-phase login/respawn placement still open |
-| Portals | NOT_IMPLEMENTED | |
+| Player respawn | PARTIAL | the normal `PERFORM_RESPAWN` client command is deliberately excluded from owner-region packet routing: `PacketUtilsMixin` rejects the region fast path and `PacketProcessorMixin` leaves the packet in vanilla's server-thread queue, where `MinecraftServer.processPacketsAndTick` drains it. This protects `PlayerList.respawn`'s replacement-player construction, global `PlayerList` mutations, and level entity-manager placement. Direct `PlayerList.respawn` calls from mods and destination-region placement hooks remain open |
+| Dimension transfer (region-to-region across worlds) | PARTIAL | the cross-world branch of `RegionTransitions.dispatch` hands the transition to the destination world's scheduler; the `ServerPlayer.teleport` override (the funnel for every player cross-dimension move) now dispatches through the same path via `ServerPlayerTeleportMixin` — accepted risk: the branch's global `PlayerList` mutations run on the destination region's worker (documented in the mixin); full multi-phase login/respawn placement still open |
+| Portals | PARTIAL | the portal transition funnel is captured end-to-end for transitions: `Entity.handlePortal` virtual-dispatches `teleport(transition)`, which now lands in the region-safe capture for both the `Entity` base and the `ServerPlayer` override (verified: `ServerPlayer` does not override `handlePortal`, so players hit the override). Portal-side staging beyond the teleport funnel (portal search/creation on the origin context) still open |
 | Networking dispatch (netty → region/global) | IMPLEMENTED | the pending-action queue in `Connection` is the wired seam: `ConnectionPacketDispatchMixin` classifies event-loop-drained tasks (bounded window), `ConnectionFlushQueueMixin` routes every drained action through `NetworkDispatch.runOnOwner` (inline on the server thread, global hop from network context); NetworkDispatchTest proves region/global/engine-down routing through the real engine. Live client-session evidence still open (no GUI client in CI) |
 | Global→Region / Region→Global task flows | TESTED | global queue + region queues; ThreadContextTest |
 
@@ -118,10 +118,13 @@ classification is enforced rather than documented. The failure policy and
 legacy dispatch policy are real, wired, and tested.
 
 What does **not** exist yet is Folia's full gameplay integration layer:
-entity migration tooling beyond the tracker's live hooks, teleport/login/
-respawn/dimension transfer as first-class regionized flows, chunk-lifecycle
-ownership beyond the unload hook, and per-region tick state beyond the
-staged slices. The player path now stages (connection tick, packets,
+entity migration tooling beyond the tracker's live hooks, teleport/**login/**
+respawn/dimension transfer as first-class regionized flows (player teleport
+and dimension transfer now route through the destination-context dispatch;
+the normal respawn command is server-thread-routed, but direct
+`PlayerList.respawn` callers and destination-region placement remain open;
+login placement is still open), chunk-lifecycle ownership beyond the unload
+hook, and per-region tick state beyond the staged slices. The player path now stages (connection tick, packets,
 physics on the owning region, gated by `gameplay.stage-player-path`),
 which was the last major tick surface on the server thread. Those
 remaining integration flows are the mandate's remaining bulk, and this

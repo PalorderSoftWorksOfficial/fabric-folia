@@ -144,6 +144,18 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 | Transformation | when the caller is a region worker and the destination resolves to another region/world, routes the transition through `RegionTransitions.dispatch` (destination-context execution) instead of mutating state from the wrong context |
 | Effect when disarmed / engine down | falls through to vanilla teleport |
 
+### ServerPlayerTeleportMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerPlayerTeleportMixin` |
+| Target | `ServerPlayer.teleport(TeleportTransition)` head (`@Inject`, cancellable, covariant-return descriptor) |
+| Why this seam | `ServerPlayer` OVERRIDES `teleport(TeleportTransition)` (26.2 bytecode), so `EntityTeleportMixin` never sees player transitions: portals reach it via `Entity.handlePortal`'s virtual dispatch, mods/commands call it directly, and `ServerPlayer.teleportTo(ServerLevel,...)` delegates to it through `Player.teleportTo`. With player-path staging on, the connection body drives `handlePortal` ON a region worker, so the override's cross-dimension branch (level removal/addition, `PlayerList` broadcasts, profiler) ran from the wrong context |
+| Transformation | on a REGION-context caller whose current region does not own the destination chunk: records the player-transition metric, dispatches the whole vanilla body through `RegionTransitions.dispatchKeyed` (destination region's queue, global scheduler for unowned destinations) and cancels the original call with vanilla's own return convention |
+| Recursion safety | the dispatched body re-invokes `teleport`; that re-entry hits `RegionTransitions.isCurrentContextOwner` (current REGION context == destination owner) and runs inline — the recursion breaker and the same-dimension fast path are the same check |
+| Accepted risk | the cross-dimension branch's global `PlayerList` mutations execute on the destination region's worker, not the server thread (vanilla itself defers cross-dimension moves inside its tick loop; a synchronous server-thread hop would violate the no-cross-context-wait mandate) |
+| Effect when disarmed / engine down / non-region caller | falls through to vanilla teleport, byte-for-byte |
+
 ### ServerChunkCacheMixin
 
 | Field | Value |
@@ -182,8 +194,8 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 |---|---|
 | Class | `fabricfolia.mixins.json` → `PacketProcessorMixin` |
 | Target | `PacketProcessor.scheduleIfPossible(PacketListener, Packet)` HEAD (`@Inject`, cancellable) |
-| Transformation | when a re-homing packet handler's listener belongs to a player whose chunks a region owns, routes the handler to that region's queue (in REGION context, with vanilla's error triage preserved in `RegionPlayerRouting.safelyHandle`) and cancels the vanilla server-thread queue add; otherwise falls through untouched |
-| Why this seam | `scheduleIfPossible` is the single funnel of vanilla's `ensureRunningOnSameThread` re-home protocol — capturing it routes handlers to the same owner as the staged connection tick, preserving per-player ordering |
+| Transformation | when a re-homing packet handler's listener belongs to a player whose chunks a region owns, routes the handler to that region's queue (in REGION context, with vanilla's error triage preserved in `RegionPlayerRouting.safelyHandle`) and cancels the vanilla server-thread queue add; `PERFORM_RESPAWN` is deliberately left in vanilla's queue so `PlayerList.respawn` runs on the server thread; all other cases fall through untouched |
+| Why this seam | `scheduleIfPossible` is the single funnel of vanilla's `ensureRunningOnSameThread` re-home protocol — capturing it routes handlers to the same owner as the staged connection tick, preserving per-player ordering; respawn is the narrow exception because it constructs a replacement player and mutates global `PlayerList` state |
 | Effect when disarmed / fallback | vanilla's shared server-thread packet queue |
 
 ### PacketUtilsMixin
@@ -192,6 +204,6 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 |---|---|
 | Class | `fabricfolia.mixins.json` → `PacketUtilsMixin` |
 | Target | `PacketUtils.ensureRunningOnSameThread(Packet, PacketListener, PacketProcessor)` — `@Redirect` of the `isSameThread()` call site |
-| Transformation | returns true when the handler is already executing in the REGION context of the region owning the listener's player (drained from that region's queue); otherwise forwards to the real `isSameThread` — server-thread, event-loop, and unowned behavior unchanged |
-| Why this seam | without it, handlers drained on their owning region would re-throw `RunningOnDifferentThreadException` and ping-pong back to the server thread, defeating ownership; the covered overload is the one the `ServerLevel` convenience overload delegates to, so every game handler is handled |
+| Transformation | returns true when the handler is already executing in the REGION context of the region owning the listener's player (drained from that region's queue); `PERFORM_RESPAWN` is the exception and returns false on a region so vanilla queues it for the server thread; otherwise forwards to the real `isSameThread` — server-thread, event-loop, and unowned behavior unchanged |
+| Why this seam | without it, handlers drained on their owning region would re-throw `RunningOnDifferentThreadException` and ping-pong back to the server thread, defeating ownership; the respawn carve-out keeps `PlayerList.respawn`'s replacement-player/global-list body on the server thread; the covered overload is the one the `ServerLevel` convenience overload delegates to, so every game handler is handled |
 | Effect when disarmed / gate off | vanilla's exact thread comparison everywhere |

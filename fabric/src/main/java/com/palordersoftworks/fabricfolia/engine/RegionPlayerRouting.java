@@ -6,6 +6,7 @@
 package com.palordersoftworks.fabricfolia.engine;
 
 import com.palordersoftworks.fabricfolia.FabricFoliaMod;
+import com.palordersoftworks.fabricfolia.api.ThreadContext;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
@@ -16,6 +17,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.PacketListener;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketUtils;
+import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
@@ -84,6 +86,19 @@ import net.minecraft.world.level.ChunkPos;
  *   drained handlers run there instead of re-queueing forever.</li>
  * </ul>
  *
+ * <p><strong>Respawn carve-out:</strong> {@code PERFORM_RESPAWN} is the
+ * one game command deliberately excluded from the owner-region pass. It
+ * enters {@code PlayerList.respawn}, which constructs a replacement
+ * {@code ServerPlayer} and mutates the global player list, level entity
+ * manager, and respawn-anchor state in one synchronous vanilla body. The
+ * owner check therefore rejects the packet on a region worker; the
+ * {@code PacketProcessorMixin} then leaves it in vanilla's packet queue,
+ * which {@code MinecraftServer.processPacketsAndTick} drains on the server
+ * thread. This preserves the vanilla respawn contract without a blocking
+ * cross-context wait, while ordinary game packets remain region-owned. Direct
+ * calls to {@code PlayerList.respawn} from mods are not covered by this
+ * packet-level seam.</p>
+ *
  * <p><strong>Threading (mandate §8):</strong> stage decisions run on the
  * server thread (the SCL tick iterator); execution runs on region workers;
  * the packet re-home path runs on Netty event loops (classification only —
@@ -100,6 +115,9 @@ public final class RegionPlayerRouting {
 	private static final java.util.concurrent.atomic.AtomicLong REHOME_REGION =
 			new java.util.concurrent.atomic.AtomicLong();
 	private static final java.util.concurrent.atomic.AtomicLong REHOME_SERVER =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** Respawn commands deliberately left on the server-thread packet queue. */
+	private static final java.util.concurrent.atomic.AtomicLong RESPAWN_COMMANDS =
 			new java.util.concurrent.atomic.AtomicLong();
 
 	private RegionPlayerRouting() {
@@ -223,6 +241,38 @@ public final class RegionPlayerRouting {
 	}
 
 	/**
+	 * Identifies the vanilla client command that performs a player respawn.
+	 * Kept as a small pure classifier so the packet-routing contract is
+	 * testable without constructing a live player or listener.
+	 */
+	public static boolean isRespawnCommand(Packet<?> packet) {
+		return packet instanceof ServerboundClientCommandPacket command
+				&& command.getAction() == ServerboundClientCommandPacket.Action.PERFORM_RESPAWN;
+	}
+
+	/**
+	 * True when the current region-owned packet path must deliberately let
+	 * vanilla re-home this packet to the server-thread processor queue.
+	 *
+	 * <p>The check is intentionally narrow: it applies only to a live engine
+	 * with player-path staging enabled, the current REGION context, and the
+	 * {@code PERFORM_RESPAWN} action. All other packets retain the normal
+	 * owner-region routing decision.</p>
+	 */
+	public static boolean requiresServerThreadForRespawn(Packet<?> packet) {
+		if (!isRespawnCommand(packet)
+				|| ThreadOwnership.current().kind() != ThreadContext.Kind.REGION) {
+			return false;
+		}
+		return FabricFoliaMod.engine() != null && stagingPlayerPath();
+	}
+
+	/** Counts a respawn command deliberately left on the server-thread queue. */
+	public static void noteRespawnToServerThread() {
+		RESPAWN_COMMANDS.incrementAndGet();
+	}
+
+	/**
 	 * The packet re-home protocol's region leg: called from the
 	 * {@code PacketProcessor.scheduleIfPossible} capture when a handler
 	 * re-home lands on a non-owner thread. Routes the handler execution to
@@ -230,12 +280,21 @@ public final class RegionPlayerRouting {
 	 *
 	 * @return true when the packet was routed to a region (the original
 	 *         schedule is skipped); false to fall through to vanilla's
-	 *         server-thread processor queue.
+	 *         server-thread processor queue. Respawn commands always take
+	 *         the latter path while player-path staging is active.
 	 */
 	public static boolean schedulePacketToRegion(PacketListener listener,
 	                                             Packet<?> packet) {
 		FabricFoliaEngine engine = FabricFoliaMod.engine();
 		if (engine == null || !stagingPlayerPath()) {
+			return false;
+		}
+		if (isRespawnCommand(packet)) {
+			// Do not cancel vanilla's scheduleIfPossible here. Its processor
+			// queue is drained by MinecraftServer on the server thread, which
+			// is the correct owner for PlayerList.respawn's replacement-player
+			// construction and global state mutations.
+			noteRespawnToServerThread();
 			return false;
 		}
 		if (!(listener instanceof ServerGamePacketListenerImpl gameListener)) {
@@ -319,7 +378,8 @@ public final class RegionPlayerRouting {
 	public static String metricsLine() {
 		return "player path: connection ticks staged=" + STAGED_CONNECTIONS.get()
 				+ ", packet rehomes region=" + REHOME_REGION.get()
-				+ " server=" + REHOME_SERVER.get();
+				+ " server=" + REHOME_SERVER.get()
+				+ ", respawns server-thread=" + RESPAWN_COMMANDS.get();
 	}
 
 	private static boolean fabricfolia$physicsNeighborhoodLoaded(ServerPlayer player) {
