@@ -132,9 +132,34 @@ class CommentedYamlTest {
 
 		var merged = ConfigWriter.mergePreservingComments(parsed, ConfigSchema.get());
 		String text = YamlWriter.write(merged);
-		assertEquals(1, countKey(text, "enabled:"),
-				"duplicate must not survive a save");
+		assertEquals(1, countKey(sectionBlock(text, "general:"), "enabled:"),
+				"duplicate must not survive a save (within its own section)");
 		assertTrue(text.contains("enabled: false"));
+	}
+
+	/**
+	 * Returns the lines of one top-level section (from its {@code section:}
+	 * line until the next top-level key), so key counting stays scoped to
+	 * the section the test means — other sections legitimately repeat key
+	 * names like {@code enabled}.
+	 */
+	private static String sectionBlock(String text, String sectionLine) {
+		StringBuilder block = new StringBuilder();
+		boolean inSection = false;
+		for (String line : text.split("\\n", -1)) {
+			if (line.equals(sectionLine)) {
+				inSection = true;
+				block.append(line).append('\n');
+				continue;
+			}
+			if (inSection) {
+				if (!line.isEmpty() && !Character.isWhitespace(line.charAt(0))) {
+					break;
+				}
+				block.append(line).append('\n');
+			}
+		}
+		return block.toString();
 	}
 
 	private static int countKey(String haystack, String needle) {
@@ -147,8 +172,7 @@ class CommentedYamlTest {
 				// Part of a longer key like enabled-foo — not a duplicate.
 				count--;
 			}
-		}
-		return count;
+		}		return count;
 	}
 
 	@Test

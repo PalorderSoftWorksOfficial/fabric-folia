@@ -15,7 +15,11 @@ that would fail if the claim became false.
 The whole suite runs in a plain JVM — **no Minecraft classes on the
 classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
 
-## Current suite (76 tests, 13 classes)
+## Current suite
+
+Counted straight from the JUnit XML after a forced `--rerun-tasks` run —
+the number drifts as tests are added; **116 as of the 2026-09-24 region-pipeline turn**
+(see the engine section for the newest additions).
 
 ### Server GUI icon (`gui/`, fabric module)
 
@@ -113,6 +117,38 @@ classpath** (see ARCHITECTURE.md §1 for why that is a feature, not a gap).
   report (operation / current context / target ownership / thread / expected
   context / correct entry point), WARN logs and continues, OFF is a no-op,
   `mayAccessRegion`/`assertRegionAccess` semantics.
+
+### Region pipeline and patch layer (2026-09-24 region-pipeline turn)
+
+- `RegionPipelineTest` (fabric, engine/) — the whole tick pipeline through
+  the REAL engine: chunk registration creates real regions, the coordinator
+  dispatches and the region re-arms its deadline (multi-tick soak with
+  MSPT instrumentation), a queued task executes with the owning region as
+  the current REGION context (tick-thread identity), and adjacent
+  activity merges into a target region at its tick end while distant
+  regions stay independent.
+- `PatchRegistryTest` (common, patches/) — the toggleable optimization
+  layer: default-on, layer switch, per-patch override surviving a layer
+  re-enable, unknown names are inert, invocation/fallback counters,
+  duplicate registration is a no-op.
+
+### Player transitions and network dispatch (`engine/`, fabric module)
+
+- `NetworkDispatchTest` — network-context routing through the real engine:
+  non-network callers run inline, network work hops to the owning region,
+  unowned positions hop to the global context, engine-down drops (never
+  inline on an event loop).
+- `PlayerTeleportRoutingTest` — teleport dispatch through the real engine:
+  region hop to the destination region, global hop (on the
+  `FabricFolia-Global` thread) for unowned destinations, engine-down
+  refusal of both dispatch and the ownership check, exactly-once execution
+  of every accepted dispatch, and **unattached-world refusals counted under
+  `unattached`, separately from transient drops** (a standing configuration
+  gap must not be misread as an unload race in `/folia metrics`).
+- `PlayerRespawnRoutingTest` — only
+  `ServerboundClientCommandPacket.Action.PERFORM_RESPAWN` classifies as the
+  server-thread packet, and the classifier never claims a re-home without a
+  live engine (the respawn carve-out's testable half).
 
 ### Region-local data (`scheduler/`)
 

@@ -134,7 +134,15 @@ public final class RegionStageHub {
 
 	/** @return true when the calling level's slice is staged to regions this session. */
 	public static boolean isStaging(Level level, Slice slice) {
-		return ACTIVE.get() && HUBS_BY_LEVEL.containsKey(level);
+		if (!ACTIVE.get() || !HUBS_BY_LEVEL.containsKey(level)) {
+			return false;
+		}
+		return com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled(switch (slice) {
+			case ENTITY -> "stage-entity-ticks";
+			case BLOCK_ENTITY -> "stage-block-entity-ticks";
+			case SCHEDULED_TICK -> "stage-scheduled-ticks";
+			case PLAYER -> "stage-player-path";
+		});
 	}
 
 	/**
