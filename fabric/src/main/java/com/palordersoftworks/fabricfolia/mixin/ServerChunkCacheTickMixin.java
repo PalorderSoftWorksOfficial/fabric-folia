@@ -100,7 +100,8 @@ public abstract class ServerChunkCacheTickMixin {
 		// Identifier; verified against the 26.2 jar).
 		String worldName = level.dimension().identifier().toString();
 
-		if (interceptor == null || !interceptor.isIntercepting(worldName)) {
+		if (interceptor == null || !interceptor.isIntercepting(worldName)
+				|| !com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("regionized-random-ticks")) {
 			// Not intercepting: run vanilla's own enumeration body unchanged.
 			chunkMap.forEachBlockTickingChunk(vanillaConsumer);
 			return;

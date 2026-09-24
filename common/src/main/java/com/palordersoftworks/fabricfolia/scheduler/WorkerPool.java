@@ -56,6 +56,8 @@ public final class WorkerPool {
 	private final java.util.ArrayDeque<Task> handoff = new java.util.ArrayDeque<>();
 	private final AtomicBoolean running = new AtomicBoolean(true);
 	private final CountDownLatch terminated;
+	/** Workers currently executing a task (diagnostics: busy vs. waiting). */
+	private final java.util.concurrent.atomic.AtomicInteger busyCount = new java.util.concurrent.atomic.AtomicInteger();
 	/** Per-worker keepalive: index → nanoTime when that worker last took a task. */
 	private final long[] lastTaskStartNanos;
 
@@ -114,6 +116,11 @@ public final class WorkerPool {
 		}
 	}
 
+	/** @return how many workers are executing a task right now (diagnostics). */
+	public int busyCount() {
+		return busyCount.get();
+	}
+
 	/** Stops accepting tasks and waits for workers to finish current work. */
 	public void shutdown(long timeoutMillis) throws InterruptedException {
 		running.set(false);
@@ -152,6 +159,7 @@ public final class WorkerPool {
 					continue;
 				}
 				lastTaskStartNanos[workerIndex] = System.nanoTime();
+				busyCount.incrementAndGet();
 				try {
 					task.run();
 				} catch (Throwable t) {
@@ -160,6 +168,8 @@ public final class WorkerPool {
 					// never kill a worker thread. It re-reports, never swallows
 					// silently: the wrapper already logged; we only preserve the
 					// worker.
+				} finally {
+					busyCount.decrementAndGet();
 				}
 			}
 		} finally {

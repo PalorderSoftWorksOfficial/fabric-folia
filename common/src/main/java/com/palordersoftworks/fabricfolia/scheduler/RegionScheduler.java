@@ -171,6 +171,40 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		this.regionizer.addListener(this);
 	}
 
+	/**
+	 * @return the number of region tick tasks currently queued for a worker
+	 * across the pool (diagnostics: sustained growth means the pool is
+	 * saturated; a healthy idle server reads 0 with waiting workers).
+	 */
+	public int queuedRegionTasks() {
+		return pool.queuedTaskCount();
+	}
+
+	/**
+	 * @return how many of the pool's workers are executing a task right now
+	 * (diagnostics: distinguishes the healthy idle TIMED_WAITING state from
+	 * workers unable to receive work).
+	 */
+	public int busyWorkers() {
+		return pool.busyCount();
+	}
+
+	/**
+	 * @return regions in READY state with a due deadline — the set the
+	 * coordinator is about to dispatch (diagnostics for the pipeline check:
+	 * queued &gt; 0 while workers idle would be the failure signature).
+	 */
+	public int dueRegionCount() {
+		long now = nanoClock.getAsLong();
+		int due = 0;
+		for (Region region : regionizer.liveRegions()) {
+			if (region.state() == RegionState.READY && region.nextTickDeadlineNanos() <= now) {
+				due++;
+			}
+		}
+		return due;
+	}
+
 	/** Starts the coordinator dispatch loop. */
 	public void start() {
 		if (!running.compareAndSet(false, true)) {
@@ -498,6 +532,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 					+ "ms from submit to start, pool queue=" + pool.queuedTaskCount());
 		}
 		long start = nanoClock.getAsLong();
+		region.markTickStart();
 		ThreadOwnership.Context token = ThreadOwnership.enterRegion(regionInfoOf(region));
 		try {
 			// The tick has STARTED: advance the counter before draining so the
@@ -545,6 +580,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			//    check → dead sections → split). Runs on this worker: the region
 			//    is not dispatchable until completeTick returns.
 			long duration = nanoClock.getAsLong() - start;
+			region.completeTickTiming(duration);
 			region.recordTickDuration(duration);
 			com.palordersoftworks.fabricfolia.metrics.RegionMetrics m = metrics;
 			if (m != null) {

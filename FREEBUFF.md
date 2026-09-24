@@ -25,11 +25,15 @@
 - **Mixin count:** 23 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
   (the respawn follow-up changes existing packet mixins; a faulty `ReportTypeMixin`
   was removed in commit `c36f8c3`).
-- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 106/106 green
-  (the latest run included 2 respawn classifier tests; no Mockito). Fabric tests
-  boot the REAL engine (`FoliaConfig.at(...)` → `load()` → `freeze()` →
-  `FabricFoliaEngine.bootstrap(config, info, error)`), see
-  `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
+- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 116/116 green
+  (2026-09-24 region-pipeline turn; no Mockito). Fabric tests boot the REAL engine
+  (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
+  see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
+- **CI:** `.github/workflows/build.yml` (GitHub Actions) runs
+  `./gradlew build --stacktrace` on push/PR to `main` — Java 25 (temurin),
+  Gradle via the checked-in wrapper (9.5.1), test reports on failure, fabric
+  jar archived. Jenkins (`Jenkinsfile`) still exists alongside; README
+  documents Jenkins as primary.
 
 ## 2. Architecture in one page
 
@@ -183,6 +187,28 @@ Named jar for inspection (project loom cache):
     entity, body)` (world-key core, null-entity skips idempotence window),
     `isCurrentContextOwner(worldKey, x, z)`, `recordPlayerTransition()`,
     metrics line `player transitions dispatched: N`.
+- **2026-09-24 CI turn (second turn, after the commit+push of the teleport/
+  respawn work as `4809f73`):**
+  - `RegionTransitions`: unattached-world refusals (engine live but the
+    destination world never attached) now counted under a NEW `UNATTACHED`
+    counter, separate from the transient unload-race `DROPPED` counter —
+    operators can distinguish "fix the world attachment" from "expected
+    race" in `/folia metrics`. Metrics line now reads `... dropped: N,
+    unattached-world: M`. Public `Snapshot` record + `snapshot()` accessor
+    for tests/diagnostics (plain volatile reads, mandate §35 semantics).
+    BOTH `dispatch` and `dispatchKeyed` route through the new counter, and
+    `dispatch` now also checks the regionizer, not just the scheduler.
+  - NEW test `unattachedWorldRefusalIsCountedSeparatelyFromDrops` in
+    `PlayerTeleportRoutingTest` (live engine, attached overworld dispatches,
+    unattached nether refused, exactly +1 on the counter).
+  - **Suite: 107 tests, 0 failures** (`:fabric:test --rerun-tasks`) and
+    full `./gradlew build --stacktrace` green.
+  - NEW `.github/workflows/build.yml` — GitHub Actions CI mirroring the
+    Jenkins pipeline exactly (`./gradlew build --stacktrace`), Java 25
+    temurin + Gradle wrapper, on push/PR to main + workflow_dispatch,
+    least-privilege `contents: read`, test reports on failure, fabric jar
+    archived (error if missing). No mixin changes → no live boot needed
+    this turn (per §7 definition of done).
   - NEW test `fabric/src/test/.../engine/PlayerTeleportRoutingTest.java`
     (region hop / global-hop-to-FabricFolia-Global-thread / engine-down
     refusal / exactly-once execution).
@@ -215,14 +241,93 @@ Named jar for inspection (project loom cache):
   server-thread packet-queue path because `PlayerList.respawn` returns a fresh
   player synchronously and its destination is computed inside the method.
 
+### DONE in the 2026-09-24 region-pipeline turn (verified live; NOT yet committed)
+- **User request this turn:** fix the "critical region-threading failure" —
+  `Regions: 0`, workers TIMED_WAITING, bad MSPT — plus a toggleable patch
+  system (spec 25). Debug-first protocol (§26 of the request) was followed.
+- **ROOT CAUSE (traced, not guessed):** the regionizer/scheduler/coordinator
+  chain was fully real and healthy — the missing link was that **no
+  production code path registered loaded chunks with the regionizer**. The
+  ONLY `addChunk` caller in production was `RegionTickInterceptor.flushPass`
+  (the random-tick slice, opt-in via `general.regionized-random-ticks`,
+  default off; the dev run-dir had it on, which is why earlier boots showed
+  regions). The unload side was wired (`ServerLevelUnloadMixin` →
+  `removeChunk`) but the load side was not — an asymmetry. Consequence under
+  default config: zero regions form, `RegionStageHub.dispatch` runs every
+  staged entity/block-entity body INLINE on the server thread (`region ==
+  null` path), so regionization added pure overhead → the observed lag.
+- **Fix — `ChunkRegionization` (NEW, fabric/engine):** three registration
+  sources, all idempotent, all gated on the patch flag:
+  1. Fabric `ServerChunkEvents.CHUNK_LOAD` (registered in onInitialize;
+     note Fabric API 0.160's Load callback is `(level, chunk, newChunk)`);
+  2. attach-time backfill in `attachWorlds` (spawn chunk + player chunks,
+     `getChunkNow`-gated);
+  3. first-START_SERVER_TICK catch-up (armed by `markWorldsAttached()`):
+     bounded spiral (radius 8) around `getRespawnData().pos()` per world —
+     closes the pre-attach window (vanilla loads spawn during world init,
+     BEFORE SERVER_STARTED; those events count as `unattached refusals`).
+  Plus the runtime self-check (`healthCheckLine`, END_SERVER_TICK): live
+  server + loaded spawn chunk + regions=0 → concise warning, ≥10s spacing.
+- **Toggleable patch layer (spec 25):** NEW `common/.../patches/PatchRegistry`
+  (name+layer registry; hot-path gate = layer AND patch, one volatile read;
+  invocation/fallback counters; no runtime flip API — stable per session).
+  Config: `patches.enabled` (default true) via ConfigSchema/FoliaConfig.
+  Registered patches: regionize-chunk-load, stage-entity-ticks,
+  stage-block-entity-ticks, stage-scheduled-ticks, stage-player-path,
+  regionized-random-ticks, regionized-gameplay-dispatch. Gates live in:
+  `RegionStageHub.isStaging` (slice→patch), `FabricFoliaMod.playerPathStaging`,
+  `ChunkRegionization` (chunk-load + backfill), `ServerChunkCacheTickMixin`
+  (random-tick redirect). Disabling any patch falls back to the original
+  path; correctness layer (regionizer/ownership/thread checks) is untouched.
+- **MSPT instrumentation (spec 16):** `Region` gains EWMA avg (α=1/100),
+  peak watermark, and current-tick-start (pairing `markTickStart` →
+  `completeTickTiming`, zero when idle); wired into `RegionScheduler`
+  runRegionTick. `/folia regions` detail now shows `mspt=`, `peak=`;
+  `regionCountsByWorld` shows `due` + `queue=`; `WorkerPool` gains an
+  atomic `busyCount` (busy workers / total in `/folia threads`);
+  `RegionScheduler.queuedRegionTasks()` + `dueRegionCount()` expose the
+  dispatch picture; engine exposes `workerPool()`.
+- **Diagnostics:** NEW `/folia patches` (patch name, layer, enabled,
+  description, global-switch note). `Chunks regionized (chunk-load / attach
+  backfill / unattached-refusals)` lines in `/folia metrics`.
+- **Tests:** NEW `RegionPipelineTest` (fabric/engine, 3 tests — real engine:
+  chunk registration → regions → repeated ticks w/ reschedule + MSPT;
+  queued task executes with owning region as current REGION context;
+  separate far-apart regions, adjacent activity merges at tick end — the
+  test itself documents invariant 3's deferred merge). NEW
+  `PatchRegistryTest` (common, 6 tests). Fixed `CommentedYamlTest`
+  duplicate-key assertion: its substring counter now scopes to the
+  `general:` section (my new `patches.enabled` option legitimately repeats
+  `enabled:` at top level — test bug, not product bug). Suite 116/116.
+- **LIVE VERIFICATION (two boots, RCON):** boot 1 (pre-fix build): forceload
+  400 400 → 25/25 chunks regionized via CHUNK_LOAD, regions #1–#9, staged
+  bodies 350,252/350,252 on workers (0 server-thread), region ticks 9,820+
+  with MSPT avg 0.01–0.02ms — pipeline proven; found backfill=0 + 211
+  pre-attach refusals → led to the catch-up fix. Boot 2 (fixed build):
+  backfill=122 at first tick, regions form immediately (7 regions incl.
+  nether+end, ticks advancing, MSPT ≤0.02ms), flag-gate proven (backfill=0,
+  fallback=0 under `patches.enabled: false` config edit + forceload →
+  regions still form via interceptor path), staging 39,828/39,845 on
+  workers with 17 honest unowned-position fallbacks. Zero ERROR lines,
+  clean RCON stop both boots, ports released, `./gradlew --stop` done,
+  final sweep = only unrelated PID 12220.
+- **Trap discovered:** Fabric API 0.160 `ServerChunkEvents$Load` is a
+  3-arg functional method — a lambda compiles confusingly wrong; use a
+  method reference so javac reports the mismatch.
+
 ### Still open (priority order)
+0. Uncommitted on-disk work: the 2026-09-24 CI turn (`.github/workflows/
+   build.yml`, RegionTransitions UNATTACHED counter + Snapshot, tests) AND
+   the 2026-09-24 region-pipeline turn (this section) — commit when the
+   user asks; suggested split: `ci:` commit, then `fix(scheduler):` commit.
 1. Direct `PlayerList.respawn` callers from mods/API and a destination-region
    placement hook; login placement.
 2. Portal-side staging beyond the teleport funnel.
-3. GitHub Actions CI workflow (`.github/workflows/`) — audit top recommendation.
-4. `FabricFoliaMod` service-locator indirection (DESIGN complaint) — explicit
+3. `FabricFoliaMod` service-locator indirection (DESIGN complaint) — explicit
    engine holder.
-5. PR creation: blocked — no `gh` CLI, no PAT; work is already on `main`.
+4. PR creation: blocked — no `gh` CLI, no PAT; work is already on `main`.
+5. GitHub Actions CI workflow landed `.github/workflows/build.yml` (2026-09-24
+   CI turn) — verify the first Actions run goes green once pushed.
 
 ## 7. Definition of done for any turn here
 - Changes compile: `./gradlew :fabric:compileJava` (or full `:common:test :api:test :fabric:test`).

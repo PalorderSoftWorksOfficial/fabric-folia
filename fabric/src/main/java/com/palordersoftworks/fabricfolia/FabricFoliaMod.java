@@ -70,6 +70,11 @@ public class FabricFoliaMod implements ModInitializer {
 
 		compatEntries = CompatScanner.scanAndReport();
 		declareLegacyDestinations();
+		declarePatches();
+		// Chunk activity → regionizer registration (mandate §20, the regions=0
+		// root-cause fix): every chunk that loads from now on joins its world's
+		// regionizer. Inert per event while the engine is down.
+		com.palordersoftworks.fabricfolia.engine.ChunkRegionization.attach();
 		ServerLifecycleEvents.SERVER_STARTING.register(FabricFoliaMod::startEngine);
 		ServerLifecycleEvents.SERVER_STARTED.register(FabricFoliaMod::attachWorlds);
 		ServerLifecycleEvents.SERVER_STOPPING.register(FabricFoliaMod::stopEngine);
@@ -106,6 +111,11 @@ public class FabricFoliaMod implements ModInitializer {
 			Console.config("  Region system: disabled (general.enabled=false) - vanilla execution, no worker threads.");
 			return;
 		}
+
+		// Patch-layer resolution (spec 25): each declared patch's own toggle
+		// mirrors the feature gate that actually implements it; the global
+		// patches.enabled switch disables the whole optimization layer.
+		resolvePatchStates(config);
 
 		// Measured-compatibility detection happens before the summary so every
 		// line an admin reads reflects what will actually run.
@@ -185,10 +195,18 @@ public class FabricFoliaMod implements ModInitializer {
 			// attachWorld honors the config flag intercept flag internally
 			// (interceptor null is treated as structure-only attachment).
 			current.attachWorld(worldName, simulationDistance, currentInterceptor);
+			// Chunk→regionizer registration (mandate §20): backfill the spawn
+			// and player chunks that loaded before the engine attached. Steady
+			// state arrives via the CHUNK_LOAD hook registered in onInitialize.
+			com.palordersoftworks.fabricfolia.engine.ChunkRegionization.backfillWorld(level, current);
 			// Entity ownership tracking (mandate §15) is independent of the
 			// random-tick intercept: it attaches whenever the engine is live.
 			current.attachEntityTracking(level);
 		}
+		// Arm the first-tick catch-up: chunks loaded during world init (the
+		// spawn area) fired their events before any regionizer existed; the
+		// next server tick registers the still-loaded ones.
+		com.palordersoftworks.fabricfolia.engine.ChunkRegionization.markWorldsAttached();
 		Console.success("Fabric Folia is ready.");
 		Console.info("  Regionized gameplay is active (entity ticking - players included - block entities, scheduled-tick drains, and random ticks on region workers). Still on the server thread: worldgen, spawning. Player path: "
 				+ (playerPathStaging()
@@ -242,7 +260,77 @@ public class FabricFoliaMod implements ModInitializer {
 		FabricFoliaEngine current = engine;
 		if (current != null) {
 			current.flushGameplay();
+			String health = com.palordersoftworks.fabricfolia.engine.ChunkRegionization
+					.healthCheckLine(current, server.getAllLevels());
+			if (health != null) {
+				Console.warning(health);
+			}
 		}
+	}
+
+	/**
+	 * Declares FabricFolia's own toggleable performance patches (spec 25)
+	 * and resolves their state from the config. Runs once at mod init; the
+	 * state is stable for the server's lifetime (see PatchRegistry).
+	 */
+	private static void declarePatches() {
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("regionize-chunk-load",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
+						"chunks join their world's regionizer on load so gameplay stages execute region-parallel");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-entity-ticks",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
+						"entity tick bodies execute on the owning region's worker instead of the server thread");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-block-entity-ticks",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
+						"block-entity tick bodies execute on the owning region's worker instead of the server thread");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-scheduled-ticks",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
+						"scheduled tick executions captured from workers execute region-owned");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-player-path",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
+						"player connection ticks execute on the owning region's worker");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("regionized-random-ticks",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
+						"per-chunk random ticks execute on the owning region's worker (opt-in via general.regionized-random-ticks)");
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA, true);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT, true);
+	}
+
+	/**
+	 * Resolves each patch's own toggle from the loaded config (the
+	 * patches' semantics mirror the feature gates that already exist):
+	 * stage patches follow regionized-gameplay / stage-player-path, the
+	 * random-tick patch follows general.regionized-random-ticks. When the
+	 * global patches.enabled is false every layer is switched off.
+	 */
+	private static void resolvePatchStates(FoliaConfig config) {
+		boolean layersEnabled = config.patchesEnabled();
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA, layersEnabled);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT, layersEnabled);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.NETWORK, layersEnabled);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRIC, layersEnabled);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.GC, layersEnabled);
+		boolean gameplay = config.regionizedGameplay();
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-entity-ticks", gameplay);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-block-entity-ticks", gameplay);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-scheduled-ticks", gameplay);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-player-path",
+				config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH) instanceof Boolean b ? b : true);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("regionized-random-ticks",
+				config.regionizedRandomTicks());
 	}
 
 	/**
@@ -331,6 +419,9 @@ public class FabricFoliaMod implements ModInitializer {
 	public static boolean playerPathStaging() {
 		FabricFoliaEngine current = engine;
 		if (current == null) {
+			return false;
+		}
+		if (!com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("stage-player-path")) {
 			return false;
 		}
 		Boolean gate = current.playerPathGate();

@@ -48,6 +48,7 @@ public final class ConfigSchema {
 	public static final String KEY_METRICS = "diagnostics.metrics";
 	public static final String KEY_WATCHDOG = "diagnostics.watchdog";
 	public static final String KEY_PLAYER_PATH = "gameplay.stage-player-path";
+	public static final String KEY_PATCHES_ENABLED = "patches.enabled";
 	public static final String KEY_VERSION = "config-version";
 	public static final String KEY_SERVER_BRAND = "general.server-brand";
 	public static final String KEY_SERVER_BRAND_NAME = "general.server-brand-name";
@@ -403,6 +404,22 @@ public final class ConfigSchema {
 				"Valid values: true, false",
 				"Performance: one region-queue enqueue per player per tick.",
 				"Restart required: no - applies at next engine start."
+		}));
+
+		add(opt(KEY_PATCHES_ENABLED, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"FabricFolia performance patches (the toggleable optimization layer).",
+				"",
+				"What it does: when true, every registered FabricFolia optimization",
+				"patch takes its optimized path where the patch's own conditions",
+				"hold; when false, ALL patches fall back to the original vanilla /",
+				"Fabric / FabricFolia code path. Disabling patches never disables",
+				"regionization, ownership checks, or the compatibility layer: the",
+				"correctness layer is independent of the optimization layer.",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Restart required: no - applies at next server start.",
+				"See also: /folia patches (which patches exist and their state)."
 		}));
 
 		add(opt(KEY_METRICS, Boolean.class, Boolean.FALSE, v -> v, new String[] {

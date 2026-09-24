@@ -269,6 +269,17 @@ public final class FoliaConfig {
 		return values.get(key);
 	}
 
+	/**
+	 * @return whether the toggleable performance-patch layer runs its
+	 * optimized paths ({@code patches.enabled}; default true). When false,
+	 * every registered patch falls back to the original code path; the
+	 * correctness layer (regionization, ownership, thread checks) is
+	 * unaffected either way.
+	 */
+	public boolean patchesEnabled() {
+		return (Boolean) values.get(ConfigSchema.KEY_PATCHES_ENABLED);
+	}
+
 	public boolean serverBrand() {
 		return (Boolean) values.get(ConfigSchema.KEY_SERVER_BRAND);
 	}

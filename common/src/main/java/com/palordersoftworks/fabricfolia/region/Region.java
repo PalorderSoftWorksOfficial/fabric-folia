@@ -107,6 +107,16 @@ public final class Region implements com.palordersoftworks.fabricfolia.api.Regio
 	 * cross-field invariant (spec 18 review note: not a safety mechanism).
 	 */
 	private volatile long lastTickDurationNanos;
+	/**
+	 * Exponentially-weighted tick duration (spec 16: MSPT per region).
+	 * Updated by the executing context at tick end; volatile single-writer
+	 * diagnostic, no cross-field invariant.
+	 */
+	private volatile long averageTickDurationNanos;
+	/** Slowest completed tick since region birth (diagnostic watermark). */
+	private volatile long peakTickDurationNanos;
+	/** nanoTime when the currently executing tick started, 0 between ticks. */
+	private volatile long currentTickStartNanos;
 
 	/** @return duration of the region's last completed tick, in nanoseconds. */
 	public long lastTickDurationNanos() {
@@ -116,6 +126,51 @@ public final class Region implements com.palordersoftworks.fabricfolia.api.Regio
 	/** Called by the executing context at tick end. */
 	public void recordTickDuration(long nanos) {
 		this.lastTickDurationNanos = nanos;
+	}
+
+	/**
+	 * Marks the start of a tick on the executing context; the duration
+	 * pairing happens in {@link #recordTickDuration} via
+	 * {@link #completeTickTiming}. The start mark also lets diagnostics see
+	 * how long a TICKING region has actually been running.
+	 */
+	public void markTickStart() {
+		currentTickStartNanos = System.nanoTime();
+	}
+
+	/**
+	 * Completes the tick-timing record: last duration, EWMA (spec 16's
+	 * rolling average, alpha = 1/100 like Folia's), and the peak watermark.
+	 * Called by the executing context exactly once per completed tick.
+	 */
+	public void completeTickTiming(long durationNanos) {
+		lastTickDurationNanos = durationNanos;
+		long prior = averageTickDurationNanos;
+		averageTickDurationNanos = prior == 0 ? durationNanos
+				: prior + (durationNanos - prior) / 100;
+		if (durationNanos > peakTickDurationNanos) {
+			peakTickDurationNanos = durationNanos;
+		}
+		currentTickStartNanos = 0L;
+	}
+
+	/** @return the region's EWMA tick duration in nanoseconds (0 before the first tick completes). */
+	public long averageTickDurationNanos() {
+		return averageTickDurationNanos;
+	}
+
+	/** @return the slowest completed tick since region birth, in nanoseconds. */
+	public long peakTickDurationNanos() {
+		return peakTickDurationNanos;
+	}
+
+	/**
+	 * @return nanoseconds elapsed since the current tick started, 0 when the
+	 * region is not mid-tick (idle-waiting regions report 0, not garbage).
+	 */
+	public long currentTickElapsedNanos() {
+		long start = currentTickStartNanos;
+		return start == 0L ? 0L : System.nanoTime() - start;
 	}
 
 	/** @return the scheduler's next-tick deadline (nanoTime), for dispatch. */

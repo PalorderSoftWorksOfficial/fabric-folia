@@ -163,7 +163,19 @@ public final class FoliaCommand {
 					text.append("  ").append(name).append(" (").append(thread.getState()).append(")\n");
 				}
 			}
+			text.append("  workers busy: ").append(engine.workerPool().busyCount())
+					.append('/').append(engine.workerPool().workerCount()).append("\n");
 			text.append("Workers are not pinned to regions: a region may run on a different worker each tick (see THREADING.md).");
+			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+			return 1;
+		}));
+
+		root.then(Commands.literal("patches").executes(context -> {
+			StringBuilder text = new StringBuilder("Fabric Folia performance patches (spec 25; fallback = original path):\n");
+			for (String line : com.palordersoftworks.fabricfolia.patches.PatchRegistry.descriptionLines()) {
+				text.append("  ").append(line).append("\n");
+			}
+			text.append("  Global switch: patches.enabled (see the generated config). Disabling never affects regionization, ownership, or thread checks.\n");
 			context.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
 			return 1;
 		}));

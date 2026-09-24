@@ -471,6 +471,9 @@ public final class FabricFoliaEngine {
 				+ (RegionStageHub.stagedTotal() - RegionStageHub.droppedDeadRegion()
 						- RegionStageHub.executedOnWorkers()));
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
+		lines.add("chunks regionized (chunk-load): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.chunkLoadRegistrations());
+		lines.add("chunks regionized (attach backfill): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.backfillRegistrations());
+		lines.add("chunk-load events with no attached world: " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.unattachedRefusals());
 		lines.add("scheduled ticks deferred by workers: "
 				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.deferredTotal());
 		lines.add("scheduled ticks replayed server-thread: "
@@ -623,6 +626,11 @@ public final class FabricFoliaEngine {
 		return value instanceof Boolean b ? b : null;
 	}
 
+	/** @return the shared worker pool (worker/busy diagnostics, shutdown wiring). */
+	public com.palordersoftworks.fabricfolia.scheduler.WorkerPool workerPool() {
+		return workerPool;
+	}
+
 	/** @return live region count across ALL attached worlds (diagnostics). */
 	public int regionCount() {
 		int total = 0;
@@ -636,10 +644,13 @@ public final class FabricFoliaEngine {
 	public List<String> regionCountsByWorld() {
 		List<String> lines = new java.util.ArrayList<>();
 		for (var entry : schedulersByWorld.entrySet()) {
-			lines.add(entry.getKey() + ": " + entry.getValue().liveRegions().size()
-					+ " region(s), " + entry.getValue().liveRegions().stream()
+			var scheduler = entry.getValue();
+			long ticking = scheduler.liveRegions().stream()
 					.filter(r -> r.state() == com.palordersoftworks.fabricfolia.region.RegionState.TICKING)
-					.count() + " ticking");
+					.count();
+			lines.add(entry.getKey() + ": " + scheduler.liveRegions().size()
+					+ " region(s), " + ticking + " ticking, " + scheduler.dueRegionCount()
+					+ " due, queue=" + scheduler.queuedRegionTasks());
 		}
 		return lines;
 	}
@@ -654,12 +665,14 @@ public final class FabricFoliaEngine {
 		List<String> lines = new java.util.ArrayList<>();
 		for (var entry : schedulersByWorld.entrySet()) {
 			for (Region region : entry.getValue().liveRegions()) {
-				long lastNanos = region.lastTickDurationNanos();
+				long avgNanos = region.averageTickDurationNanos();
+				long peakNanos = region.peakTickDurationNanos();
 				lines.add("  " + region.world() + " #" + region.regionId() + ": state="
 						+ region.stateName() + ", ticks=" + region.tickCount()
 						+ ", sections=" + region.sectionCount()
-						+ (lastNanos > 0
-								? String.format(java.util.Locale.ROOT, ", last-tick=%.2fms", lastNanos / 1_000_000.0)
+						+ (avgNanos > 0
+								? String.format(java.util.Locale.ROOT, ", mspt=%.2f, peak=%.2fms",
+										avgNanos / 1_000_000.0, peakNanos / 1_000_000.0)
 								: "")
 						+ " (workers are not pinned to regions)");
 			}
