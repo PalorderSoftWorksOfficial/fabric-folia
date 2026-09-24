@@ -344,6 +344,9 @@ Named jar for inspection (project loom cache):
   local + live evidence (116/116, build, RCON boots) — do not claim CI
   green. When the owner enables Actions, re-fire once (empty `ci:` commit
   or workflow_dispatch) and the first real run should execute.
+  Re-confirmed on the 2026-09-24 continuation turn: another dispatch probe
+  returned the same 422 (third confirmation); main remained synced at
+  1958ef4 with a clean tree — no other pending delivery items.
 
 ### Still open (priority order)
 1. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
