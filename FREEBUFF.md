@@ -428,3 +428,13 @@ Named jar for inspection (project loom cache):
 - Docs updated (MIXINS.md per-mixin table, docs/folia-parity.md rows, this file §6).
 - End with an IMPLEMENTED / CHANGED / REMOVED / REMAINING report.
 - FREEBUFF.md updated.
+
+### DELIVERED in the 2026-09-25 commit/push turn
+- Re-read this handoff before delivery, as required.
+- Created and pushed feature branch `feat/patch-layer-folia-command` from `main`; no direct commit to `main` and no pull request was opened.
+- Delivered the verified patch-layer and `/folia` command work in two commits:
+  - `6195768` `perf(patches): add gated region and scheduler optimizations` — PatchRegistry v2, nested patch configuration, O(1) ownership lookup, zero-allocation scheduler scanning, task-queue accounting, empty-batch short-circuit, bootstrap wiring, and registry regression tests.
+  - `7b90e61` `feat(command): expand folia diagnostics and formatting` — MiniMessage formatting and bundled Adventure libraries, version/help/diagnostics/health command surfaces, permission handling, FoliaMessages tests, and this handoff update.
+- Remote verification: local and `origin/feat/patch-layer-folia-command` both resolve to `7b90e61c5a94f9f2eee5c0bd64ecc9beff32c9f7`; the working tree is clean.
+- This turn did not call GitHub Actions APIs, create CI-trigger commits, poll checks, or attempt to enable CI. Actions remains account-level disabled and owner-only; the prior verified local results (127/127 tests, successful build, three clean RCON boots) are the available evidence.
+- The prior Still-open item to commit the patch-layer turn is now complete. The account-level Actions blocker and the remaining respawn/login/portal/service-locator work remain open as listed above.
