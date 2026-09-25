@@ -29,6 +29,11 @@ dependencies {
 	// Mixins are reserved for interception Fabric API cannot express (spec 15).
 	implementation("net.fabricmc.fabric-api:fabric-api:${property("fabric_api_version")}")
 
+	// Adventure MiniMessage: the single formatting system for /folia command
+	// output (converted to vanilla Components for chat, ANSI for console).
+	implementation(libs.adventureApi)
+	implementation(libs.adventureMiniMessage)
+
 	// Engine + API modules: compiled against AND bundled jar-in-jar so the
 	// mod jar is self-contained (Loader unpacks nested jars declared in
 	// fabric.mod.json's implicit nests — Loom generates them from include()).
@@ -42,6 +47,8 @@ dependencies {
 	// The include() mechanism for plain libraries on MC 26.2 is verified during
 	// this build; fallback is an Apache-2.0-compatible vendored copy.
 	include(libs.snakeyamlEngine)
+	include(libs.adventureApi)
+	include(libs.adventureMiniMessage)
 
 	compileOnly(libs.jsr305)
 

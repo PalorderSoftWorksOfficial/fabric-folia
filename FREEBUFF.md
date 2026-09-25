@@ -348,15 +348,77 @@ Named jar for inspection (project loom cache):
   returned the same 422 (third confirmation); main remained synced at
   1958ef4 with a clean tree — no other pending delivery items.
 
+### DONE in the 2026-09-24 patch-layer/`/folia` turn (verified live; NOT committed)
+- **PatchRegistry v2** (full metadata): id/name/layer/description/target/dependencies/
+  conflicts/lifecycle(STARTUP_ONLY|RUNTIME)/status; one-time resolution pass
+  (`resolveAndApply`, order-independent fixpoint) with statuses
+  ACTIVE/DISABLED/BLOCKED_DEPENDENCY/BLOCKED_CONFLICT/FAILED + reasons;
+  hot gate `isEnabled` = one volatile read; `requested` defaults true.
+  **11 real patches registered** (each gated at a real call site): chunk-load
+  regionization, entity/BE/scheduled-tick staging (deps: chunk-load;
+  scheduled deps: BE), player-path staging, packet-dispatch,
+  allocation-reduction, region-lookup (O(1) index), scheduler-dispatch,
+  task-queue. Per-patch config keys `patches.<layer>.<patch>`; global
+  `patches.enabled`; resolution BEFORE gates are consulted, gates pushed
+  into engine objects (schedulerDispatchPatch, ownerLookupIndex,
+  GLOBAL_TASK_QUEUE_PATCH).
+- **Real optimizations (all behind patch gates, fallback = original path):**
+  - O(1) `sectionOwners` reverse index in WorldRegionizer (ownerOfChunk was
+    a linear scan of liveRegions per call) — maintained at adopt/both
+    immediate-merge loops (addChunk's AND completeTick's mergeNowLocked!)/
+    killRegion/killMergedRegion/removeDeadSections/split; gate
+    `setOwnerLookupIndex` (falling back to the linear scan keeps identical
+    answers).
+  - Zero-alloc `forEachLiveRegion` + gated coordinateLoop scan path (the
+    old loop copied the live set every 1ms).
+  - RegionTaskQueue: O(1) `pendingCount` AtomicInteger (size() was O(n))
+    maintained at add/drain/rehome/dropAll/partition/removeTask + exact-size
+    drain buffers; gate `setGlobalTaskQueuePatch`.
+  - RegionStageHub flush: empty-batch short-circuit (per-world, before any
+    dispatch work).
+- **Config writer N-segment fix**: buildDefaultTree/appendMissing now walk
+  nested keys (`patches.minecraft.entity-tick-optimization` renders as real
+  nested YAML; the old 2-segment assumption emitted dotted keys snakeyaml
+  cannot parse → ConfigException on load). CommentedYaml.get already
+  traversed nesting.
+- **`/folia` overhaul** (FoliaCommand rewritten): MiniMessage layer
+  (`FoliaMessages` + `ComponentConverter` adventure→vanilla, no
+  adventure-platform; MiniMessage 4.23.0 added to catalog + bundled);
+  `FoliaVersion` (loader-sourced rows, "Unknown" when absent);
+  `FoliaHelp` (9 in-game topics, self-contained per spec 34);
+  `FoliaDiagnostics` (single source of truth: regionSummary/
+  regionDetail/workerLines/schedulerLines/healthChecks — all reading the
+  real engine). Subcommands: version/help(+topic)/regions(+verbose)/
+  workers/scheduler/patches/health/threads/status/metrics/entities/compat/
+  pin/unpin/shutdown. Permissions: atom
+  `fabricfolia.command.folia.<sub>` **OR COMMANDS_OWNER** (OP default —
+  atom-only gating made diagnostics invisible to OP; level-based sets
+  don't carry custom atoms; found live via RCON).
+- **Runtime verified (RCON, 3 boots)**: version/help/regions+verbose/
+  workers/scheduler/patches/threads/health/status/metrics/help topics all
+  render real state; 11/11 patches active at boot; health all-OK after
+  fixing a sampling-artifact false positive (due>0 && busy==0 needs one
+  50ms re-probe — the coordinator dispatches within 1ms, a mid-cycle sample
+  reads stale). MSPT 0.01–0.03ms; staged 53k bodies → 53,238 workers /
+  17 server-thread (unowned); merges=2 splits=0. 127/127 tests
+  (+11 PatchRegistry v2, +7 FoliaMessages/version/help). Jar: command
+  classes + adventure jars nested verified. Clean shutdowns; sweep = only
+  PID 12220. mcrcon needs PYTHONIOENCODING=utf-8 now (UnicodeEncodeError
+  on MiniMessage output — host quirk, §5).
+- **Not measured (honest, spec 41)**: no allocation/GC microbenchmarks;
+  the optimizations are structural (removed scans/copies), verified by
+  behavior + live MSPT, not by invented numbers.
+
 ### Still open (priority order)
 1. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
    repo) — then re-fire a run and verify it goes green.
-2. Direct `PlayerList.respawn` callers from mods/API and a destination-region
+2. Commit the 2026-09-24 patch-layer //folia turn (on-disk, verified).
+3. Direct `PlayerList.respawn` callers from mods/API and a destination-region
    placement hook; login placement.
-3. Portal-side staging beyond the teleport funnel.
-4. `FabricFoliaMod` service-locator indirection (DESIGN complaint) — explicit
+4. Portal-side staging beyond the teleport funnel.
+5. `FabricFoliaMod` service-locator indirection (DESIGN complaint) — explicit
    engine holder.
-5. Delete the merged feature branch `fix/region-pipeline-patch-layer`
+6. Delete the merged feature branch `fix/region-pipeline-patch-layer`
    (optional housekeeping).
 
 ## 7. Definition of done for any turn here
