@@ -6,6 +6,14 @@
 > process discoveries, host quirks, work state). The goal: every model starts with
 > the same information and never rediscovers it. Keep this file truthful and
 > current — a stale FREEBUFF.md is worse than none.
+>
+> **OWNER DIRECTIVE (2026-09-25, supersedes earlier branch flow):** work stays
+> ON `origin main` — commit and push to main directly; sync any outstanding
+> patch-layer branch work into main. **FIX BUGS AT THE ROOT — NEVER SUPPRESS
+> THEM.** Swallowing an exception into a counter, carpet's update-suppression,
+> or a silent drop is not acceptable for a diagnosed failure mode: the body
+> must be retried or the bug fixed at its cause, with the outcome visible in
+> metrics.
 
 ---
 
@@ -17,7 +25,9 @@
   runtime names — no mappings layer). Must stay Fabric-native: mixins, Fabric API,
   Loom. NEVER a Paper/Folia fork or patch-based distribution.
 - **License:** Apache-2.0, Palorder Softworks, 2026.
-- **Git:** `main` branch; remote `origin` = `https://github.com/PalorderSoftWorksOfficial/fabric-folia.git`.
+- **Git:** `main` branch — **the owner directive (2026-09-25) is to stay on
+  main and push there**; remote `origin` =
+  `https://github.com/PalorderSoftWorksOfficial/fabric-folia.git`.
   Push works via `credential.helper=manager`; REST/PR needs a PAT we do not have.
 - **Modules:** `api` (public contract, ~968 LOC) → `common` (engine core: regionizer,
   schedulers, config, metrics, threading) → `fabric` (mixins, engine bootstrap,
@@ -527,3 +537,55 @@ Named jar for inspection (project loom cache):
   ("server-thread context" for the unowned hop) was FIXED this turn (now says
   `FabricFolia-Global` MPSC dispatch thread, non-REGION, ticket capture does not
   fire there). MIXINS.md gained the ChunkTicketMixin row (24 mixins).
+
+### DONE in the 2026-09-25 main-sync + async-entity-load-fix turn (verified live; on main)
+- **Owner directives applied:** (1) origin main now carries ALL patch-layer +
+  crash-fix work — `29ee34d..82c3d5e` fast-forwarded and pushed (`git merge
+  --ff-only feat/patch-layer-folia-command` on main; remote verified
+  `82c3d5e` = origin/main); we are ON main and stay there. (2) The
+  async-entity-load CME was FIXED AT THE ROOT (no suppression).
+- **Bug root-caused (was "still open" in the crash-fix turn):** the production
+  `ConcurrentModificationException: Async entity load` (×4 on use_item,
+  suppressed) — the string is NOT vanilla (absent from the 7445-class common
+  jar and clientOnly jar) and NOT ours; it is **c2me's async entity loader
+  fail-fast guard** (GitHub c2me issues #278 / RepurposedStructures #397 show
+  the identical signature). On production, use_item packets run on the server
+  thread (player-path staging default-off), so the CME fires when OUR REGION
+  WORKERS iterate entity sections concurrently with c2me's in-flight async
+  entity load. Previously the CME was swallowed twice over: our
+  `RegionStageHub.runSafely` catch turned it into an EXCEPTIONS_ISOLATED
+  counter (the entity body never ran = lost tick), and carpet's
+  yeetUpdateSuppressionCrash then suppressed the fallout on the server thread.
+- **Fix shipped (`b4440fd`, on main):** NEW
+  `common/.../scheduler/StageRetry.java` — tick-spaced retry ledger:
+  `schedule(world, body, attempt, currentTick)` (workers), per-world pending
+  lists (worker-add / server-thread-drain; no cross-thread iteration of a
+  mutating list), `drain(world, suppressionActive, requeue, currentTick)`
+  replaying due entries ≥2 flushes after failure, attempt cap 4 then counted
+  EXHAUSTED, suppression windows keep entries pending, `clearWorld` counts
+  drops (never silent), diagnostics scheduled/retried/pending/exhausted.
+  `RegionStageHub`: `runSafely`'s catch classifies CME as the transient
+  concurrent-entity-access failure and schedules a retry instead of only
+  logging — the retry wrapper `RetryBody(slice, body, attempt)` implements
+  `Positioned` (position delegates to the inner body, so region resolution
+  and the loadedness pre-flight are dispatch-transparent) and `Runnable`;
+  flushStaged drains due retries BEFORE the fresh batch (tick-order
+  preserved), re-dispatching through the normal pipeline (region re-resolved
+  at replay — never a stale owner). `FabricFoliaEngine.metricsLines`: new
+  line `staged-body retries (async entity load): scheduled=N retried=N
+  pending=N exhausted=N`.
+- **Tests:** NEW `StageRetryTest` (5: tick-spaced per-world retry + attempt
+  carry, cap refuses + counts, suppression keeps pending then runs when
+  lifted, refused requeue stays pending, clearWorld drops counted).
+  Suite + build green (`:common:test :api:test :fabric:test build`).
+- **Live:** boot `Done (2.463s)` zero errors, staging flowing (51,371 bodies
+  / 51,348 workers), new metrics line renders (baseline zeros), clean RCON
+  stop ("Engine shut down cleanly"), ports released, sweep = only PID 12220.
+- **Honest limits:** the retry path is unit-tested and live-boot-verified,
+  but the production CME itself cannot be reproduced in the dev world (it
+  needs c2me + concurrent chunk-entity loading). Operators should watch
+  `staged-body retries` on production — non-zero scheduled/retried after
+  rollout means the fix is absorbing races that previously ate entity ticks.
+- **Process note:** after a Freebuff restart, background processes are gone
+  but a pre-existing console JVM (22204) was present and left alone; our
+  gradle launcher JVM died with its shell (sweep found nothing of ours).
