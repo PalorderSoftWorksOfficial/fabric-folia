@@ -9,6 +9,7 @@ import com.palordersoftworks.fabricfolia.metrics.RegionMetrics;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
+import com.palordersoftworks.fabricfolia.scheduler.StageRetry;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
@@ -238,12 +239,22 @@ public final class RegionStageHub {
 	RegionStageHub(ServerLevel level, WorldRegionizer regionizer, RegionScheduler scheduler,
 	               RegionMetrics metrics, Consumer<String> diagnostics) {
 		this.level = level;
+		this.worldKey = level.dimension().identifier().toString();
 		this.regionizer = regionizer;
 		this.scheduler = scheduler;
 		this.metrics = metrics;
 		this.diagnostics = diagnostics;
 		regionizer.addListener(new StagingListener());
 	}
+
+	/** This level's dimension key (drain scoping for the retry ledger). */
+	private final String worldKey;
+
+	/**
+	 * Flush counter, fed to the retry ledger as its "tick": flush runs once
+	 * per server tick, so spacing measured in flushes is spacing in ticks.
+	 */
+	private final java.util.concurrent.atomic.AtomicLong flushTick = new java.util.concurrent.atomic.AtomicLong();
 
 	private void stage(Slice slice, Runnable body) {
 		staged.get(slice).add(body);
@@ -257,17 +268,27 @@ public final class RegionStageHub {
 	 * passes — the ownership picture is final for this tick.
 	 */
 	void flushStaged() {
+		flushTick.incrementAndGet();
+		// Replay bodies that failed on a transient concurrent-modification
+		// race last tick (c2me async entity load): they are drained ahead of
+		// the fresh batch so a retried body keeps its relative tick order.
+		StageRetry.drain(worldKey, () -> {
+			FabricFoliaEngine engine = com.palordersoftworks.fabricfolia.FabricFoliaMod.engine();
+			return engine != null && engine.randomTickInterceptSuppressed();
+		}, (w, body, attempt) -> {
+			dispatchRetry((RetryBody) body, attempt);
+			return true;
+		}, flushTick::get);
 		for (Map.Entry<Slice, List<Runnable>> entry : staged.entrySet()) {
 			List<Runnable> batch = entry.getValue();
 			if (batch.isEmpty()) {
 				continue;
-			}
-			dispatch(entry.getKey(), batch);
-			entry.getValue().clear();
+			}				dispatch(entry.getKey(), batch, entry.getKey());
+				entry.getValue().clear();
 		}
 	}
 
-	private void dispatch(Slice slice, List<Runnable> batch) {
+	private void dispatch(Slice slice, List<Runnable> batch, Slice bodySlice) {
 		for (Runnable body : batch) {
 			Region region = regionFor(body);
 			if (region == null) {
@@ -292,7 +313,7 @@ public final class RegionStageHub {
 	private Region regionFor(Runnable body) {
 		if (body instanceof Positioned positioned) {
 			ChunkPos pos = positioned.fabricfolia$position();
-			return regionizer.ownerOfChunk(pos.x(), pos.z());
+			return pos == null ? null : regionizer.ownerOfChunk(pos.x(), pos.z());
 		}
 		return null;
 	}
@@ -337,6 +358,20 @@ public final class RegionStageHub {
 			}
 		} catch (Throwable t) {
 			metrics.increment(RegionMetrics.Counter.EXCEPTIONS_ISOLATED);
+			if (fabricfolia$isConcurrentEntityAccessFailure(t)) {
+				// TRANSIENT, NOT FATAL: a foreign async entity loader (c2me's
+				// "Async entity load" guard) threw because this body touched an
+				// entity section it was mid-load on. The body never ran; dropping
+				// it silently loses a gameplay tick (production: suppressed CMEs
+				// on use_item, Palorder Central 2026-09-25). Fix, not suppress:
+				// schedule a tick-spaced retry through the world's own dispatch.
+				int attempt = (body instanceof RetryBody retry) ? retry.attempt() : 0;
+				StageRetry.schedule(worldKey, retryOf(slice, body, attempt + 1), attempt, flushTick::get);
+				diagnostics.accept("Staged " + slice + " body hit a concurrent entity access race; retry "
+						+ (attempt + 1) + "/" + StageRetry.MAX_ATTEMPTS + " scheduled"
+						+ (region != null ? " in region " + region.world() + ":" + region.regionId() : ""));
+				return;
+			}
 			diagnostics.accept("Staged " + slice + " body failed"
 					+ (region != null ? " in region " + region.world() + ":" + region.regionId() : "")
 					+ " on " + Thread.currentThread().getName() + ": " + t);
@@ -377,6 +412,52 @@ public final class RegionStageHub {
 			}
 		}
 		return true;
+	}
+
+	// =================================================================================
+	// Transient-race retries (c2me async entity load): fix, not suppress
+	// =================================================================================
+
+	/**
+	 * A staged body wrapper carrying its slice and retry attempt through the
+	 * dispatch pipeline (fresh bodies are never wrapped; attempt 0 = original
+	 * execution failed, 1.. = a retry failed). Delegates the position probe to
+	 * the inner body so region resolution and the loadedness pre-flight see
+	 * the real body — a wrapper must be dispatch-transparent.
+	 */
+	public record RetryBody(Slice slice, Runnable body, int attempt) implements Positioned, Runnable {
+		@Override
+		public ChunkPos fabricfolia$position() {
+			return (body instanceof Positioned positioned) ? positioned.fabricfolia$position() : null;
+		}
+
+		@Override
+		public void run() {
+			body.run();
+		}
+	}
+
+	/** Re-dispatches one due retry through the same pipeline as a fresh body. */
+	private void dispatchRetry(RetryBody retry, int attempt) {
+		dispatch(retry.slice(), java.util.List.<Runnable>of(retry), retry.slice());
+	}
+
+	/** Wraps a failed body for retry, preserving its slice. */
+	private static RetryBody retryOf(Slice slice, Runnable body, int attempt) {
+		return (body instanceof RetryBody retry)
+				? new RetryBody(retry.slice(), retry.body(), attempt)
+				: new RetryBody(slice, body, attempt);
+	}
+
+	/**
+	 * @return true when {@code t} is the transient concurrent-entity-access
+	 * failure mode (a {@link java.util.ConcurrentModificationException} —
+	 * c2me's async entity loader throws its fail-fast guard as a CME).
+	 * Deliberately narrow: generic CMEs from body bugs stay on the plain
+	 * failure path with their full diagnostic.
+	 */
+	private static boolean fabricfolia$isConcurrentEntityAccessFailure(Throwable t) {
+		return t instanceof java.util.ConcurrentModificationException;
 	}
 
 	// =================================================================================

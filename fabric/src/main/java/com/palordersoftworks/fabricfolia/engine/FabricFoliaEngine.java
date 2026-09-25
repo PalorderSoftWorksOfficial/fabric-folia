@@ -490,6 +490,11 @@ public final class FabricFoliaEngine {
 				+ ", pending now: "
 				+ com.palordersoftworks.fabricfolia.engine.TicketDeferral.pendingCount()
 				+ ")");
+		lines.add("staged-body retries (async entity load): scheduled="
+				+ com.palordersoftworks.fabricfolia.scheduler.StageRetry.scheduled()
+				+ " retried=" + com.palordersoftworks.fabricfolia.scheduler.StageRetry.retried()
+				+ " pending=" + com.palordersoftworks.fabricfolia.scheduler.StageRetry.pendingCount()
+				+ " exhausted=" + com.palordersoftworks.fabricfolia.scheduler.StageRetry.exhausted());
 		return lines;
 	}
 
