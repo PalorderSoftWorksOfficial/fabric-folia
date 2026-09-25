@@ -207,3 +207,14 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 | Transformation | returns true when the handler is already executing in the REGION context of the region owning the listener's player (drained from that region's queue); `PERFORM_RESPAWN` is the exception and returns false on a region so vanilla queues it for the server thread; otherwise forwards to the real `isSameThread` — server-thread, event-loop, and unowned behavior unchanged |
 | Why this seam | without it, handlers drained on their owning region would re-throw `RunningOnDifferentThreadException` and ping-pong back to the server thread, defeating ownership; the respawn carve-out keeps `PlayerList.respawn`'s replacement-player/global-list body on the server thread; the covered overload is the one the `ServerLevel` convenience overload delegates to, so every game handler is handled |
 | Effect when disarmed / gate off | vanilla's exact thread comparison everywhere |
+
+### ChunkTicketMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ChunkTicketMixin` |
+| Target | `ServerChunkCache.addTicketWithRadius(TicketType, ChunkPos, int)` HEAD and `ServerChunkCache.addTicket(Ticket, ChunkPos)` HEAD (`@Inject`, cancellable); `ServerChunkCache.tick(BooleanSupplier, boolean)` HEAD (`@Inject`) |
+| Transformation | placement injections: REGION-context callers cancel the vanilla write and hand a `TicketDeferral.Placement` (world key, packed chunk, `TicketType` reference, radius/level) to `TicketDeferral`; tick injection: on the server thread (non-REGION), replays that world's pending placements verbatim before vanilla's `runAllUpdates`/`forEachEntityTickingChunk` can enumerate, re-checking C2ME suppression at replay time (suppressed ⇒ pending placements are dropped, never applied) |
+| Why this seam | worker-context ticket placement (portal/ender-pearl teleports executing on region workers via `TeleportTransition.postTeleport` → `Entity.placePortalTicket`, and `ServerPlayer.placeEnderPearlTicket`) mutated `TicketStorage`/`DistanceManager` tracker maps concurrently with the server thread's map iteration — fastutil `Long2ByteOpenHashMap` `"this.wrapped" is null` NPE crashed the world tick on production (PalorderCentral, 2026-09-25). Single-ownership deferral to the server thread, no locks |
+| Ordering safety | replay runs at HEAD of `ServerChunkCache.tick`, before any tracker enumeration; the removal side (ticket timeouts, `/folia pin`) stays server-thread-owned vanilla; duplicates collapse freshness-over-FIFO (vanilla add is idempotent per (type, level), drain ≤ 1 tick) |
+| Effect when disarmed / gate off | worker writes hit the plain ticket maps again (pre-fix race); server-thread behavior unchanged vanilla in all cases |

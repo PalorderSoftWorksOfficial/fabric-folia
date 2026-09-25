@@ -22,11 +22,11 @@
 - **Modules:** `api` (public contract, ~968 LOC) → `common` (engine core: regionizer,
   schedulers, config, metrics, threading) → `fabric` (mixins, engine bootstrap,
   entrypoints, the only module touching Minecraft classes).
-- **Mixin count:** 23 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
-  (the respawn follow-up changes existing packet mixins; a faulty `ReportTypeMixin`
-  was removed in commit `c36f8c3`).
-- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 116/116 green
-  (2026-09-24 region-pipeline turn; no Mockito). Fabric tests boot the REAL engine
+- **Mixin count:** 24 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
+  (`ChunkTicketMixin` added in the 2026-09-25 ticket-deferral turn; a faulty
+  `ReportTypeMixin` was removed in commit `c36f8c3`).
+- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 133/133 green
+  (2026-09-25 ticket-deferral turn; no Mockito). Fabric tests boot the REAL engine
   (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
   see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
 - **CI:** `.github/workflows/build.yml` (GitHub Actions) runs
@@ -438,3 +438,92 @@ Named jar for inspection (project loom cache):
 - Remote verification: local and `origin/feat/patch-layer-folia-command` both resolve to `7b90e61c5a94f9f2eee5c0bd64ecc9beff32c9f7`; the working tree is clean.
 - This turn did not call GitHub Actions APIs, create CI-trigger commits, poll checks, or attempt to enable CI. Actions remains account-level disabled and owner-only; the prior verified local results (127/127 tests, successful build, three clean RCON boots) are the available evidence.
 - The prior Still-open item to commit the patch-layer turn is now complete. The account-level Actions blocker and the remaining respawn/login/portal/service-locator work remain open as listed above.
+
+### DONE in the 2026-09-25 crash-fix turn (verified; committed on the feature branch)
+- **Trigger:** production crash on PalorderCentral (WSL2 dedicated, 26.2, 2 players
+  incl. spectator bot at extreme coords): `Exception ticking world` — NPE
+  `"this.wrapped" is null` in fastutil `Long2ByteOpenHashMap$MapIterator.nextEntry`
+  inside `DistanceManager.forEachEntityTickingChunk` → `ChunkMap.forEachBlockTickingChunk`
+  → `ServerChunkCache.redirect$elf000$fabricfolia$folia$interceptChunkEnumeration`
+  (our `ServerChunkCacheTickMixin` frame). Concurrent ticket-map mutation during
+  server-thread enumeration.
+- **Root cause (bytecode-verified on the named 26.2 jar):** worker-context ticket
+  placement mutates `TicketStorage` → `DistanceManager` trackers (same tick via
+  `simulationChunkUpdatedListener`; `SimulationChunkTracker.chunks` IS the crashed
+  `Long2ByteOpenHashMap`). Off-thread writers reachable from staged entity bodies:
+  `Entity.placePortalTicket(BlockPos)` (PORTAL ticket radius 3 — callers verified:
+  ONLY the private static helper in `TeleportTransition.postTeleport`, i.e. after a
+  teleport actually executes; NOT from standing in a portal — `Entity.handlePortal`
+  does not call it; `PortalForcer` has ZERO addTicket calls in 26.2) and
+  `static ServerPlayer.placeEnderPearlTicket(ServerLevel, ChunkPos)` (ENDER_PEARL
+  radius 2; called from player pearl-restore/teleport code, NOT `ThrownEnderpearl`).
+  Removal side stays server-thread-owned.
+- **Fix shipped:** NEW `fabric/.../engine/TicketDeferral.java` (per-world
+  `ConcurrentHashMap` pending map keyed by record Key(world, packedChunk, TicketType
+  record ref); `Placement(world, packedChunk, type, radius, ticketLevel)`;
+  `defer`/`drain(worldKey, apply, suppressionActive)` per-world scoped with
+  iterator-remove; suppression ⇒ `PENDING.clear()`; `clearWorld`; metrics
+  deferred/drained/drainedBatches/pendingCount; freshness-over-FIFO duplicate
+  collapse). NEW `fabric/.../mixin/ChunkTicketMixin.java`: HEAD cancellable injects
+  on `ServerChunkCache.addTicketWithRadius(TicketType,ChunkPos,I)V` and
+  `addTicket(Ticket,ChunkPos)V` — REGION-context callers cancel + defer; HEAD inject
+  on `tick(BooleanSupplier,Z)V` — non-REGION callers drain their own world's
+  placements verbatim before `runAllUpdates`/enumeration, re-checking
+  `randomTickInterceptSuppressed()` at replay. `fabricfolia.mixins.json` now 24
+  mixins. `RegionStageHub.fabricfolia$bodyNeighborhoodLoaded` gained a
+  zero-loaded-chunks pre-flight bounce to the server thread (transition-window
+  guard; chunk source can be down between worlds). `FabricFoliaEngine`: new metrics
+  line `chunk tickets deferred from workers: N (replayed server-thread: M, pending
+  now: P)`; `detachWorld` calls `TicketDeferral.clearWorld`.
+- **Tests:** NEW `TicketDeferralTest` (5: per-world drain scoping, duplicate→LATEST,
+  suppression drops all, clearWorld scoping, real-engine drain) and
+  `TransitionBodyServerThreadTest` (1: unowned-destination body runs on the
+  `FabricFolia-Global` thread in NON-REGION context — pins that teleport-borne
+  tickets there are NOT deferred). Tests pass **null** TicketType (see trap below)
+  and use delta assertions on the cumulative statics. Suite 133/133; `./gradlew
+  build` green; jar contains TicketDeferral + ChunkTicketMixin.
+- **Live verification:** boot `Done (2.079s)`, 11/11 patches, zero ERROR/Exception
+  lines, new metrics line renders (baseline 0). **Live capture probe NOT achieved —
+  honest record:** entity-ticking requires a player online (EggLayTime frozen with
+  nobody on; protocol bot recovered from `git show 1325fdd:compat/probe_bot.py` and
+  relaunched with a `stay` phase proves ticking). Portal probes all failed at the
+  vanilla destination lookup: standing chicken (built overworld+nether portals,
+  POIs verified via `locate poi`, gamerule true, bot player teleported into portal)
+  never teleports — `transitions dispatched: 0` throughout — cooldown cycles
+  (300→0→300) prove the flow runs to `getPortalDestination`, which returns null
+  (environment-specific; NOT our mixin — same failure mode as the known open item
+  "portal-side staging beyond the teleport funnel"). Ender-pearl probe: the bot
+  has permission=none, so its `give` command is rejected and no pearl exists —
+  command-based pearl supply is impossible for an offline-mode bot. In PRODUCTION
+  the destination lookup demonstrably succeeds (the crash itself is the proof a
+  worker ran `placePortalTicket`); dev-world evidence = unit tests + clean boot +
+  zero mixin errors. The two new tests pin the drain/replay mechanics.
+- **26.2 API traps discovered this turn:** `TicketType` has NO name/identifier/byName
+  (it's a `Record(long timeout, int flags)`; static instances only) — identity IS the
+  record reference; do not invent names. `ChunkPos.unpack(long)` exists;
+  `new ChunkPos(long)` does NOT. `ServerChunkCache` has `addTicketWithRadius`,
+  `addTicket`, `getLoadedChunksCount()`, `getChunkNow(int,int)` (the latter two NOT
+  on `ServerLevel`). Touching `TicketType` in a unit-test JVM throws
+  `ExceptionInInitializerError: Not bootstrapped (called from registry
+  minecraft:game_event)` — tests must pass null types (deferral carries them
+  opaquely). `GameRules` ids are snake_case in 26.2
+  (`allow_entering_nether_using_portals` — the old camelCase name errors).
+- **Tooling quirks added:** RCON output is one concatenated MiniMessage line —
+  use `grep -oE`; `say` output goes to chat only, use `data get`/`execute if … run
+  data get` as boolean probes. `@e` selects ACROSS dimensions from RCON (marker
+  summoned in the nether was visible from the overworld context) — dimension
+  scoping of selectors is unreliable for census. Windows python cannot see `/tmp`
+  (MSYS-only path) — patch bot scripts with sed/heredoc, not python.
+  Bot phases added in /tmp: `stay` (150s), `pearl` (give+select+throw; useless
+  without permissions). Bot relaunch loop: `while true; do python pb.py stay;
+  sleep 1; done`.
+- **Process notes:** live server (gradle runServer JVM 56848) exits leaving its
+  gradle launcher JVM; `./gradlew --stop` may report "no daemons" while a
+  different-version daemon (9.7.1, PID 51504) lingers — verify by command line
+  before killing only our own. Final sweep: only protected PID 12220 remains.
+- **Still open:** suppressed `ConcurrentModificationException: Async entity load`
+  on `use_item` (production, ×4, unfixed, separate issue); portal-side staging
+  beyond the teleport funnel; the javadoc inaccuracy in `RegionTransitions`
+  ("server-thread context" for the unowned hop) was FIXED this turn (now says
+  `FabricFolia-Global` MPSC dispatch thread, non-REGION, ticket capture does not
+  fire there). MIXINS.md gained the ChunkTicketMixin row (24 mixins).

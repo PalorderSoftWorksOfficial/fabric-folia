@@ -37,8 +37,12 @@ import java.util.concurrent.atomic.AtomicLong;
  *       chunk): the body runs on that region's worker — the destination is
  *       the context that must see consistent world state at arrival.</li>
  *   <li><strong>No owner</strong> (world-border edge, unregionized chunks):
- *       the body hops to the global scheduler's server-thread context —
- *       never raw mutation from a random worker thread.</li>
+ *       the body hops to the global scheduler — dispatched through
+ *       {@code engine.globalScheduler().run(...)}, drained by the dedicated
+ *       {@code FabricFolia-Global} MPSC dispatch thread (not the server
+ *       thread, and never raw mutation from a random worker thread). This
+ *       context is NOT a REGION context, so ticket capture (see
+ *       {@code ChunkTicketMixin}) does not fire here.</li>
  * </ul>
  * Dispatch is fire-and-forget (no synchronous wait on a foreign region —
  * deadlock-avoidance, mandate §32). Vanilla itself defers cross-dimension
