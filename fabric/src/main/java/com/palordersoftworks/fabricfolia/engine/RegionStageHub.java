@@ -211,6 +211,11 @@ public final class RegionStageHub {
 	// =================================================================================
 
 	private final ServerLevel level;
+
+	/** @return the live level this hub stages for (diagnostics). */
+	public ServerLevel level() {
+		return level;
+	}
 	private final WorldRegionizer regionizer;
 	private final RegionScheduler scheduler;
 	private final RegionMetrics metrics;

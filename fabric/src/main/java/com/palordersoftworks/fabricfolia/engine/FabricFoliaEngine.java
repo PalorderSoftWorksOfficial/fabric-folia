@@ -631,6 +631,34 @@ public final class FabricFoliaEngine {
 		return workerPool;
 	}
 
+	/** @return the per-world schedulers (diagnostics read-only view). */
+	public java.util.Map<String, com.palordersoftworks.fabricfolia.scheduler.RegionScheduler> schedulers() {
+		return java.util.Collections.unmodifiableMap(schedulersByWorld);
+	}
+
+	/**
+	 * @return whether any attached world has its spawn chunk loaded right
+	 * now — the health invariant's "server has tickable world state" probe.
+	 */
+	public boolean hasLoadedChunks() {
+		for (net.minecraft.server.level.ServerLevel level : levels()) {
+			var pos = level.getRespawnData().pos();
+			if (level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4) != null) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** @return the live server levels this engine is attached to. */
+	public java.util.List<net.minecraft.server.level.ServerLevel> levels() {
+		java.util.List<net.minecraft.server.level.ServerLevel> levels = new java.util.ArrayList<>();
+		for (RegionStageHub hub : stagingHubsByWorld.values()) {
+			levels.add(hub.level());
+		}
+		return levels;
+	}
+
 	/** @return live region count across ALL attached worlds (diagnostics). */
 	public int regionCount() {
 		int total = 0;

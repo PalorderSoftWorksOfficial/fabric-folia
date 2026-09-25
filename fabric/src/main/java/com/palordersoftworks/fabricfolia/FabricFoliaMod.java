@@ -20,6 +20,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.List;
 
 /**
@@ -275,33 +276,81 @@ public class FabricFoliaMod implements ModInitializer {
 	 */
 	private static void declarePatches() {
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("regionize-chunk-load",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
-						"chunks join their world's regionizer on load so gameplay stages execute region-parallel");
+				.register("regionize-chunk-load", "Chunk Load Regionization",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.REGION,
+						"chunks join their world's regionizer on load so gameplay stages execute region-parallel",
+						"ServerChunkEvents.CHUNK_LOAD -> WorldRegionizer.addChunk",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("stage-entity-ticks",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
-						"entity tick bodies execute on the owning region's worker instead of the server thread");
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("stage-block-entity-ticks",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
-						"block-entity tick bodies execute on the owning region's worker instead of the server thread");
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("stage-scheduled-ticks",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
-						"scheduled tick executions captured from workers execute region-owned");
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("stage-player-path",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA,
-						"player connection ticks execute on the owning region's worker");
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("regionized-random-ticks",
+				.register("stage-entity-ticks", "Entity Tick Staging",
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
-						"per-chunk random ticks execute on the owning region's worker (opt-in via general.regionized-random-ticks)");
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA, true);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT, true);
+						"entity tick bodies execute on the owning region's worker instead of the server thread",
+						"Level.guardEntityTick consumer.accept",
+						Set.of("regionize-chunk-load"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-block-entity-ticks", "Block Entity Tick Staging",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
+						"block-entity tick bodies execute on the owning region's worker instead of the server thread",
+						"Level.tickBlockEntities TickingBlockEntity.tick",
+						Set.of("regionize-chunk-load"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-scheduled-ticks", "Scheduled Tick Staging",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
+						"scheduled tick executions captured from workers execute region-owned",
+						"worker-side LevelTicks schedule calls",
+						Set.of("stage-block-entity-ticks"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("stage-player-path", "Player Path Staging",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.NETWORK,
+						"player connection ticks and packet re-homes execute on the owning region",
+						"Connection.tick + PacketProcessor.scheduleIfPossible",
+						Set.of("regionize-chunk-load"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("regionized-random-ticks", "Regionized Random Ticks",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
+						"per-chunk random ticks execute on the owning region's worker (opt-in via general.regionized-random-ticks)",
+						"ServerChunkCache.tickChunks forEachBlockTickingChunk",
+						Set.of("regionize-chunk-load"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("packet-dispatch", "Packet Dispatch",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.NETWORK,
+						"packet re-home dispatch routes to the owning region where ownership allows",
+						"PacketProcessor.scheduleIfPossible",
+						Set.of("regionize-chunk-load"), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("allocation-reduction", "Drain Allocation Reduction",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.NETWORK,
+						"empty-drain short-circuit and zero-allocation sizing of drain buffers",
+						"RegionStageHub flush + RegionTaskQueue.drainEntries",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("region-lookup", "Region Ownership Lookup",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.REGION,
+						"O(1) section-to-region ownership index replaces the linear scan in ownerOfChunk",
+						"WorldRegionizer.ownerOfChunk",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("scheduler-dispatch", "Scheduler Dispatch Scan",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.SCHEDULER,
+						"zero-allocation liveRegions scan in the 1ms dispatch loop",
+						"RegionScheduler.coordinateLoop",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("task-queue", "Task Queue Sizing",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.SCHEDULER,
+						"O(1) queue size counter and exact-size drain buffers",
+						"RegionTaskQueue add/drain/size",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 	}
 
 	/**
@@ -312,25 +361,62 @@ public class FabricFoliaMod implements ModInitializer {
 	 * global patches.enabled is false every layer is switched off.
 	 */
 	private static void resolvePatchStates(FoliaConfig config) {
-		boolean layersEnabled = config.patchesEnabled();
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRICFOLIA, layersEnabled);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT, layersEnabled);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.NETWORK, layersEnabled);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.FABRIC, layersEnabled);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
-				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.GC, layersEnabled);
-		boolean gameplay = config.regionizedGameplay();
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-entity-ticks", gameplay);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-block-entity-ticks", gameplay);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-scheduled-ticks", gameplay);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("stage-player-path",
+		var patches = com.palordersoftworks.fabricfolia.patches.PatchRegistry.class;
+		boolean global = config.patchesEnabled();
+		for (var layer : com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.values()) {
+			com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(layer, global);
+		}
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("regionize-chunk-load",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_REGION_LOOKUP, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-entity-ticks",
+				config.regionizedGameplay() && config.patchEnabled(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_TICK, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-block-entity-ticks",
+				config.regionizedGameplay() && config.patchEnabled(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_CHUNK_TICK, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-scheduled-ticks",
+				config.regionizedGameplay() && config.patchEnabled(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_CHUNK_TICK, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-player-path",
 				config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH) instanceof Boolean b ? b : true);
-		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setPatchEnabled("regionized-random-ticks",
-				config.regionizedRandomTicks());
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("regionized-random-ticks",
+				config.regionizedRandomTicks() && config.patchEnabled(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_RANDOM_TICK, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("packet-dispatch",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_PACKET_DISPATCH, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("allocation-reduction",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ALLOCATION_REDUCTION, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("region-lookup",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_REGION_LOOKUP, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("scheduler-dispatch",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_SCHEDULER_DISPATCH, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("task-queue",
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_TASK_QUEUE, true));
+
+		var blocked = com.palordersoftworks.fabricfolia.patches.PatchRegistry.resolveAndApply();
+		int active = 0;
+		for (var patch : com.palordersoftworks.fabricfolia.patches.PatchRegistry.patches()) {
+			if (patch.status() == com.palordersoftworks.fabricfolia.patches.PatchRegistry.Status.ACTIVE) {
+				active++;
+			}
+		}
+		Console.config("  Patches: " + active + " active / "
+				+ com.palordersoftworks.fabricfolia.patches.PatchRegistry.patches().size()
+				+ " registered" + (blocked.isEmpty() ? "" : " (" + blocked.size() + " blocked)"));
+
+		boolean lookupActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.isEnabled("region-lookup");
+		boolean schedulerActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.isEnabled("scheduler-dispatch");
+		boolean taskQueueActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.isEnabled("task-queue");
+		if (engine != null) {
+			for (var scheduler : engine.schedulers().values()) {
+				scheduler.setSchedulerDispatchPatch(schedulerActive);
+				scheduler.setOwnerLookupIndex(lookupActive);
+			}
+		}
+		com.palordersoftworks.fabricfolia.scheduler.RegionTaskQueue.setGlobalTaskQueuePatch(taskQueueActive);
 	}
 
 	/**

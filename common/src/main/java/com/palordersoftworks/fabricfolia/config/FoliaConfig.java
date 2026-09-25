@@ -280,6 +280,12 @@ public final class FoliaConfig {
 		return (Boolean) values.get(ConfigSchema.KEY_PATCHES_ENABLED);
 	}
 
+	/** @return a per-patch toggle, or {@code fallback} when the key is absent. */
+	public boolean patchEnabled(String key, boolean fallback) {
+		Object value = values.get(key);
+		return value instanceof Boolean b ? b : fallback;
+	}
+
 	public boolean serverBrand() {
 		return (Boolean) values.get(ConfigSchema.KEY_SERVER_BRAND);
 	}

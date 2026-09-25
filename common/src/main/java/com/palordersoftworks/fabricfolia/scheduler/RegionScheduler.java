@@ -176,8 +176,31 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	 * across the pool (diagnostics: sustained growth means the pool is
 	 * saturated; a healthy idle server reads 0 with waiting workers).
 	 */
+	/** Patch gate: fabricfolia.scheduler-dispatch (zero-alloc live scan). */
+	private volatile boolean schedulerDispatchPatch = true;
+
+	/** Sets the scheduler-dispatch patch gate (patch resolution; startup only). */
+	public void setSchedulerDispatchPatch(boolean enabled) {
+		this.schedulerDispatchPatch = enabled;
+	}
+
+	/** Sets the ownership-index gate on this scheduler's regionizer. */
+	public void setOwnerLookupIndex(boolean enabled) {
+		regionizer.setOwnerLookupIndex(enabled);
+	}
+
 	public int queuedRegionTasks() {
 		return pool.queuedTaskCount();
+	}
+
+	/** @return cumulative regions absorbed by merges (structural diagnostics). */
+	public long regionMerges() {
+		return regionizer.mergedRegionCount();
+	}
+
+	/** @return cumulative regions created by splits (structural diagnostics). */
+	public long regionSplits() {
+		return regionizer.splitRegionCount();
 	}
 
 	/**
@@ -485,18 +508,28 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		ThreadOwnership.clear();
 		while (running.get()) {
 			long now = nanoClock.getAsLong();
-			for (Region region : regionizer.liveRegions()) {
-				if (region.state() != RegionState.READY) {
-					continue;
+			if (schedulerDispatchPatch) {
+				// Zero-allocation scan: iterate the live set in place instead of
+				// copying it into a new list every millisecond.
+				regionizer.forEachLiveRegion(region -> {
+					if (region.state() != RegionState.READY
+							|| region.nextTickDeadlineNanos() > now) {
+						return;
+					}
+					long submittedAt = nanoClock.getAsLong();
+					pool.submit(() -> runRegionTick(region, submittedAt));
+				});
+			} else {
+				for (Region region : regionizer.liveRegions()) {
+					if (region.state() != RegionState.READY) {
+						continue;
+					}
+					if (region.nextTickDeadlineNanos() > now) {
+						continue;
+					}
+					long submittedAt = nanoClock.getAsLong();
+					pool.submit(() -> runRegionTick(region, submittedAt));
 				}
-				// Deadline 0 = never ticked (region just created): due now.
-				if (region.nextTickDeadlineNanos() > now) {
-					continue;
-				}
-				// Duplicate dispatch is made harmless by the two in-job guards
-				// documented on the class — no cross-thread bookkeeping needed.
-				long submittedAt = nanoClock.getAsLong();
-				pool.submit(() -> runRegionTick(region, submittedAt));
 			}
 			// Coordinator cadence: 1ms scan. Regions whose deadline is further
 			// out are skipped cheaply; correctness never depends on scan timing.

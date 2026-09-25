@@ -86,6 +86,15 @@ public final class WorldRegionizer {
 	private final Map<Long, Region> regions = new HashMap<>();
 	/** Sections with any chunks, per region id, for split recalculation. Guarded by structureLock. */
 	private final Set<Region> liveRegions = new LinkedHashSet<>();
+	/**
+	 * Reverse ownership index: section key → owning region. Maintained under
+	 * the structure lock at every ownership mutation (adopt, immediate merge,
+	 * split, kill); turns ownerOfChunk from a linear scan over live regions
+	 * into one map read (the hot ownership lookup on every staged body, packet
+	 * re-home, and ownership check). When the owning region dies the section
+	 * is gone or re-adopted, so no stale entries accumulate.
+	 */
+	private final java.util.Map<Long, Region> sectionOwners = new java.util.HashMap<>();
 
 	private long nextRegionId = 1;
 
@@ -428,7 +437,9 @@ public final class WorldRegionizer {
 	 * so no section can be adopted by two regions in an observable interleaving.
 	 */
 	private void adopt(Region region, RegionSection section) {
-		region.sections.put(sectionKey(section.x, section.z), section);
+		long key = sectionKey(section.x, section.z);
+		region.sections.put(key, section);
+		sectionOwners.put(key, region);
 	}
 
 	/**
@@ -503,6 +514,7 @@ public final class WorldRegionizer {
 		// Immediate merge: move sections.
 		for (Map.Entry<Long, RegionSection> e : from.sections.entrySet()) {
 			to.sections.put(e.getKey(), e.getValue());
+			sectionOwners.put(e.getKey(), to);
 		}
 		from.sections.clear();
 
@@ -541,6 +553,9 @@ public final class WorldRegionizer {
 
 	private void killRegion(Region region) {
 		region.state = RegionState.DEAD;
+		for (Long key : region.sections.keySet()) {
+			sectionOwners.remove(key, region);
+		}
 		region.sections.clear();
 		region.mergeLater.clear();
 		region.expectingMergeFrom.clear();
@@ -586,6 +601,9 @@ public final class WorldRegionizer {
 	 */
 	private void killMergedRegion(Region donor, Region into) {
 		donor.state = RegionState.DEAD;
+		for (Long key : donor.sections.keySet()) {
+			sectionOwners.remove(key, donor);
+		}
 		donor.sections.clear();
 		liveRegions.remove(donor);
 		for (Listener listener : listeners()) {
@@ -609,15 +627,43 @@ public final class WorldRegionizer {
 	}
 
 	private Region ownerOfSectionLocked(RegionSection section) {
-		// Linear scan of live regions' section maps: correct and fast for
-		// realistic section counts; a reverse map is added if benchmarks
-		// (spec 20) justify it. No premature optimization.
+		if (ownerLookupIndex) {
+			return sectionOwners.get(sectionKey(section.x, section.z));
+		}
 		for (Region region : liveRegions) {
 			if (region.sections.containsKey(sectionKey(section.x, section.z))) {
 				return region;
 			}
 		}
 		return null;
+	}
+
+	/** Patch gate: the O(1) ownership index (fabricfolia.region-lookup). */
+	private volatile boolean ownerLookupIndex = true;
+	/** Structural counters (diagnostics; structure-lock writes). */
+	private long mergedRegions;
+	private long splitRegions;
+
+	/** Sets the ownership-index gate (patch resolution; startup only). */
+	public void setOwnerLookupIndex(boolean enabled) {
+		this.ownerLookupIndex = enabled;
+	}
+
+	/**
+	 * Zero-allocation live-region iteration for hot scan paths (the scheduler
+	 * dispatch loop). The consumer runs under the structure lock and must not
+	 * call back into regionizer operations (re-entrancy would deadlock — same
+	 * contract as the tick-end protocol callbacks).
+	 */
+	public void forEachLiveRegion(java.util.function.Consumer<Region> consumer) {
+		structureLock.lock();
+		try {
+			for (Region region : liveRegions) {
+				consumer.accept(region);
+			}
+		} finally {
+			structureLock.unlock();
+		}
 	}
 
 	/** @return all live regions (READY/TICKING/TRANSIENT) in this world. */
@@ -782,6 +828,7 @@ public final class WorldRegionizer {
 	private void mergeNowLocked(Region from, Region to) {
 		for (Map.Entry<Long, RegionSection> e : from.sections.entrySet()) {
 			to.sections.put(e.getKey(), e.getValue());
+			sectionOwners.put(e.getKey(), to);
 		}
 		from.sections.clear();
 		for (Region target : from.mergeLater) {
@@ -798,6 +845,7 @@ public final class WorldRegionizer {
 
 	/** Structural metrics: one completed region merge (donor absorbed). */
 	private void recordMerge() {
+		mergedRegions++;
 		StructuralMetricSink sink = this.structuralMetrics;
 		if (sink != null) {
 			sink.regionMerged();
@@ -806,10 +854,21 @@ public final class WorldRegionizer {
 
 	/** Structural metrics: one region split (a child born). */
 	private void recordSplit() {
+		splitRegions++;
 		StructuralMetricSink sink = this.structuralMetrics;
 		if (sink != null) {
 			sink.regionSplit();
 		}
+	}
+
+	/** @return cumulative absorbed regions (diagnostics; written under the structure lock). */
+	public long mergedRegionCount() {
+		return mergedRegions;
+	}
+
+	/** @return cumulative split children (diagnostics; written under the structure lock). */
+	public long splitRegionCount() {
+		return splitRegions;
 	}
 
 	/** Structural metrics: one region aborted (tick-end protocol failure). */
@@ -867,8 +926,10 @@ public final class WorldRegionizer {
 		int removed = 0;
 		Iterator<Map.Entry<Long, RegionSection>> it = region.sections.entrySet().iterator();
 		while (it.hasNext()) {
-			RegionSection section = it.next().getValue();
+			Map.Entry<Long, RegionSection> entry = it.next();
+			RegionSection section = entry.getValue();
 			if (!section.alive) {
+				sectionOwners.remove(entry.getKey(), region);
 				it.remove();
 				removed++;
 			}
@@ -916,8 +977,10 @@ public final class WorldRegionizer {
 			Region child = newRegion(RegionState.READY);
 			child.origin = "split";
 			for (RegionSection section : components.get(i)) {
-				region.sections.remove(sectionKey(section.x, section.z));
-				child.sections.put(sectionKey(section.x, section.z), section);
+				long key = sectionKey(section.x, section.z);
+				region.sections.remove(key);
+				child.sections.put(key, section);
+				sectionOwners.put(key, child);
 			}
 			child.tickCount = region.tickCount;
 			scheduleNextTick(child);

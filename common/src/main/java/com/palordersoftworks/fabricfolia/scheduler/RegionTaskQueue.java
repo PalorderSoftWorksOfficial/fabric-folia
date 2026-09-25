@@ -50,6 +50,10 @@ public final class RegionTaskQueue {
 	}
 
 	private final Queue<Entry> tasks = new ConcurrentLinkedQueue<>();
+	/** O(1) pending counter (replaces O(n) scans in size()); patch-gated. */
+	private final java.util.concurrent.atomic.AtomicInteger pendingCount = new java.util.concurrent.atomic.AtomicInteger();
+	/** Patch gate: fabricfolia.task-queue (O(1) size + zero-alloc drain sizing). */
+	private volatile boolean taskQueuePatch = GLOBAL_TASK_QUEUE_PATCH;
 
 	/**
 	 * Enqueues a task. Called from any thread — the ONLY entry point from
@@ -59,11 +63,13 @@ public final class RegionTaskQueue {
 	 */
 	public void add(Runnable task) {
 		tasks.add(new Entry(task, Entry.NO_POSITION));
+		pendingCount.incrementAndGet();
 	}
 
 	/** Enqueues a task that targets a specific chunk position (split-aware). */
 	public void add(Runnable task, long chunkPos) {
 		tasks.add(new Entry(task, chunkPos));
+		pendingCount.incrementAndGet();
 	}
 
 	/**
@@ -77,6 +83,7 @@ public final class RegionTaskQueue {
 		for (java.util.Iterator<Entry> it = tasks.iterator(); it.hasNext(); ) {
 			if (it.next().task() == task) {
 				it.remove();
+				pendingCount.decrementAndGet();
 				return true;
 			}
 		}
@@ -101,18 +108,47 @@ public final class RegionTaskQueue {
 		if (tasks.isEmpty()) {
 			return List.of();
 		}
+		if (taskQueuePatch) {
+			List<Entry> out = new ArrayList<>(Math.max(1, pendingCount.get()));
+			Entry entry;
+			while ((entry = tasks.poll()) != null) {
+				pendingCount.decrementAndGet();
+				out.add(entry);
+			}
+			return out;
+		}
 		List<Entry> out = new ArrayList<>();
 		Entry entry;
 		while ((entry = tasks.poll()) != null) {
+			pendingCount.decrementAndGet();
 			out.add(entry);
 		}
 		return out;
 	}
 
-	/** @return number of pending tasks (diagnostics; O(n) on this structure). */
+	/** @return number of pending tasks (O(1) under the task-queue patch). */
 	public int size() {
+		if (taskQueuePatch) {
+			return Math.max(pendingCount.get(), 0);
+		}
 		return tasks.size();
 	}
+
+	/** Sets the task-queue patch gate (patch resolution; startup only). */
+	public void setTaskQueuePatch(boolean enabled) {
+		this.taskQueuePatch = enabled;
+	}
+
+	/**
+	 * Applies the task-queue patch gate to every queue created so far and
+	 * defaults new ones (patch resolution runs before the engine starts, so
+	 * this covers the server's queues; tests may create queues after).
+	 */
+	public static void setGlobalTaskQueuePatch(boolean enabled) {
+		GLOBAL_TASK_QUEUE_PATCH = enabled;
+	}
+
+	private static volatile boolean GLOBAL_TASK_QUEUE_PATCH = true;
 
 	/**
 	 * Moves every pending task to {@code target}'s queue during a region merge.
@@ -125,6 +161,8 @@ public final class RegionTaskQueue {
 		Entry entry;
 		while ((entry = tasks.poll()) != null) {
 			target.tasks.add(entry);
+			target.pendingCount.incrementAndGet();
+			pendingCount.decrementAndGet();
 		}
 	}
 
@@ -132,6 +170,7 @@ public final class RegionTaskQueue {
 	public int dropAll() {
 		int n = 0;
 		while (tasks.poll() != null) {
+			pendingCount.decrementAndGet();
 			n++;
 		}
 		return n;
@@ -160,6 +199,8 @@ public final class RegionTaskQueue {
 			if (childQueue != null) {
 				it.remove();
 				childQueue.tasks.add(entry);
+				childQueue.pendingCount.incrementAndGet();
+				pendingCount.decrementAndGet();
 				moved++;
 			}
 		}

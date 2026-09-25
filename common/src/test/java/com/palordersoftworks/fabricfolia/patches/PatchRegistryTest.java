@@ -8,6 +8,9 @@ package com.palordersoftworks.fabricfolia.patches;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -15,49 +18,86 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Patch-registry semantics: default-on, layer AND per-patch gating, safe
- * unknown-name handling, and the invocation/fallback counters.
+ * Patch-registry semantics (v2): resolution pass, dependency and conflict
+ * handling, layer gating, unknown-name safety, and the invocation counters.
  */
 class PatchRegistryTest {
 
 	@AfterEach
 	void reset() {
-		for (PatchRegistry.Patch patch : PatchRegistry.patches()) {
-			PatchRegistry.setPatchEnabled(patch.name(), true);
-			PatchRegistry.setLayerEnabled(patch.layer(), true);
-		}
 		PatchRegistry.resetForTests();
 	}
 
 	@Test
-	void registeredPatchIsEnabledByDefault() {
-		PatchRegistry.Patch patch = PatchRegistry.register("test-default-on",
-				PatchRegistry.Layer.FABRICFOLIA, "test patch");
+	void registeredPatchResolvesActiveByDefault() {
+		PatchRegistry.Patch patch = PatchRegistry.register("t-on", "T On",
+				PatchRegistry.Layer.FABRICFOLIA, "d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
 		assertNotNull(patch);
-		assertTrue(PatchRegistry.isEnabled("test-default-on"));
-		assertSame(patch, PatchRegistry.patch("test-default-on"));
+		PatchRegistry.resolveAndApply();
+		assertTrue(PatchRegistry.isEnabled("t-on"));
+		assertEquals(PatchRegistry.Status.ACTIVE, patch.status());
+		assertTrue(PatchRegistry.isResolved());
+	}
+
+	@Test
+	void perPatchRequestOffDisablesThePatch() {
+		PatchRegistry.register("t-off", "T Off", PatchRegistry.Layer.MINECRAFT,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.setRequested("t-off", false);
+		PatchRegistry.resolveAndApply();
+		assertFalse(PatchRegistry.isEnabled("t-off"));
 	}
 
 	@Test
 	void layerSwitchDisablesEveryPatchInThatLayer() {
-		PatchRegistry.register("test-layer-a", PatchRegistry.Layer.MINECRAFT, "a");
-		PatchRegistry.register("test-layer-b", PatchRegistry.Layer.FABRICFOLIA, "b");
+		PatchRegistry.register("t-layer-a", "A", PatchRegistry.Layer.MINECRAFT,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.register("t-layer-b", "B", PatchRegistry.Layer.SCHEDULER,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
 		PatchRegistry.setLayerEnabled(PatchRegistry.Layer.MINECRAFT, false);
-		assertFalse(PatchRegistry.isEnabled("test-layer-a"));
-		assertTrue(PatchRegistry.isEnabled("test-layer-b"),
-				"another layer's patch must stay enabled");
+		PatchRegistry.resolveAndApply();
+		assertFalse(PatchRegistry.isEnabled("t-layer-a"));
+		assertTrue(PatchRegistry.isEnabled("t-layer-b"));
 	}
 
 	@Test
-	void perPatchToggleOverridesLayerEnabledState() {
-		PatchRegistry.register("test-own-toggle", PatchRegistry.Layer.FABRICFOLIA, "own toggle");
-		PatchRegistry.setPatchEnabled("test-own-toggle", false);
-		assertFalse(PatchRegistry.isEnabled("test-own-toggle"));
-		PatchRegistry.setLayerEnabled(PatchRegistry.Layer.FABRICFOLIA, false);
-		assertFalse(PatchRegistry.isEnabled("test-own-toggle"));
-		PatchRegistry.setLayerEnabled(PatchRegistry.Layer.FABRICFOLIA, true);
-		assertFalse(PatchRegistry.isEnabled("test-own-toggle"),
-				"patch toggle must stay off after the layer re-enables");
+	void dependencyBlocksWhenInactiveAndReportsReason() {
+		PatchRegistry.register("t-dep", "Dep", PatchRegistry.Layer.MINECRAFT,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.setRequested("t-dep", false);
+		PatchRegistry.Patch dependent = PatchRegistry.register("t-dependent", "Dependent",
+				PatchRegistry.Layer.MINECRAFT, "d", "t",
+				Set.of("t-dep"), Set.of(), PatchRegistry.Lifecycle.STARTUP_ONLY);
+		List<PatchRegistry.BlockedPatch> blocked = PatchRegistry.resolveAndApply();
+		assertFalse(PatchRegistry.isEnabled("t-dependent"));
+		assertEquals(PatchRegistry.Status.BLOCKED_DEPENDENCY, dependent.status());
+		assertTrue(dependent.statusReason().contains("t-dep"));
+		assertTrue(blocked.stream().anyMatch(b -> b.id().equals("t-dependent")));
+	}
+
+	@Test
+	void dependencyChainResolvesOrderIndependently() {
+		PatchRegistry.register("t-chain-b", "B", PatchRegistry.Layer.MINECRAFT,
+				"d", "t", Set.of("t-chain-a"), Set.of(), PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.register("t-chain-a", "A", PatchRegistry.Layer.MINECRAFT,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.resolveAndApply();
+		assertTrue(PatchRegistry.isEnabled("t-chain-a"));
+		assertTrue(PatchRegistry.isEnabled("t-chain-b"), "registration order must not matter");
+	}
+
+	@Test
+	void conflictBlocksTheSecondPatch() {
+		PatchRegistry.register("t-conflict-a", "A", PatchRegistry.Layer.REGION,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.Patch b = PatchRegistry.register("t-conflict-b", "B",
+				PatchRegistry.Layer.REGION, "d", "t",
+				Set.of(), Set.of("t-conflict-a"), PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.resolveAndApply();
+		assertTrue(PatchRegistry.isEnabled("t-conflict-a"));
+		assertFalse(PatchRegistry.isEnabled("t-conflict-b"));
+		assertEquals(PatchRegistry.Status.BLOCKED_CONFLICT, b.status());
+		assertTrue(b.statusReason().contains("t-conflict-a"));
 	}
 
 	@Test
@@ -65,25 +105,39 @@ class PatchRegistryTest {
 		assertFalse(PatchRegistry.isEnabled("no-such-patch"));
 		PatchRegistry.recordInvocation("no-such-patch");
 		PatchRegistry.recordFallback("no-such-patch");
+		assertFalse(PatchRegistry.isResolved());
 	}
 
 	@Test
 	void countersTrackInvocationsAndFallbacks() {
-		PatchRegistry.register("test-counters", PatchRegistry.Layer.NETWORK, "counters");
-		PatchRegistry.recordInvocation("test-counters");
-		PatchRegistry.recordInvocation("test-counters");
-		PatchRegistry.recordFallback("test-counters");
-		PatchRegistry.Patch patch = PatchRegistry.patch("test-counters");
+		PatchRegistry.Patch patch = PatchRegistry.register("t-counters", "C",
+				PatchRegistry.Layer.NETWORK, "d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.resolveAndApply();
+		PatchRegistry.recordInvocation("t-counters");
+		PatchRegistry.recordInvocation("t-counters");
+		PatchRegistry.recordFallback("t-counters");
 		assertEquals(2, patch.invocations());
 		assertEquals(1, patch.fallbacks());
 	}
 
 	@Test
 	void duplicateRegistrationReturnsTheSamePatch() {
-		PatchRegistry.Patch first = PatchRegistry.register("test-dup",
-				PatchRegistry.Layer.GC, "first");
-		PatchRegistry.Patch second = PatchRegistry.register("test-dup",
-				PatchRegistry.Layer.GC, "second-declaration");
+		PatchRegistry.Patch first = PatchRegistry.register("t-dup", "D",
+				PatchRegistry.Layer.ALLOCATION, "first", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.Patch second = PatchRegistry.register("t-dup", "D",
+				PatchRegistry.Layer.ALLOCATION, "second-declaration", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
 		assertSame(first, second, "duplicate registration must be a no-op");
+	}
+
+	@Test
+	void metadataIsExposedForDiagnostics() {
+		PatchRegistry.Patch patch = PatchRegistry.register("t-meta", "Meta Patch",
+				PatchRegistry.Layer.FABRICFOLIA, "does a thing", "Some.Target",
+				Set.of("a"), Set.of("b"), PatchRegistry.Lifecycle.RUNTIME);
+		assertEquals("Meta Patch", patch.name());
+		assertEquals("Some.Target", patch.target());
+		assertEquals(PatchRegistry.Lifecycle.RUNTIME, patch.lifecycle());
+		assertTrue(patch.dependencies().contains("a"));
+		assertTrue(patch.conflicts().contains("b"));
 	}
 }

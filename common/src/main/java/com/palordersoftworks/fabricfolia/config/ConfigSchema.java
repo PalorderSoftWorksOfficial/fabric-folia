@@ -49,6 +49,15 @@ public final class ConfigSchema {
 	public static final String KEY_WATCHDOG = "diagnostics.watchdog";
 	public static final String KEY_PLAYER_PATH = "gameplay.stage-player-path";
 	public static final String KEY_PATCHES_ENABLED = "patches.enabled";
+	public static final String KEY_PATCH_ENTITY_TICK = "patches.minecraft.entity-tick-optimization";
+	public static final String KEY_PATCH_CHUNK_TICK = "patches.minecraft.chunk-tick-optimization";
+	public static final String KEY_PATCH_RANDOM_TICK = "patches.minecraft.random-tick-optimization";
+	public static final String KEY_PATCH_PACKET_DISPATCH = "patches.network.packet-dispatch";
+	public static final String KEY_PATCH_ALLOCATION_REDUCTION = "patches.network.allocation-reduction";
+	public static final String KEY_PATCH_EVENT_DISPATCH = "patches.fabric.event-dispatch";
+	public static final String KEY_PATCH_REGION_LOOKUP = "patches.fabricfolia.region-lookup";
+	public static final String KEY_PATCH_SCHEDULER_DISPATCH = "patches.fabricfolia.scheduler-dispatch";
+	public static final String KEY_PATCH_TASK_QUEUE = "patches.fabricfolia.task-queue";
 	public static final String KEY_VERSION = "config-version";
 	public static final String KEY_SERVER_BRAND = "general.server-brand";
 	public static final String KEY_SERVER_BRAND_NAME = "general.server-brand-name";
@@ -409,17 +418,92 @@ public final class ConfigSchema {
 		add(opt(KEY_PATCHES_ENABLED, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"FabricFolia performance patches (the toggleable optimization layer).",
 				"",
-				"What it does: when true, every registered FabricFolia optimization",
-				"patch takes its optimized path where the patch's own conditions",
-				"hold; when false, ALL patches fall back to the original vanilla /",
-				"Fabric / FabricFolia code path. Disabling patches never disables",
-				"regionization, ownership checks, or the compatibility layer: the",
-				"correctness layer is independent of the optimization layer.",
+				"What it does: when true, every registered optimization patch takes",
+				"its optimized path where the patch's own conditions hold; when",
+				"false, ALL patches fall back to the original vanilla / Fabric /",
+				"FabricFolia code path. Disabling patches never disables",
+				"regionization, ownership checks, or the compatibility layer.",
 				"",
 				"Default: true",
 				"Valid values: true, false",
-				"Restart required: no - applies at next server start.",
+				"Restart required: yes - patches resolve once at startup.",
 				"See also: /folia patches (which patches exist and their state)."
+		}));
+		add(opt(KEY_PATCH_ENTITY_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Minecraft layer: entity tick staging executes on the owning",
+				"region's worker instead of the server thread.",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, vanilla server-thread",
+				"entity ticking is used (the original path)."
+		}));
+		add(opt(KEY_PATCH_CHUNK_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Minecraft layer: chunk tick staging (block entities and scheduled",
+				"ticks) executes region-owned.",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, vanilla server-thread",
+				"execution is used."
+		}));
+		add(opt(KEY_PATCH_RANDOM_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Minecraft layer: per-chunk random ticks (crop growth, fire, melt,",
+				"decay) execute on the owning region's worker.",
+				"",
+				"Default: true",
+				"Restart required: yes. Takes effect only when",
+				"general.regionized-random-ticks is also true; when disabled,",
+				"vanilla server-thread random ticking is used."
+		}));
+		add(opt(KEY_PATCH_PACKET_DISPATCH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Network layer: packet re-home dispatch routes to the owning region",
+				"instead of the server thread where ownership allows.",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, vanilla packet queueing is",
+				"used. Protocol correctness is preserved either way."
+		}));
+		add(opt(KEY_PATCH_ALLOCATION_REDUCTION, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Network layer: drain-path allocation reduction (empty-drain",
+				"short-circuit, zero-allocation sizing of drain buffers).",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, the original drain-path",
+				"allocation behavior is used."
+		}));
+		add(opt(KEY_PATCH_EVENT_DISPATCH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Fabric layer: gameplay staging (entity, block-entity, scheduled",
+				"and player ticks) dispatches through the owning region instead of",
+				"the server thread.",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, all staging falls back to",
+				"vanilla server-thread execution; Fabric API event behavior is",
+				"never altered by this patch."
+		}));
+		add(opt(KEY_PATCH_REGION_LOOKUP, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"FabricFolia layer: an O(1) section-to-region ownership index",
+				"replaces the linear scan in ownerOfChunk (the hot ownership",
+				"lookup on every staged body and packet re-home).",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, the original linear-scan",
+				"lookup is used. Ownership answers are identical either way."
+		}));
+		add(opt(KEY_PATCH_SCHEDULER_DISPATCH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"FabricFolia layer: scheduler tick-bookkeeping allocation reduction",
+				"(zero-allocation liveRegions scan in the dispatch loop).",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, the original",
+				"allocating-per-scan behavior is used."
+		}));
+		add(opt(KEY_PATCH_TASK_QUEUE, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"FabricFolia layer: region task-queue drain sizing and the queue's",
+				"O(1) size counter (replaces O(n) scans in backpressure checks).",
+				"",
+				"Default: true",
+				"Restart required: yes. When disabled, the original O(n) size",
+				"scan and fixed-size drain buffers are used."
 		}));
 
 		add(opt(KEY_METRICS, Boolean.class, Boolean.FALSE, v -> v, new String[] {

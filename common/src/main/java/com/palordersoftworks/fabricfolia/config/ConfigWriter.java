@@ -44,27 +44,28 @@ public final class ConfigWriter {
 	 */
 	public static MappingNode buildDefaultTree(ConfigSchema schema) {
 		MappingNode root = newMapping();
-		// Group by section NAME, not by consecutive schema runs: a schema
-		// option inserted between another section's entries must merge into
-		// that section's node, not open a duplicate one. (Duplicate section
-		// keys made the generated template self-destruct on parse — first-run
-		// generation produced a file its own validation rejected.) First-
-		// appearance order keeps the template layout stable as the schema
-		// grows; schema order is preserved within each section.
-		Map<String, MappingNode> sections = new LinkedHashMap<>();
-
 		appendVersionEntry(root, schema);
 
 		for (ConfigSchema.Option<?> option : schema.options()) {
-			String section = sectionOf(option.key());
-			MappingNode sectionNode = sections.computeIfAbsent(section, name -> {
-				MappingNode created = newMapping();
-				root.getValue().add(new NodeTuple(stringKey(name), created));
-				return created;
-			});
-			appendOptionEntry(sectionNode, option, null);
+			String[] parts = option.key().split("\\.");
+			MappingNode current = root;
+			for (int i = 0; i < parts.length - 1; i++) {
+				current = childSectionOrCreate(current, parts[i]);
+			}
+			appendOptionEntry(current, option, null);
 		}
 		return root;
+	}
+
+	/** Finds or creates the mapping node for a nested section name. */
+	private static MappingNode childSectionOrCreate(MappingNode parent, String name) {
+		NodeTuple tuple = findTuple(parent, name);
+		if (tuple != null && tuple.getValueNode() instanceof MappingNode existing) {
+			return existing;
+		}
+		MappingNode created = newMapping();
+		parent.getValue().add(new NodeTuple(stringKey(name), created));
+		return created;
 	}
 
 	private static void appendVersionEntry(MappingNode root, ConfigSchema schema) {
@@ -129,23 +130,26 @@ public final class ConfigWriter {
 	}
 
 	private static void appendMissing(MappingNode root, ConfigSchema.Option<?> option) {
-		String section = sectionOf(option.key());
-		NodeTuple sectionTuple = findTuple(root, section);
-		MappingNode sectionNode;
-		if (sectionTuple == null) {
-			sectionNode = newMapping();
-			// Insert after the last scalar entry so the version line stays first
-			// when possible; ordering is otherwise append-order.
-			root.getValue().add(new NodeTuple(stringKey(section), sectionNode));
-		} else if (sectionTuple.getValueNode() instanceof MappingNode m) {
-			sectionNode = m;
-		} else {
-			// A scalar occupies the section name: replace it (operator data is
-			// invalid; schema structure wins; the invalid scalar is dropped).
-			sectionNode = newMapping();
-			replaceTupleValue(root, section, sectionNode);
+		String[] parts = option.key().split("\\.");
+		MappingNode current = root;
+		for (int i = 0; i < parts.length - 1; i++) {
+			NodeTuple tuple = findTuple(current, parts[i]);
+			if (tuple == null) {
+				MappingNode created = newMapping();
+				current.getValue().add(new NodeTuple(stringKey(parts[i]), created));
+				current = created;
+			} else if (tuple.getValueNode() instanceof MappingNode nested) {
+				current = nested;
+			} else {
+				// A scalar occupies the section name: replace it (operator data
+				// is invalid; schema structure wins; the invalid scalar is
+				// dropped).
+				MappingNode created = newMapping();
+				replaceTupleValue(current, parts[i], created);
+				current = created;
+			}
 		}
-		appendOptionEntry(sectionNode, option, null);
+		appendOptionEntry(current, option, null);
 	}
 
 	private static void flagUnknownKeys(MappingNode node, ConfigSchema schema,
@@ -225,10 +229,6 @@ public final class ConfigWriter {
 
 	private static ScalarNode stringKey(String value) {
 		return new ScalarNode(Tag.STR, value, ScalarStyle.PLAIN);
-	}
-
-	private static String sectionOf(String dottedKey) {
-		return dottedKey.substring(0, dottedKey.indexOf('.'));
 	}
 
 	private static String leafOf(String dottedKey) {
