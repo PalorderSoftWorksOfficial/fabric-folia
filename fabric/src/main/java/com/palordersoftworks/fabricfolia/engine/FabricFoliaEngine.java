@@ -483,6 +483,13 @@ public final class FabricFoliaEngine {
 		lines.add("pending-tick ledger: records="
 				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.ledgerRecords()
 				+ " releases=" + com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.ledgerReleases());
+		lines.add("chunk tickets deferred from workers: "
+				+ com.palordersoftworks.fabricfolia.engine.TicketDeferral.deferred()
+				+ " (replayed server-thread: "
+				+ com.palordersoftworks.fabricfolia.engine.TicketDeferral.drained()
+				+ ", pending now: "
+				+ com.palordersoftworks.fabricfolia.engine.TicketDeferral.pendingCount()
+				+ ")");
 		return lines;
 	}
 
@@ -555,7 +562,13 @@ public final class FabricFoliaEngine {
 	}
 
 	/** Detaches a world (server stop): stops its scheduler, drops its queues. */
+	/**
+	 * Drops this world's pending ticket placements (world detach). A placement
+	 * whose level never ticks again can never be replayed; tickets are session
+	 * state — dropping matches the detach semantics.
+	 */
 	public void detachWorld(String worldName) {
+		com.palordersoftworks.fabricfolia.engine.TicketDeferral.clearWorld(worldName);
 		com.palordersoftworks.fabricfolia.entity.EntityRegionTracker tracker = entityTrackersByWorld.remove(worldName);
 		if (tracker != null) {
 			tracker.close();

@@ -313,6 +313,14 @@ public final class RegionStageHub {
 			// anyway, so bounce instead of blocking the worker. Re-entering
 			// runSafely with a null region runs the body under the identical
 			// isolation/metric path, inline, on the server thread.
+			// The WORLD-LOADED probe guards the same failure one dimension
+			// earlier: during world transition windows vanilla can keep a
+			// ServerLevel instance ticking after its chunk source has shut down
+			// (observed on Palorder Central, 2026-09-25: getChunkNow NPE'd inside
+			// DistanceManager.forEachEntityTickingChunk reached THROUGH the
+			// probe — every staged body in that window bounced). A null
+			// getChunkNow means the level cannot serve chunk data at all: run
+			// the body on the server thread, where vanilla tolerates the state.
 			BOUNCED_TO_SERVER.incrementAndGet();
 			level.getServer().execute(() -> runSafely(slice, body, null));
 			return;
@@ -350,6 +358,17 @@ public final class RegionStageHub {
 			return true;
 		}
 		net.minecraft.world.level.ChunkPos pos = positioned.fabricfolia$position();
+		// World-loaded probe first: a level serving ZERO loaded chunks is in a
+		// transition window (its chunk system is down — observed on Palorder
+		// Central, 2026-09-25: getChunkNow NPE'd inside
+		// DistanceManager.forEachEntityTickingChunk reached THROUGH this probe
+		// chain, and every staged body in that window bounced). A healthy
+		// world always has loaded chunks (its own body's chunk is one), so a
+		// zero count means the per-chunk probes below are meaningless and
+		// must not run.
+		if (level.getChunkSource().getLoadedChunksCount() == 0) {
+			return false;
+		}
 		for (int dx = -1; dx <= 1; dx++) {
 			for (int dz = -1; dz <= 1; dz++) {
 				if (level.getChunkSource().getChunkNow(pos.x() + dx, pos.z() + dz) == null) {
