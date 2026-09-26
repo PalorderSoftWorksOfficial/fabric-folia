@@ -420,11 +420,13 @@ Named jar for inspection (project loom cache):
   behavior + live MSPT, not by invented numbers.
 
 ### Still open (priority order)
-1. MSPT regression (mandate #1): profiling-driven attribution of the
-   production ~22 ms (Spark/JFR on a production-like ~1500-entity load,
-   same-world/same-mods baseline). Structural redundancies already removed
-   (per-body structure-lock death-check, per-caller double deferral);
-   remaining suspects quantified in the 2026-09-26 turn report.
+1. MSPT counter audit: `staged bodies total` over-counts ~12x vs actual
+   body executions (Work counters prove the game ticks each entity exactly
+   once; the pipeline is lossless end-to-end — find where stage() calls
+   exceed list deliveries). Diagnostics only, not gameplay.
+2. Production re-verification of MSPT after the ChunkResidency fix (the
+   dev-world load test proves the bounce storm is gone; production numbers
+   need the PalorderCentral workload).
 2. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
    repo) — then re-fire a run and verify it goes green.
 3. Direct `PlayerList.respawn` callers from mods/API and a destination-region
@@ -661,3 +663,57 @@ Named jar for inspection (project loom cache):
   profiling (open item 1). mcrcon on this host is the Python
   tiagofernandez package: `--password X -p PORT HOST`, commands via stdin
   (no -t — that is TLS), UPDATED §5 quirk.
+
+### DONE in the 2026-09-26 MSPT root-cause + ChunkResidency turn (verified live; on main)
+- **MSPT ROOT CAUSE FOUND AND FIXED (bytecode + JFR proof):**
+  `ServerChunkCache.getChunkNow(int,int)` 26.2 bytecode OPENS with
+  `if (Thread.currentThread() != this.mainThread) return null` — it is
+  MAIN-THREAD-ONLY by vanilla design (it mutates a 4-slot lastChunk cache).
+  Our execution-time loadedness probe called it FROM REGION WORKERS, so it
+  ALWAYS returned null → every staged body bounced back to the server
+  thread via `server.execute` — the staging machinery ran, but the actual
+  entity work ALWAYS executed on the tick thread PLUS per-body dispatch,
+  probe, and task-hop overhead. That is the 7ms→29ms shape: vanilla body
+  work unchanged + all staging overhead and zero parallelism.
+- **JFR evidence (1500 armor stands, 60s profile):** 95% of all CPU samples
+  were the Server thread; 71% of those were BOUNCED bodies
+  (`runSafely → lambda$runSafely$0 → TickTask`), dominated by
+  `ArmorStand.pushEntities → Level.getEntities` (48% of ALL samples).
+  Workers nearly idle (302 samples total). Instrumented counters then
+  proved it exactly: `probes: pass=0 chunk-missing=7,976,277` — ZERO passes
+  on workers while the identical staging probe (server thread) passed.
+- **FIX — NEW `engine/ChunkResidency.java` (the one loadedness source):**
+  per-world copy-on-write `LongOpenHashSet` snapshot (volatile; writers
+  synchronized clone-mutate-publish; readers lock-free) fed by the chunk
+  lifecycle events the engine already receives — `ChunkRegionization.onChunkLoad`
+  (markResident, BEFORE the regionizer gate so unattached worlds still
+  track), `backfillSpawnArea` (spawn spiral + player chunks),
+  `FabricFoliaEngine.onChunkUnloaded` (markUnresident), `detachWorld`
+  (clearWorld). ALL FOUR neighborhood probes now call
+  `ChunkResidency.isNeighborhoodResident` (mandate §46 one implementation):
+  `RegionStageHub.bodyNeighborhoodLoaded` (execution),
+  `LevelEntityTickMixin.neighborhhoodLoaded` + `playerPhysicsSafe` (staging),
+  `RegionTickInterceptor.neighborhoodLoaded`,
+  `RegionPlayerRouting.physicsNeighborhoodLoaded`. The getChunkNow probes
+  are GONE from all worker-reachable paths.
+- **Instrumentation kept (diagnostics):** probe outcome counters
+  (pass/world-down/chunk-missing), `staged bodies executed on workers` vs
+  `... on server thread` (counter split fixed — the old counter counted
+  bounced runs as worker runs), `staged bodies bounced to server thread`,
+  all rendered in `/folia metrics`.
+- **Live verification (1500-marker-armor-stand load = 1500 zero-work entity
+  bodies/tick in one region):** `probes: pass=2,495,404 world-down=0
+  chunk-missing=0`, `bounced=0`, `executed on workers: 2,495,400`, region
+  MSPT avg 0.08-0.30ms, `queued region tasks=0` (no backlog), Work
+  counters = exact 1500 entities × 20tps. Suite green (NEW
+  `ChunkResidencyTest` 5: neighborhood semantics, untracked-world false,
+  clearWorld, idempotence, 2-reader/2000-write COW stress).
+- **Honest limits / known diagnostics bug:** `staged bodies total` over-counts
+  ~12-25x vs actual executions (Work + executed counters agree with each
+  other and with the real entity-tick rate; queue/drain plumbing is
+  lossless by inspection and `tickNonPassenger` does not re-enter
+  `guardEntityTick` per bytecode). Gameplay is verified correct; the
+  counter discrepancy is tracked as still-open item 1. Production MSPT
+  re-measure is still-open item 2. The load shape (1500 entities in one
+  16^3 section) makes vanilla's `pushEntities` O(section-density^2) — a
+  vanilla cost, worth spreading entities in future benchmarks.

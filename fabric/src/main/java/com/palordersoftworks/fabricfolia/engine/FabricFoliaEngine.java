@@ -333,11 +333,12 @@ public final class FabricFoliaEngine {
 		net.minecraft.server.level.ServerLevel level =
 				(net.minecraft.server.level.ServerLevel) levelContextHolder;
 		String worldName = level.dimension().identifier().toString();
+		var pos = chunk.getPos();
+		ChunkResidency.markUnresident(worldName, pos.x(), pos.z());
 		WorldRegionizer regionizer = regionizers.get(worldName);
 		if (regionizer == null) {
 			return;
 		}
-		var pos = chunk.getPos();
 		regionizer.removeChunk(pos.x(), pos.z());
 	}
 
@@ -467,10 +468,12 @@ public final class FabricFoliaEngine {
 		lines.add(com.palordersoftworks.fabricfolia.engine.RegionPlayerRouting.metricsLine());
 		lines.add("staged bodies total: " + RegionStageHub.stagedTotal());
 		lines.add("staged bodies executed on workers: " + RegionStageHub.executedOnWorkers());
-		lines.add("staged bodies run server-thread (unowned position): "
-				+ (RegionStageHub.stagedTotal() - RegionStageHub.droppedDeadRegion()
-						- RegionStageHub.executedOnWorkers()));
+		lines.add("staged bodies executed on server thread: " + RegionStageHub.executedOnServerThread());
+		lines.add("staged bodies bounced to server thread (probe stale): " + RegionStageHub.bouncedToServer());
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
+		lines.add("neighborhood probes: pass=" + RegionStageHub.probePass()
+				+ " world-down=" + RegionStageHub.probeFailWorldDown()
+				+ " chunk-missing=" + RegionStageHub.probeFailChunkMissing());
 		lines.add("chunks regionized (chunk-load): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.chunkLoadRegistrations());
 		lines.add("chunks regionized (attach backfill): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.backfillRegistrations());
 		lines.add("chunk-load events with no attached world: " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.unattachedRefusals());
@@ -570,6 +573,7 @@ public final class FabricFoliaEngine {
 
 	/** Detaches a world (server stop): stops its scheduler, drops its queues. */
 	public void detachWorld(String worldName) {
+		ChunkResidency.clearWorld(worldName);
 		com.palordersoftworks.fabricfolia.entity.EntityRegionTracker tracker = entityTrackersByWorld.remove(worldName);
 		if (tracker != null) {
 			tracker.close();

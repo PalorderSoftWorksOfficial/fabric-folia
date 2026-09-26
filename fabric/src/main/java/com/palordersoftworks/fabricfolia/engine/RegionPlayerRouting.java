@@ -387,14 +387,8 @@ public final class RegionPlayerRouting {
 			return true;
 		}
 		ChunkPos center = player.chunkPosition();
-		for (int dx = -1; dx <= 1; dx++) {
-			for (int dz = -1; dz <= 1; dz++) {
-				if (level.getChunkSource().getChunkNow(center.x() + dx, center.z() + dz) == null) {
-					return false;
-				}
-			}
-		}
-		return true;
+		return ChunkResidency.isNeighborhoodResident(
+				level.dimension().identifier().toString(), center.x(), center.z());
 	}
 
 	private static boolean stagingPlayerPath() {

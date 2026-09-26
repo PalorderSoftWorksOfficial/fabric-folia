@@ -240,16 +240,9 @@ public final class RegionTickInterceptor {
 		return current != null && current.config().debugLogging();
 	}
 
-	/** @return true when every chunk in the 3x3 neighborhood is loaded now (server thread; non-blocking probe). */
 	private boolean fabricfolia$neighborhoodLoaded(ServerLevel level, int chunkX, int chunkZ) {
-		for (int dx = -1; dx <= 1; dx++) {
-			for (int dz = -1; dz <= 1; dz++) {
-				if (level.getChunkSource().getChunkNow(chunkX + dx, chunkZ + dz) == null) {
-					return false;
-				}
-			}
-		}
-		return true;
+		return ChunkResidency.isNeighborhoodResident(
+				level.dimension().identifier().toString(), chunkX, chunkZ);
 	}
 
 	/**

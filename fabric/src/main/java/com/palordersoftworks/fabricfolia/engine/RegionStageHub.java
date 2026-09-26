@@ -106,6 +106,10 @@ public final class RegionStageHub {
 	private static final AtomicLong DROPPED_DEAD_REGION = new AtomicLong();
 	private static final AtomicLong REHOMED_MERGE = new AtomicLong();
 	private static final AtomicLong BOUNCED_TO_SERVER = new AtomicLong();
+	private static final AtomicLong EXECUTED_ON_SERVER = new AtomicLong();
+	private static final AtomicLong PROBE_PASS = new AtomicLong();
+	private static final AtomicLong PROBE_FAIL_WORLD_DOWN = new AtomicLong();
+	private static final AtomicLong PROBE_FAIL_CHUNK_MISSING = new AtomicLong();
 
 	/** The gameplay slices, each with its vanilla capture site. */
 	public enum Slice {
@@ -205,6 +209,22 @@ public final class RegionStageHub {
 	/** @return staged bodies bounced to the server thread at execution time (diagnostics). */
 	public static long bouncedToServer() {
 		return BOUNCED_TO_SERVER.get();
+	}
+
+	public static long executedOnServerThread() {
+		return EXECUTED_ON_SERVER.get();
+	}
+
+	public static long probePass() {
+		return PROBE_PASS.get();
+	}
+
+	public static long probeFailWorldDown() {
+		return PROBE_FAIL_WORLD_DOWN.get();
+	}
+
+	public static long probeFailChunkMissing() {
+		return PROBE_FAIL_CHUNK_MISSING.get();
 	}
 
 	// =================================================================================
@@ -348,14 +368,13 @@ public final class RegionStageHub {
 		}
 		try {
 			body.run();
-			EXECUTED_ON_WORKERS.incrementAndGet();
-			metrics.increment(counterOf(slice));
-			if (region != null) {
-				// Execution-time success feedback for the failure policy.
-				// (The scheduler's policy already observes queue-level tasks;
-				// staged bodies are individually guarded here because a body
-				// must never kill its worker's drain loop.)
+			if (region != null
+					&& ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION) {
+				EXECUTED_ON_WORKERS.incrementAndGet();
+			} else {
+				EXECUTED_ON_SERVER.incrementAndGet();
 			}
+			metrics.increment(counterOf(slice));
 		} catch (Throwable t) {
 			metrics.increment(RegionMetrics.Counter.EXCEPTIONS_ISOLATED);
 			if (fabricfolia$isConcurrentEntityAccessFailure(t)) {
@@ -393,24 +412,19 @@ public final class RegionStageHub {
 			return true;
 		}
 		net.minecraft.world.level.ChunkPos pos = positioned.fabricfolia$position();
-		// World-loaded probe first: a level serving ZERO loaded chunks is in a
-		// transition window (its chunk system is down — observed on Palorder
-		// Central, 2026-09-25: getChunkNow NPE'd inside
-		// DistanceManager.forEachEntityTickingChunk reached THROUGH this probe
-		// chain, and every staged body in that window bounced). A healthy
-		// world always has loaded chunks (its own body's chunk is one), so a
-		// zero count means the per-chunk probes below are meaningless and
-		// must not run.
-		if (level.getChunkSource().getLoadedChunksCount() == 0) {
+		if (pos == null) {
+			return true;
+		}
+		String worldKey = level.dimension().identifier().toString();
+		if (!ChunkResidency.isNeighborhoodResident(worldKey, pos.x(), pos.z())) {
+			if (ChunkResidency.residentCount(worldKey) == 0) {
+				PROBE_FAIL_WORLD_DOWN.incrementAndGet();
+			} else {
+				PROBE_FAIL_CHUNK_MISSING.incrementAndGet();
+			}
 			return false;
 		}
-		for (int dx = -1; dx <= 1; dx++) {
-			for (int dz = -1; dz <= 1; dz++) {
-				if (level.getChunkSource().getChunkNow(pos.x() + dx, pos.z() + dz) == null) {
-					return false;
-				}
-			}
-		}
+		PROBE_PASS.incrementAndGet();
 		return true;
 	}
 

@@ -111,6 +111,8 @@ public final class ChunkRegionization {
 		if (engine == null) {
 			return;
 		}
+		ChunkPos pos = chunk.getPos();
+		ChunkResidency.markResident(level.dimension().identifier().toString(), pos.x(), pos.z());
 		WorldRegionizer regionizer =
 				engine.regionizerFor(level.dimension().identifier().toString());
 		if (regionizer == null) {
@@ -121,7 +123,6 @@ public final class ChunkRegionization {
 			com.palordersoftworks.fabricfolia.patches.PatchRegistry.recordFallback("regionize-chunk-load");
 			return;
 		}
-		ChunkPos pos = chunk.getPos();
 		regionizer.addChunk(pos.x(), pos.z());
 		CHUNK_LOAD_REGISTRATIONS.incrementAndGet();
 	}
@@ -146,8 +147,9 @@ public final class ChunkRegionization {
 	 * the CHUNK_LOAD event owns everything that loads later.
 	 */
 	private static void backfillSpawnArea(ServerLevel level, FabricFoliaEngine engine) {
+		String worldKey = level.dimension().identifier().toString();
 		WorldRegionizer regionizer =
-				engine.regionizerFor(level.dimension().identifier().toString());
+				engine.regionizerFor(worldKey);
 		if (regionizer == null) {
 			return;
 		}
@@ -160,6 +162,7 @@ public final class ChunkRegionization {
 				int x = spawn.x() + dx;
 				int z = spawn.z() + dz;
 				if (level.getChunkSource().getChunkNow(x, z) != null) {
+					ChunkResidency.markResident(worldKey, x, z);
 					regionizer.addChunk(x, z);
 					registered++;
 				}
@@ -171,6 +174,7 @@ public final class ChunkRegionization {
 			}
 			ChunkPos pos = player.chunkPosition();
 			if (level.getChunkSource().getChunkNow(pos.x(), pos.z()) != null) {
+				ChunkResidency.markResident(worldKey, pos.x(), pos.z());
 				regionizer.addChunk(pos.x(), pos.z());
 				registered++;
 			}
@@ -229,6 +233,7 @@ public final class ChunkRegionization {
 
 	/** Clears counters (tests). */
 	static void resetForTests() {
+		ChunkResidency.clearAll();
 		CHUNK_LOAD_REGISTRATIONS.set(0);
 		BACKFILL_REGISTRATIONS.set(0);
 		UNATTACHED_REFUSALS.set(0);
