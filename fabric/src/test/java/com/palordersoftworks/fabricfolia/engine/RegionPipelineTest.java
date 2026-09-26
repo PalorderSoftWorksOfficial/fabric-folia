@@ -169,4 +169,32 @@ class RegionPipelineTest {
 			engine.shutdown(5000);
 		}
 	}
+
+	@Test
+	void batchedEnqueueDispatchesEveryTaskWithOneDeathCheck() throws Exception {
+		FabricFoliaEngine engine = bootEngine();
+		try {
+			engine.attachWorld("minecraft:overworld", 10, null);
+			WorldRegionizer regionizer = engine.regionizerFor("minecraft:overworld");
+			Region region = regionizer.addChunk(0, 0);
+			RegionScheduler scheduler = engine.schedulerFor("minecraft:overworld");
+			CountDownLatch ran = new CountDownLatch(4);
+			AtomicInteger insideRegionContext = new AtomicInteger();
+			List<Runnable> tasks = new java.util.ArrayList<>();
+			for (int i = 0; i < 4; i++) {
+				tasks.add(() -> {
+					if (ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION) {
+						insideRegionContext.incrementAndGet();
+					}
+					ran.countDown();
+				});
+			}
+			assertEquals(0, scheduler.enqueueBatch(region, tasks),
+					"a live region accepts the whole batch");
+			assertTrue(ran.await(10, TimeUnit.SECONDS), "every batched task must execute");
+			assertEquals(4, insideRegionContext.get(), "batched tasks run in REGION context");
+		} finally {
+			engine.shutdown(5000);
+		}
+	}
 }

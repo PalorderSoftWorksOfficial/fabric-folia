@@ -450,6 +450,42 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		return true;
 	}
 
+	public int enqueueBatch(Region region, java.util.List<Runnable> tasks) {
+		Objects.requireNonNull(tasks, "tasks");
+		if (tasks.isEmpty()) {
+			return 0;
+		}
+		if (closed) {
+			return tasks.size();
+		}
+		RegionTaskQueue queue = queuesByRegion.get(region);
+		if (queue == null) {
+			queue = queuesByRegion.computeIfAbsent(region, r -> new RegionTaskQueue());
+		}
+		for (Runnable task : tasks) {
+			Objects.requireNonNull(task, "task");
+			queue.add(task);
+		}
+		boolean dead = regionizer.underStructureLock(region::isDead);
+		if (dead) {
+			for (Runnable task : tasks) {
+				queue.removeTask(task);
+			}
+			return tasks.size();
+		}
+		com.palordersoftworks.fabricfolia.metrics.RegionMetrics m = metrics;
+		if (m != null) {
+			ThreadOwnership.Context current = ThreadOwnership.current();
+			if (current.kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION
+					&& current.region() != region) {
+				for (int i = 0; i < tasks.size(); i++) {
+					m.increment(com.palordersoftworks.fabricfolia.metrics.RegionMetrics.Counter.CROSS_REGION_TASKS);
+				}
+			}
+		}
+		return 0;
+	}
+
 	/**
 	 * Schedules a task to run after {@code delayTicks} of the target region's
 	 * own tick counter. The delay survives merges (the queue re-homes with its

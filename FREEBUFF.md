@@ -420,15 +420,23 @@ Named jar for inspection (project loom cache):
   behavior + live MSPT, not by invented numbers.
 
 ### Still open (priority order)
-1. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
+1. MSPT regression (mandate #1): profiling-driven attribution of the
+   production ~22 ms (Spark/JFR on a production-like ~1500-entity load,
+   same-world/same-mods baseline). Structural redundancies already removed
+   (per-body structure-lock death-check, per-caller double deferral);
+   remaining suspects quantified in the 2026-09-26 turn report.
+2. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
    repo) — then re-fire a run and verify it goes green.
-2. Commit the 2026-09-24 patch-layer //folia turn (on-disk, verified).
 3. Direct `PlayerList.respawn` callers from mods/API and a destination-region
    placement hook; login placement.
 4. Portal-side staging beyond the teleport funnel.
 5. `FabricFoliaMod` service-locator indirection (DESIGN complaint) — explicit
    engine holder.
-6. Delete the merged feature branch `fix/region-pipeline-patch-layer`
+6. MIXINS.md: document the last 3 registered mixins (CommandsMixin,
+   MinecraftServerMixin, ServerPlayerTickMixin) — 23/26 documented.
+7. Comment-strip pass per mandate rule 47: new code ships comment-free, but
+   legacy files still carry javadoc.
+8. Delete the merged feature branch `fix/region-pipeline-patch-layer`
    (optional housekeeping).
 
 ## 7. Definition of done for any turn here
@@ -589,3 +597,67 @@ Named jar for inspection (project loom cache):
 - **Process note:** after a Freebuff restart, background processes are gone
   but a pre-existing console JVM (22204) was present and left alone; our
   gradle launcher JVM died with its shell (sweep found nothing of ours).
+
+### DONE in the 2026-09-26 single-writer funnel-boundary turn (verified live; on main)
+- **Crash fixed at the root (PalorderCentral `"this.wrapped" is null`):** the
+  ownership boundary now sits at the TRUE funnels, gated on **server-thread
+  identity** (not context kind — the old gate let GLOBAL/NETWORK/IO threads
+  mutate ticket maps directly, which was the same race): NEW
+  `mixin/TicketStorageMixin` guards ALL ten `TicketStorage` mutators
+  (addTicketWithRadius, addTicket×2, removeTicketWithRadius, removeTicket×2,
+  removeTicketIf, replaceTicketLevelOfType, updateChunkForced,
+  purgeStaleTickets); NEW `mixin/ChunkMapTrackingMixin` guards
+  move/addEntity/removeEntity (entityMap/playerMap); NEW
+  `mixin/DistanceManagerTrackingMixin` guards addPlayer/removePlayer/
+  runAllUpdates (playersPerChunk + the setLevel tracker mutator);
+  `ServerChunkCacheMixin` gains an `addTicketAndLoadWithRadius` whole-call
+  deferral with a bridged CompletableFuture (partial deferral would break its
+  chunk-visibility check) and the `tick` HEAD drain anchor;
+  `MinecraftServerMixin` records the server thread + drains at
+  `tickChildren` HEAD. Off-thread calls cancel and capture a VERBATIM replay
+  closure (original receiver/method/args), replayed FIFO before any
+  enumeration; deferred boolean mutators answer true; failed replays are
+  isolated + counted. NEW `engine/ServerThreadDeferral` is the one ledger.
+- **REMOVED (superseded, mandate §46 one-authoritative-implementation):
+  `ChunkTicketMixin`, `TicketDeferral`, `TicketDeferralTest`.** The per-caller
+  capture covered only 2 of ~14 mutation entry points (`DistanceManager.addPlayer`
+  and `addTicketAndLoadWithRadius` bypassed it — why the crash survived the
+  first fix); freshness-over-FIFO collapse is replaced by plain FIFO (exact
+  remove-then-add order), and the suppression-drop behavior is gone: replay
+  runs ON the server thread and is vanilla-equivalent, so dropping tickets
+  was suppressing a symptom. Stale ChunkTicketMixin references rewritten in
+  RegionTransitions + TransitionBodyServerThreadTest comments.
+- **MSPT hot path:** `RegionScheduler.enqueueBatch(region, tasks)` +
+  `RegionStageHub.dispatch` batch-by-region — ONE structure-lock
+  death-check per region per flush instead of one per body (the old code
+  took a real `ReentrantLock` 1500×/tick at that entity count, contended
+  against chunk-load registrations); dead-region drops counted per body.
+  Open question SETTLED by audit: the server tick NEVER blocks on region
+  work (only WorkerPool.awaitWake and shutdown await exist) — the MSPT
+  regression is pure server-thread staging overhead + production-only
+  factors (c2me/entity volume), needing in-situ profiling to attribute.
+- **Tests (suite green, `:common:test :api:test :fabric:test build`):** NEW
+  `ServerThreadDeferralTest` (7: FIFO order, remove-then-add exact, gate
+  semantics, unknown-owner pass-through, failure isolation + counting,
+  clearAll drop accounting, 8-worker×500 concurrent completeness/order);
+  NEW `TrackerEnumerationRaceRegressionTest` (2: deterministic regression of
+  the EXACT crash mechanism — `Long2ByteMaps.fastIterable` iteration of a
+  `Long2ByteOpenHashMap` with `setLevel` put/remove churn while workers
+  submit ticket mutations, asserting zero mutations execute inside the
+  enumeration window; plus the §78 stress: 1504 keys / 8 workers / 4512
+  mutations vs concurrent enumeration rounds — zero violations, exact final
+  state, full accounting); `RegionPipelineTest.batchedEnqueue` (batched
+  dispatch runs every task in REGION context, nothing dropped).
+- **Live (verified this turn):** clean boot, ZERO injection failures (the
+  three funnel mixins validate against real 26.2 bytecode), 6 regions,
+  101,650 staged bodies / 101,627 executed on workers, new metrics line
+  renders (`vanilla state mutations deferred to server thread: 0 (replayed:
+  0, pending: 0, failed: 0)` — zeros expected in the idle dev world), RCON
+  `stop` clean, ports released, sweep = only PID 12220 (protected).
+- **Honest limits:** unit tests pin the ledger + boundary CONTRACT, not the
+  mixin gates themselves (those need MC bootstrap — verified by the live
+  boot instead); the production crash env (c2me + modpack) is not
+  reproducible in dev; the production MSPT delta still needs in-situ
+  profiling (open item 1). mcrcon on this host is the Python
+  tiagofernandez package: `--password X -p PORT HOST`, commands via stdin
+  (no -t — that is TLS), UPDATED §5 quirk.

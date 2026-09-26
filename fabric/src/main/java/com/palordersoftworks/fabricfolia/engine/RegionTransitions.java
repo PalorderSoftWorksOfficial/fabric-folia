@@ -41,8 +41,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *       {@code engine.globalScheduler().run(...)}, drained by the dedicated
  *       {@code FabricFolia-Global} MPSC dispatch thread (not the server
  *       thread, and never raw mutation from a random worker thread). This
- *       context is NOT a REGION context, so ticket capture (see
- *       {@code ChunkTicketMixin}) does not fire here.</li>
+ *       context is NOT a REGION context and not the server thread, so
+ *       vanilla-state mutations here defer to the server thread through
+ *       {@code ServerThreadDeferral} like every other non-owner thread.</li>
  * </ul>
  * Dispatch is fire-and-forget (no synchronous wait on a foreign region —
  * deadlock-avoidance, mandate §32). Vanilla itself defers cross-dimension

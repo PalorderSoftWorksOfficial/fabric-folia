@@ -283,28 +283,28 @@ public final class RegionStageHub {
 			List<Runnable> batch = entry.getValue();
 			if (batch.isEmpty()) {
 				continue;
-			}				dispatch(entry.getKey(), batch, entry.getKey());
-				entry.getValue().clear();
+			}
+			dispatch(entry.getKey(), batch);
+			entry.getValue().clear();
 		}
 	}
 
-	private void dispatch(Slice slice, List<Runnable> batch, Slice bodySlice) {
+	private void dispatch(Slice slice, List<Runnable> batch) {
+		Map<Region, List<Runnable>> byRegion = new java.util.IdentityHashMap<>();
 		for (Runnable body : batch) {
 			Region region = regionFor(body);
 			if (region == null) {
-				// Position outside every region (world-border edge, an entity
-				// in an unowned chunk, or a non-positioned body): run it where
-				// vanilla would have — right here on the server thread. Zero
-				// behavioral delta for work the regionizer does not own.
 				runSafely(slice, body, null);
 				continue;
 			}
 			final Region target = region;
-			boolean enqueued = scheduler.enqueue(target, () -> runSafely(slice, body, target));
-			if (!enqueued) {
-				// Region died between lookup and enqueue (or scheduler
-				// closed): documented drop — the next vanilla pass re-stages.
-				DROPPED_DEAD_REGION.incrementAndGet();
+			byRegion.computeIfAbsent(target, r -> new java.util.ArrayList<>())
+					.add(() -> runSafely(slice, body, target));
+		}
+		for (Map.Entry<Region, List<Runnable>> entry : byRegion.entrySet()) {
+			int dropped = scheduler.enqueueBatch(entry.getKey(), entry.getValue());
+			if (dropped > 0) {
+				DROPPED_DEAD_REGION.addAndGet(dropped);
 			}
 		}
 	}
@@ -439,7 +439,7 @@ public final class RegionStageHub {
 
 	/** Re-dispatches one due retry through the same pipeline as a fresh body. */
 	private void dispatchRetry(RetryBody retry, int attempt) {
-		dispatch(retry.slice(), java.util.List.<Runnable>of(retry), retry.slice());
+		dispatch(retry.slice(), java.util.List.<Runnable>of(retry));
 	}
 
 	/** Wraps a failed body for retry, preserving its slice. */

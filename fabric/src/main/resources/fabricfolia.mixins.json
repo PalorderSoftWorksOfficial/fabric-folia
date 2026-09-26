@@ -4,10 +4,11 @@
   "package": "com.palordersoftworks.fabricfolia.mixin",
   "compatibilityLevel": "JAVA_25",
   "mixins": [
-    "ChunkTicketMixin",
+    "ChunkMapTrackingMixin",
     "CommandsMixin",
     "ConnectionFlushQueueMixin",
     "ConnectionPacketDispatchMixin",
+    "DistanceManagerTrackingMixin",
     "EntityMixin",
     "EntityTeleportMixin",
     "LevelBlockEntityTickMixin",
@@ -27,7 +28,8 @@
     "ServerLevelTickMixin",
     "ServerLevelUnloadMixin",
     "ServerPlayerTeleportMixin",
-    "ServerPlayerTickMixin"
+    "ServerPlayerTickMixin",
+    "TicketStorageMixin"
   ],
   "injectors": {
     "defaultRequire": 1

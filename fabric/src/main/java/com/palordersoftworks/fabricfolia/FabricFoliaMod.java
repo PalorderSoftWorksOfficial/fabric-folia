@@ -89,6 +89,8 @@ public class FabricFoliaMod implements ModInitializer {
 	}
 
 	private static void startEngine(MinecraftServer server) {
+		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.noteServerThread(Thread.currentThread());
+		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.installDiagnostics(Console::error);
 		Path configPath = Path.of("config", "fabric-folia.yml");
 		FoliaConfig config;
 		try {

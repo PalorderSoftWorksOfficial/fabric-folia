@@ -7,17 +7,23 @@ package com.palordersoftworks.fabricfolia.mixin;
 
 import com.palordersoftworks.fabricfolia.api.ThreadContext.Kind;
 import com.palordersoftworks.fabricfolia.engine.ChunkBroadcastDeferral;
+import com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.level.ChunkPos;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 /**
  * Makes {@code ServerChunkCache.blockChanged} safe when called from a region
@@ -106,5 +112,36 @@ public abstract class ServerChunkCacheMixin {
 			this.fabricfolia$pendingBroadcasts.add(holder);
 			ChunkBroadcastDeferral.recordDeferred();
 		}
+	}
+
+	@Inject(method = "tick(Ljava/util/function/BooleanSupplier;Z)V", at = @At("HEAD"))
+	private void fabricfolia$drainDeferredVanillaState(BooleanSupplier hasTimeLeft, boolean tickChunks, CallbackInfo ci) {
+		if (ServerThreadDeferral.isServerThread()) {
+			ServerThreadDeferral.drainAll();
+		}
+	}
+
+	@Inject(method = "addTicketAndLoadWithRadius(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;I)Ljava/util/concurrent/CompletableFuture;", at = @At("HEAD"), cancellable = true)
+	private void fabricfolia$deferTicketLoad(TicketType type, ChunkPos pos, int radius, CallbackInfoReturnable<CompletableFuture<?>> cir) {
+		if (ServerThreadDeferral.isServerThread()) {
+			return;
+		}
+		ServerChunkCache self = (ServerChunkCache) (Object) this;
+		CompletableFuture<Object> bridge = new CompletableFuture<>();
+		ServerThreadDeferral.defer(() -> {
+			try {
+				self.addTicketAndLoadWithRadius(type, pos, radius).whenComplete((result, error) -> {
+					if (error != null) {
+						bridge.completeExceptionally(error);
+					} else {
+						bridge.complete(result);
+					}
+				});
+			} catch (Throwable t) {
+				bridge.completeExceptionally(t);
+			}
+		});
+		cir.setReturnValue(bridge);
+		cir.cancel();
 	}
 }

@@ -54,8 +54,8 @@ class TransitionBodyServerThreadTest {
 			regionizer.addChunk(0, 0); // source region exists…
 			// …but (5000,5000) is unowned: the destination must be the global
 			// scheduler (its dedicated dispatch thread), whose context kind is
-			// NOT REGION — so the ChunkTicketMixin capture never fires there
-			// and teleport-borne ticket placements apply synchronously.
+			// NOT REGION, and not the server thread — vanilla-state mutations
+			// here defer to the server thread through ServerThreadDeferral.
 
 			ThreadOwnership.enterRegion(regionizer.ownerOfChunk(0, 0));
 

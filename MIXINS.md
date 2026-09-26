@@ -5,7 +5,7 @@ that gates any future one. Fabric Folia is deliberately mixin-minimal: the
 intercept seam is a single call site, and everything else is done through
 Fabric API events (lifecycle, commands).
 
-## Current inventory (18 mixins)
+## Current inventory (26 mixins registered; 23 documented below — CommandsMixin, MinecraftServerMixin, ServerPlayerTickMixin remain to be documented)
 
 ### LevelMixin
 
@@ -208,13 +208,43 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 | Why this seam | without it, handlers drained on their owning region would re-throw `RunningOnDifferentThreadException` and ping-pong back to the server thread, defeating ownership; the respawn carve-out keeps `PlayerList.respawn`'s replacement-player/global-list body on the server thread; the covered overload is the one the `ServerLevel` convenience overload delegates to, so every game handler is handled |
 | Effect when disarmed / gate off | vanilla's exact thread comparison everywhere |
 
-### ChunkTicketMixin
+### TicketStorageMixin
 
 | Field | Value |
 |---|---|
-| Class | `fabricfolia.mixins.json` → `ChunkTicketMixin` |
-| Target | `ServerChunkCache.addTicketWithRadius(TicketType, ChunkPos, int)` HEAD and `ServerChunkCache.addTicket(Ticket, ChunkPos)` HEAD (`@Inject`, cancellable); `ServerChunkCache.tick(BooleanSupplier, boolean)` HEAD (`@Inject`) |
-| Transformation | placement injections: REGION-context callers cancel the vanilla write and hand a `TicketDeferral.Placement` (world key, packed chunk, `TicketType` reference, radius/level) to `TicketDeferral`; tick injection: on the server thread (non-REGION), replays that world's pending placements verbatim before vanilla's `runAllUpdates`/`forEachEntityTickingChunk` can enumerate, re-checking C2ME suppression at replay time (suppressed ⇒ pending placements are dropped, never applied) |
-| Why this seam | worker-context ticket placement (portal/ender-pearl teleports executing on region workers via `TeleportTransition.postTeleport` → `Entity.placePortalTicket`, and `ServerPlayer.placeEnderPearlTicket`) mutated `TicketStorage`/`DistanceManager` tracker maps concurrently with the server thread's map iteration — fastutil `Long2ByteOpenHashMap` `"this.wrapped" is null` NPE crashed the world tick on production (PalorderCentral, 2026-09-25). Single-ownership deferral to the server thread, no locks |
-| Ordering safety | replay runs at HEAD of `ServerChunkCache.tick`, before any tracker enumeration; the removal side (ticket timeouts, `/folia pin`) stays server-thread-owned vanilla; duplicates collapse freshness-over-FIFO (vanilla add is idempotent per (type, level), drain ≤ 1 tick) |
-| Effect when disarmed / gate off | worker writes hit the plain ticket maps again (pre-fix race); server-thread behavior unchanged vanilla in all cases |
+| Class | `fabricfolia.mixins.json` → `TicketStorageMixin` |
+| Target | `TicketStorage` — HEAD (`@Inject`, cancellable) of every public mutator: `addTicketWithRadius`, `addTicket(Ticket, ChunkPos)`, `addTicket(long, Ticket)`, `removeTicketWithRadius`, `removeTicket(Ticket, ChunkPos)`, `removeTicket(long, Ticket)`, `removeTicketIf`, `replaceTicketLevelOfType`, `updateChunkForced`, `purgeStaleTickets` |
+| Transformation | single-writer ownership boundary: when the caller is not the recorded server thread, the mutation is cancelled and captured as a verbatim replay closure (original receiver, method, arguments) into `ServerThreadDeferral`; replayed FIFO on the server thread at `MinecraftServer.tickChildren` HEAD and `ServerChunkCache.tick` HEAD — before `runAllUpdates` and every tracker enumeration; deferred boolean mutators answer `true` (accepted; applies before the next tick's work) |
+| Why this seam | `TicketStorage` is the single funnel whose listeners (`simulationChunkUpdatedListener` → `SimulationChunkTracker.setLevel`) mutate the plain fastutil tracker maps (`Long2ByteOpenHashMap`) the server thread iterates in `DistanceManager.forEachEntityTickingChunk`; vanilla never writes tickets off the server thread, so any worker write (portal tickets via `Entity.placePortalTicket`, the direct `DistanceManager.addPlayer` ticket add, `/forceload` from a region, C2ME threads) is an iterator-invalidation race — the `"this.wrapped" is null` NPE that crashed PalorderCentral on 2026-09-25 |
+| Coverage | guards the whole mutation surface at the funnel rather than per caller (the superseded `ChunkTicketMixin` covered only two `ServerChunkCache` entry points; `DistanceManager.addPlayer` and `addTicketAndLoadWithRadius` bypassed it entirely — the audit that proved this is why the crash survived the first fix) |
+| Effect when disarmed / gate off | off-server-thread ticket writes hit the plain maps again (the pre-fix race); the server-thread path is vanilla in all cases |
+
+### ChunkMapTrackingMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ChunkMapTrackingMixin` |
+| Target | `ChunkMap.move(ServerPlayer)`, `ChunkMap.addEntity(Entity)`, `ChunkMap.removeEntity(Entity)` HEAD (`@Inject`, cancellable) |
+| Transformation | same server-thread-identity gate as `TicketStorageMixin`: non-server-thread callers are cancelled and captured verbatim into `ServerThreadDeferral`, replayed at tick HEAD |
+| Why this seam | `entityMap`/`playerMap` are plain maps iterated by `ChunkMap.tick` (entity-tracker updates) on the server thread; entity spawn/despawn inside staged bodies and player section-changes reach `addEntity`/`removeEntity`/`move` from region workers — the same iterator-invalidation disease as the ticket maps |
+| Effect when disarmed / gate off | worker-side tracking writes race the server thread's entity-tracker iteration |
+
+### DistanceManagerTrackingMixin
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `DistanceManagerTrackingMixin` |
+| Target | `DistanceManager.addPlayer(SectionPos, ServerPlayer)`, `DistanceManager.removePlayer(SectionPos, ServerPlayer)`, `DistanceManager.runAllUpdates(ChunkMap)` HEAD (`@Inject`, cancellable) |
+| Transformation | non-server-thread calls cancel and defer verbatim; deferred `runAllUpdates` answers `false` (no updates processed in this call) and replays at the next tick HEAD |
+| Why this seam | `addPlayer`/`removePlayer` mutate `playersPerChunk` (plain map) and place player-simulation tickets directly on `TicketStorage`, bypassing `ServerChunkCache`; `runAllUpdates` is the tracker-map mutator (`setLevel`) — both must be single-writer |
+| Effect when disarmed / gate off | player-ticket bookkeeping mutates off-thread again |
+
+### ServerChunkCacheMixin (ticket-load and drain anchors)
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerChunkCacheMixin` |
+| Target | `blockChanged(BlockPos)` HEAD (broadcast-set deferral); `addTicketAndLoadWithRadius(TicketType, ChunkPos, int)` HEAD (`@Inject`, cancellable); `tick(BooleanSupplier, boolean)` HEAD (`@Inject`) |
+| Transformation | `addTicketAndLoadWithRadius` called off the server thread is cancelled and deferred as a whole call, answering a bridge `CompletableFuture` completed when the replayed call's future completes (its inner ticket add cannot be deferred alone — the chunk-visibility check would fail); `tick` HEAD drains `ServerThreadDeferral` so every replay lands before `runAllUpdates`/`tickChunks` enumeration |
+| Why this seam | `addTicketAndLoadWithRadius` additionally calls `runDistanceManagerUpdates()` (a tracker-map mutator) on the caller's thread and returns a load future callers chain on — partial deferral would break both |
+| Effect when disarmed / gate off | worker ticket-loads race the trackers and their visibility check |
