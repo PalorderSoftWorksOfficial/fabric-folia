@@ -14,6 +14,23 @@ pipeline {
             }
         }
 
+        stage('Test') {
+            steps {
+                sh '''
+                    set -e
+
+                    chmod +x ./gradlew
+
+                    ./gradlew :common:test :fabric:test :api:test --stacktrace
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '*/build/test-results/test/*.xml'
+                }
+            }
+        }
+
         stage('Build') {
             steps {
                 sh '''
