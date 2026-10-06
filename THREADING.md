@@ -171,6 +171,33 @@ context, under the same STRICT/WARN/OFF enforcement as random ticks. A
 throwing body is contained by the failure policy; it cannot leak a context
 or corrupt a neighbor.
 
+**Tick-phase execution gate (WHEN bodies may run).** The single-writer rule
+is enforced by a gate on the worker pool: at the head of
+`processPacketsAndTick` the server thread closes the gate
+(`WorkerPool.closeExecutionAndAwait`) and waits (bounded, 1s) for
+in-flight bodies — vanilla's passes then run alone on the server thread
+while workers are parked without taking tasks. At END_SERVER_TICK the
+engine flushes staged bodies to region queues and reopens the gate, so all
+region execution happens in the inter-tick window. A timeout is reported
+loudly (never silently degraded): the report carries `pumpCalls`,
+`pumpTasks`, `pumpErrors`, and the per-world chunk-executor queue depth.
+
+**Worker chunk reads (`getChunk` fast path).** Off the main thread, vanilla
+`ServerChunkCache.getChunk` unconditionally does
+`supplyAsync(mainThreadProcessor).join()` — even for loaded chunks — and
+that supplier only runs when the server thread polls the chunk executor,
+which is exactly the deadlock the barrier would otherwise create (worker
+waiting for the server thread, the server thread waiting for the worker).
+`ServerChunkCacheMixin` therefore answers REGION-context callers from the
+volatile `visibleChunkMap` → `GenerationChunkHolder.getChunkIfPresent`
+lookup when the chunk is present (pure volatile/atomic reads; vanilla only
+ticks entities in ticking chunks, so "present" is the normal case). An
+absent chunk falls through to vanilla's join, completed by the barrier's
+pump: `FabricFoliaEngine.pumpChunkExecutors` runs one `pollTask()` per
+call for its distance/light work AND drains `pendingRunnables` directly
+(budget 128) because `MainThreadExecutor.pollTask` can return true from its
+distance-manager round without ever reaching the queue.
+
 **Scheduled-tick writes.** A region worker executing a staged scheduled
 tick may schedule further ticks — but it must never mutate the `LevelTicks`
 container's staged-tick tree concurrently with the server thread.
@@ -202,6 +229,46 @@ the event loop. Network contexts classify and route; they never mutate.
 Measured evidence is routing-level (unit tests through the real engine)
 plus crash-free drains on a live server; a full client session exercising
 the loop-drain window live remains open.
+
+**Parallel-headroom dispatch gate.** Dispatch only pays for itself when
+region concurrency can recover more time than the stage→queue→worker-hop
+round trip costs: single-writer alternation means a dispatched body only
+RELOCATES serial work (the next tick's quiesce waits it out anyway), so
+the flush ships a batch only when `Σbodies − largestRegion ≥ 32`
+(`RegionStageHub.MIN_PARALLEL_BODIES`; 0 = always dispatch — the test
+configuration). A one-region or dominant-region batch runs inline at
+flush instead — same moment, execution gate still closed, zero queue
+overhead — counted as `bodies run inline at flush (no parallel headroom)`
+in `/folia metrics`. Measured 2026-10-06 on the clump world:
+unconditional dispatch cost throughput (backlog latched at the 8192 cap,
+~2.5M suppressed bodies/min, 6.4 s/min of quiesce blocking).
+
+**Region slow-motion + chunked tasks.** A dispatched round splits into
+bounded queue tasks (`BODIES_PER_TASK = 256`), so the tick-start quiesce
+waits for at most ONE small in-flight task (~12 ms worst case) — never a
+whole round — and a hot region's round drains across many inter-tick
+windows. At flush, a region whose queue still holds more than
+`REGION_SKIP_THRESHOLD` prior tasks does not receive this round at all:
+the bodies are counted (`skipped (region behind, slow-motion)`) and the
+region ticks again when it catches up — Folia's overloaded-region
+semantics. They are never queued (backlog inflation) and never run
+inline (the old server-tick stall); PLAYER slices and retry replays are
+exempt. A single-region batch of `MIN_DISPATCH_TOTAL` (64) bodies or
+more dispatches even without cross-region headroom — isolation is the
+point: shedding body work onto the region's own worker is what keeps it
+off the server tick.
+
+**Inter-tick drain window.** Workers only execute between
+`endTickPhase()` (gate reopen) and the next `processPacketsAndTick` HEAD
+(gate close); when the server is behind, vanilla's own inter-tick sleep
+is ~0 and queued bodies would never run — the starvation that latched
+the backlog gate. `FabricFoliaEngine.awaitStagedDrain()` therefore holds
+the server thread up to `DRAIN_WINDOW_MILLIS` (20 ms) after reopening,
+parking in 1 ms slices while workers drain (`stagedDrainComplete`:
+pending == 0 and no worker busy), pumping chunk executors meanwhile, and
+counting waits/totalWaitMs/budgetExhausted. When the server is ahead the
+wait exits as soon as the work finishes and vanilla's own sleep covers
+the rest.
 
 ## Entity ownership hooks (server-thread capture)
 

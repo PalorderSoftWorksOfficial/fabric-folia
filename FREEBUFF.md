@@ -39,11 +39,14 @@
   (2026-09-25 ticket-deferral turn; no Mockito). Fabric tests boot the REAL engine
   (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
   see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
-- **CI:** `.github/workflows/build.yml` (GitHub Actions) runs
-  `./gradlew build --stacktrace` on push/PR to `main` — Java 25 (temurin),
-  Gradle via the checked-in wrapper (9.5.1), test reports on failure, fabric
-  jar archived. Jenkins (`Jenkinsfile`) still exists alongside; README
-  documents Jenkins as primary.
+- **CI: JENKINS IS THE CI (owner directive, 2026-10-06) — GitHub Actions is
+  NOT used.** `.github/workflows/build.yml` was DELETED this turn (it could
+  never run: account-level Actions disabled, confirmed 422 three times).
+  `Jenkinsfile` = the only pipeline: stage 1 `./gradlew :common:test
+  :fabric:test :api:test --stacktrace` with `junit` publishing of
+  `*/build/test-results/test/*.xml`, stage 2 `./gradlew build --stacktrace`,
+  then archives `fabric/build/libs/*.jar`. README already documents the
+  self-hosted instance (jenkins.palorderhosting.net) as primary.
 
 ## 2. Architecture in one page
 
@@ -427,8 +430,9 @@ Named jar for inspection (project loom cache):
 2. Production re-verification of MSPT after the ChunkResidency fix (the
    dev-world load test proves the bounce storm is gone; production numbers
    need the PalorderCentral workload).
-2. Enable GitHub Actions at the ACCOUNT level (owner action, outside the
-   repo) — then re-fire a run and verify it goes green.
+2. ~~Enable GitHub Actions at the ACCOUNT level~~ — SUPERSESED 2026-10-06:
+   the owner uses Jenkins; the workflow file was removed. No CI item remains
+   beyond keeping the Jenkinsfile green.
 3. Direct `PlayerList.respawn` callers from mods/API and a destination-region
    placement hook; login placement.
 4. Portal-side staging beyond the teleport funnel.
@@ -717,3 +721,238 @@ Named jar for inspection (project loom cache):
   re-measure is still-open item 2. The load shape (1500 entities in one
   16^3 section) makes vanilla's `pushEntities` O(section-density^2) — a
   vanilla cost, worth spreading entities in future benchmarks.
+
+### DONE in the 2026-10-06 quiesce-stability turn (verified live 15 min; on main, NOT committed)
+- **Request:** fix the performance/ticking instability — the single-writer
+  tick-phase gate kept dying to the vanilla watchdog. Baseline protocol §4
+  followed (pre-fix evidence, then fix, full build, live re-verify).
+- **The bug chain (evidence-driven, three crash reports + live jstack):**
+  1. *Crash 13:46:* a worker body blocked in `ServerChunkCache.getChunk()`
+     → `supplyAsync(mainThreadProcessor).join()` while the server thread
+     sat in the quiesce barrier → livelock → watchdog. Fixed with the
+     barrier pump (`WorkerPool.closeExecutionAndAwait(timeout, pump)` +
+     `FabricFoliaEngine.pumpChunkExecutors` + `pumpLevels` wiring +
+     `WorkerPoolGateTest.quiescePumpUnblocksWorkerWaitingOnMainThreadTask`).
+  2. *Crashes 14:46/14:53/08:33 + "busyCount=1 with all 8 workers parked":*
+     NOT a leaked counter — 7 workers parked at `awaitExecutionOpen`, the
+     8th genuinely in flight (`workerLoop:292`), permanently parked in
+     `EntityFluidInteraction.hasFluidAndLoaded → Level.getChunk →
+     ServerChunkCache.getChunk:131 → CompletableFuture.join`. Its
+     supplier task sat in the chunk-executor queue at depth 1 FOREVER.
+     **Root cause (26.2 bytecode + live instrumentation):**
+     `MainThreadExecutor.pollTask()` runs `runDistanceManagerUpdates()`
+     FIRST and returns true without ever touching `pendingRunnables` —
+     measured 21,552 consecutive true returns with the queue frozen at 1
+     and `pumpErrors=0`, so a pollTask-based pump can never drain under
+     this load. Vanilla never notices because vanilla never calls
+     `getChunk` off the main thread. Every tick then paid the 1s quiesce
+     timeout → cumulative drift → `ServerWatchdog` kill.
+- **Fix A — `ServerChunkCacheMixin.fabricfolia$regionWorkerPresentChunk`:
+  REGION-context present-chunk fast path.** For a staged body the chunk is
+  loaded by definition (vanilla only ticks entities in ticking chunks), so
+  HEAD-inject on `getChunk(int,int,ChunkStatus,boolean)` answers from
+  `getVisibleChunkIfPresent` (volatile `visibleChunkMap`, clone-on-write) →
+  `GenerationChunkHolder.getChunkIfPresent` (pure volatile/atomic `getNow`
+  reads — bytecode-verified, no mutation, no blocking). Absent chunk
+  (unload race) falls through to vanilla's join, which Fix B completes.
+  NOTE: `getChunkNow` itself cannot be used — its bytecode opens with
+  `if (Thread.currentThread() != mainThread) return null`.
+- **Fix B — `FabricFoliaEngine.drainChunkExecutorQueue`:** the pump now
+  ALSO drains `BlockableEventLoop.pendingRunnables` directly (reflection
+  field resolved once, `CHUNK_EXECUTOR_QUEUE_FIELD`, budget 128 tasks per
+  pump call, per-task catch + first-error record), running each task on
+  the server thread — exactly vanilla's context — while keeping the
+  `pollTask()` call for its distance/light work. Single-drainer holds
+  (workers only add; nobody else drains inside the barrier).
+- **Diagnostics (kept):** `quiescePumpCalls` / `quiescePumpErrors` /
+  `quiescePumpLastError`; every quiesce-timeout report now carries
+  `[pumpCalls=… pumpTasks=… pumpErrors=… chunkQueue=<world>=<pending> …]`
+  (`ServerChunkCache.getPendingTasksCount()` is public) — that line is
+  what proved the frozen-queue diagnosis. Metrics line extended with
+  `pumpCalls=`/`pumpErrors=`.
+- **Watchdog facts (26.2 `ServerWatchdog`, bytecode):** kill iff
+  `Util.getNanos() - nextTickTimeNanos > getMaxTickLength()` (60s).
+  The "Can't keep up" branch RE-BASES `nextTickTimeNanos += behindTicks×tick`,
+  but its interval gate is 100 ticks — at ~1.15s/tick (the broken runs)
+  the re-base could not arrive before drift crossed 60s (exactly one warn
+  in v2/v3 logs, then kill); at ~52ms/tick (fixed run) warns recur every
+  ~65s and cap drift at ~50-51s oscillating — never 60.
+- **Verification:** `./gradlew :common:test :fabric:test :api:test build`
+  green (rc=0) twice. **Live: 15 minutes, ZERO quiesce timeouts** (pre-fix:
+  40-55 within 65s then watchdog kill), no new crash report, bot (`pb.py
+  stay 75`) joined and stayed connected, metrics: staged 186,567 bodies →
+  173,913 on workers / 675 server-thread / 11,979 pending, probes
+  pass=173,913 world-down=0 chunk-missing=0, pumpCalls alive with
+  pumpTasks=0 (no joins happen anymore — Fix A makes the pump a dormant
+  safety net), drift stable ~50s, RCON `stop` → "All dimensions are saved"
+  + BUILD SUCCESSFUL, ports released.
+- **Honest remaining limits:** throughput on the 1500-stand-clump world is
+  ~19.3 TPS (clump region MSPT avg 60ms; vanilla O(n²) pushEntities +
+  staging/suppression overhead — the "staging suppressed by backlog"
+  counter runs high because the backlog hovers around the 8192 cap).
+  Structural gap to address next: when the server is BEHIND, the inter-tick
+  window shrinks toward zero, so workers starve and more bodies fall back
+  vanilla-inline — a throughput (not stability) issue. Region #1 MSPT 60ms
+  on a density pathology is expected; re-measure with spread-out entities.
+- **Host quirks added:** Python `mcrcon` package CLI takes NO command
+  argument — use the API in a heredoc: `with MCRcon("127.0.0.1",
+  "foliapass", port=25902) as m: m.command("/folia metrics")`. Git Bash
+  mangles `/folia …` slash-commands into paths (`MSYS2_ARG_CONV_EXCL` did
+  not help) — same heredoc workaround. Live thread dumps:
+  `netstat -ano | grep :25901` → PID → `/d/jdk-25.0.4/bin/jstack.exe PID
+  > /tmp/d.txt`; javap the named jar at
+  `/c/Users/User/.gradle/caches/fabric-loom/26.2/minecraft-client.jar`.
+
+### DONE in the 2026-10-06 throughput-limitation + Jenkins turn (verified live 16 min; on main, NOT committed)
+- **Owner directives:** (1) "we use Jenkins for builds rather than GitHub
+  Actions" → Jenkinsfile upgraded (explicit `:common:test :fabric:test
+  :api:test` stage + junit publishing, then `build` + archive), dead
+  `.github/workflows/build.yml` deleted, FREEBUFF §1 + still-open item 2
+  updated. (2) "try to fix the limitation" = the inter-tick window
+  starvation / clump throughput.
+- **Baselines (§4 protocol, same persisted world + `pb.py stay` bot):**
+  - Run A (staging ON, pre-change): **10.9 TPS direct** (651 ticks/60 s),
+    suppressed-backlog +2,487,761/min (latch engaged), backlog 7,988 →
+    11,982 (over the 8192 cap), **quiesce 6,394 ms/min** (155 waits,
+    avg 59 ms), Region #1 MSPT avg 52→67 ms, workers ~0.6% utilized.
+  - Run B (`patches.enabled: false` = vanilla-equivalent): watchdog-KILLED
+    at 4 m 37 s (drift 40 → 955 → 1042 → 1153 ticks → single tick 60.02 s
+    → kill). Kill stack = pure vanilla `ArmorStand.pushEntities →
+    EntitySection.getEntities:39` running inline (`runInline` via the
+    staging redirect). Entity Work counters read 0 there (they only wire
+    through `runBody`), so B's workload is UNMEASURED; its "18.5 TPS" was
+    drift-derived, not gametime-direct — do not treat as a hard number.
+- **Root cause of the limitation (stated crisply now):** single-writer
+  alternation means a dispatched body only RELOCATES serial work — the
+  server waits it out at the next quiesce anyway — so staging saves wall
+  time ONLY through cross-region concurrency. When the server is behind,
+  the inter-tick window (END_SERVER_TICK → next HEAD) shrinks toward zero,
+  queued bodies never execute, the backlog latches at its cap, and every
+  body falls back vanilla-inline while the mod still pays staging +
+  quiesce — "does the opposite", measured exactly as the owner suspected.
+- **Fix 1 — parallel-headroom dispatch gate** (`RegionStageHub.MIN_PARALLEL_
+  BODIES = 32`, non-final, 0 = always-dispatch test config): `dispatch`
+  groups the batch first, and ships it to region queues only when
+  `Σbodies − largestRegion ≥ 32`; otherwise the whole batch runs inline
+  at flush on the server thread (gate still closed — single-writer-safe,
+  same moment workers would have started, zero queue/hop/quiesce cost).
+  Counter: `bodies run inline at flush (no parallel headroom)`.
+- **Fix 2 — bounded inter-tick drain window** (`FabricFoliaEngine.
+  awaitStagedDrain`, called from `FabricFoliaMod.flushGameplayStaging`
+  right after `endTickPhase()`): hold the server thread up to
+  `DRAIN_WINDOW_MILLIS = 20` while workers drain (exit when
+  `pendingStagedBodies()==0 && busyCount()==0`), pumping chunk executors
+  each slice — this is what gives dispatched work real execution time
+  when behind (and absorbs the quiesce tail). Counts
+  `waits / totalWaitMs / budgetExhausted`; static `drainWindow(budget,
+  caughtUp, pump, park)` loop is injectable for tests.
+- **Tests:** NEW `RegionStageHubParallelGateTest` (3: single-region inline
+  at flush with pending==0 + counter + slice metric, balanced two-region
+  dispatch, dominant-region inline), NEW `StagedDrainWindowTest` (3:
+  immediate exit, pump/park cadence, budget-bounded exhaustion),
+  `RegionStageHubBacklogTest` pinned to the always-dispatch config via
+  `@BeforeEach` (MIN=0, restored in cleanup). Suite **162 tests, 0
+  failures**; `./gradlew :common:test :fabric:test :api:test build` rc=0.
+- **Live verification (run D, same clumped world, 16 min soak):**
+  `staging suppressed by backlog: 0` (was 2.5M/min — latch GONE),
+  quiesce 134 waits / 832 ms TOTAL over 16 min (was 6,394 ms/min),
+  0 timeouts, drain window engaged (waits=2, 45 ms, budgetExhausted=1 —
+  most batches inline by design on this world), staged 21,479,060 →
+  21,404,227 inline + ~75 k dispatched to workers, drift oscillating
+  44–53 s (capped, never 60 — 0 watchdog kills, vs B which died), RCON
+  `stop` → BUILD SUCCESSFUL, ports released, `./gradlew --stop` done.
+  Final sweep: only pre-existing foreign processes (crash_assistant
+  client 45680, gradle-9.7.1 daemon 111792, PID 14064) — all left alone.
+- **Honest throughput verdict (the remaining cost is VANILLA's):** the
+  world now contains **3,987 of 3,988 armor stands inside ONE 50×50-block
+  area at origin** (selector probe `execute if entity … Count:` — the
+  "1500 clump" is a ~4000 clump). ~3,419 bodies tick per tick at
+  ≈46 µs each (O(n²) `pushEntities` over a ~4 k/section density) ≈
+  150–200 ms/tick → **4.8–6.4 TPS**, with our layer now contributing ≈0
+  measured overhead (no latch, no quiesce tax, no dispatch without
+  headroom). This is the Amdahl limit of a single-region pathology: the
+  next real lever is a **lithium-style `pushEntities`/entity-collision
+  optimization** (attribution data ready: 46 µs/body, 4 k stands in one
+  50×50 area).
+- **Still open / honest limits:** (a) the rare **60 s `pushEntities`
+  stall** — PRE-EXISTING (patches-off run B died identically),
+  nondeterministic (D ran 16 min clean; C died at 77 s), single-threaded
+  (all 8 workers parked in both dumps); needs a stall-time jstack loop
+  (monitor pattern proven this turn: poll `time query gametime`, jstack
+  on stagnation). (b) Cross-run TPS comparisons are confounded: Work
+  counters only count `runBody` executions (run B counted nothing),
+  activation varies, and B's number was drift-derived. (c) The drain
+  window was live-exercised only twice on this single-region world (gate
+  routes inline) — a multi-region workload test is still owed. (d) Run C
+  died at 77 s to the same pre-existing stall before it could produce
+  T1 numbers.
+- **Host quirks added:** 26.2 `execute if entity` prints `Test passed.
+  Count: N` / `Test failed.` — usable as an RCON census probe (grid-scan
+  `x/z/dx/dz` boxes to localize entity clusters); `jps.exe -l` + `jcmd.exe
+  <pid> VM.command_line` for the §4 process sweep (PowerShell `$(…)`
+  substitution breaks inside the bash tool's -Command quoting); measure
+  TPS with `time query gametime` deltas, never from warning cadence.
+
+### DONE in the 2026-10-06 region slow-motion turn (verified live 4 min; on main, NOT committed)
+- **Owner push (rightly): "fix the limitations AND the performance issues"**
+  — the previous entry stopped at "vanilla-bound, next lever = lithium".
+  The real lever turned out to be architectural, not micro-op: single-
+  writer alternation makes the server wait for the CURRENT in-flight
+  region task at quiesce, so one hot region's 150 ms batch capped every
+  tick. Three changes in `RegionStageHub.dispatch`:
+  1. **Chunked queue tasks** (`BODIES_PER_TASK = 256`): a round splits
+     into bounded tasks — quiesce now waits for ≤ one small task (~12 ms
+     worst case) instead of a whole round, and a hot region's round drains
+     across many inter-tick windows. One `enqueueBatch` call per region
+     keeps the all-or-nothing dead-region drop → pending accounting exact.
+  2. **Region slow-motion intake gate** (`REGION_SKIP_THRESHOLD = 3`
+     tasks): at flush, a region whose queue still holds prior rounds does
+     NOT receive this round — counted as `skipped (region behind,
+     slow-motion)`, never queued (no backlog inflation), never run inline
+     (no server-tick stall). The overloaded region ticks at its own pace
+     (Folia semantics) while the server stays at 20+. PLAYER slices are
+     exempt (packet processing every tick); retry replays pass
+     `allowRegionSkip=false` (a skipped retry would be lost). Healthy
+     regions drain between flushes → `queueOf()==null/0` → zero behavior
+     change.
+  3. **Isolation dispatch floor** (`MIN_DISPATCH_TOTAL = 64`): a
+     single-region batch ≥ 64 bodies now dispatches even without
+     cross-region headroom — the gate condition became
+     `(Σ−largest ≥ 32) || (Σ ≥ 64)`. The earlier "single-region dispatch
+     never helps" claim was WRONG once tasks are chunked and intake is
+     gated: shedding the load onto the region's own worker is exactly
+     what keeps it off the server tick.
+- **Tests:** +3 in `RegionStageHubParallelGateTest` (isolation dispatch of
+  a 100-body single region; 600 bodies → exactly 3 queue tasks; backed-up
+  region skips the round — counted, no backlog, no inline — and resumes
+  after `dropAll`). Suite **165 tests, 0 failures**, build rc=0 (one
+  repair en route: missing `Region` import; one test corrected to use
+  bodies ≥ 64 and threshold 0 to actually exercise the skip path).
+- **Live proof (run E, same 3,987-stand clump world, bot present):**
+  - **TPS (gametime deltas, three consecutive windows): 23.7 / 30.1 /
+    22.0 — sustained ≥ 20.** Before: 4.8–6.4 TPS (run D, same world,
+    same bot) → **~3.7×.**
+  - **ZERO "Can't keep up" warnings** (run D had 15, drift oscillating
+    44–53 s; run E never accumulated a 5 s deficit).
+  - Mechanism live: staged 23,810,063 → executed on workers 1,513,900
+    (clump ticking at its own pace), skipped 22,142,693 (slow-motion
+    gate cycling), inline 76,342, suppressed 0, pending 0–2,660 bounded.
+  - 0 quiesce timeouts, 0 ERROR/Exception lines, no new crash report,
+    RCON `stop` → BUILD SUCCESSFUL, ports released, `./gradlew --stop`
+    done; remaining daemons are pre-existing gradle-9.7.1 (ours is
+    9.5.1) — left alone.
+- **Honest costs still visible in metrics:** quiesce ≈ 23 ms/tick (the
+  in-flight chunk tail — knob: lower `BODIES_PER_TASK`) and drain window
+  ≈ 27 ms/tick (productive clump drain — budgetExhausted counts it).
+  Both are bounded and deliberate; the trade is the clump's own entities
+  tick in slow-motion (~8-10% of rounds run — exactly the Folia
+  overloaded-region contract, visible as the skip counter).
+- **Still open:** the rare 60 s `pushEntities` stall (pre-existing,
+  none seen in run E); a lithium-style collision micro-opt would raise
+  the clump's own tick rate (attribution ready: 46 µs/body); multi-region
+  live workload for the drain window.
+- **Delivered:** committed as `7effbfd` (engine + tests) and `1d3bb45`
+  (Jenkins-only CI); this docs commit adds AGENTS.md (all-models entry
+  point) and CLAUDE.md (Claude wrapper) — both defer living state to
+  THIS file so the handoff never forks. Pushed to origin/main in the
+  same turn (verify with `git log origin/main`).
