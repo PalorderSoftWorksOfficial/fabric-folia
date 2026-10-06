@@ -90,6 +90,24 @@ public final class RegionTaskQueue {
 		return false;
 	}
 
+	/**
+	 * Polls ONE pending entry without blocking: the scheduler's budgeted-drain
+	 * primitive. Unlike {@link #drainEntries()} — which materializes until the
+	 * queue reads empty and can therefore loop FOREVER against a concurrent
+	 * producer (the wedge that latched regions TICKING with multi-million
+	 * backlogs until the heap OOMed) — a bounded poll loop always terminates,
+	 * so a region tick completes even under sustained enqueue pressure.
+	 *
+	 * @return the head entry, or null when empty
+	 */
+	public Entry pollEntry() {
+		Entry entry = tasks.poll();
+		if (entry != null) {
+			pendingCount.decrementAndGet();
+		}
+		return entry;
+	}
+
 	/** @return and removes all pending tasks; called only by the owning context. */
 	public List<Runnable> drain() {
 		List<Runnable> out = new ArrayList<>();

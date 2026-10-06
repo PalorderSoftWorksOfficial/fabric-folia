@@ -116,6 +116,9 @@ public final class FoliaDiagnostics {
 		lines.add("queued region tasks=" + queued + ", due regions=" + due);
 		if (busy == 0 && due == 0) {
 			lines.add("state: healthy idle — workers are parked efficiently (no region is due)");
+		} else if (busy == 0 && due > 0 && !pool.isExecutionOpen()) {
+			lines.add("state: tick phase — server thread owns gameplay; " + due
+					+ " due region(s) dispatch when the end-of-tick gate opens");
 		} else if (busy == 0 && due > 0) {
 			lines.add("state: PROBLEM — regions are due but no worker picked work up");
 		} else if (busy == total) {
@@ -189,7 +192,8 @@ public final class FoliaDiagnostics {
 		var pool = engine.workerPool();
 		int busy = pool.busyCount();
 		int due = summary.due();
-		if (due > 0 && busy == 0) {
+		boolean tickPhase = !pool.isExecutionOpen();
+		if (!tickPhase && due > 0 && busy == 0) {
 			// A due region is dispatched within the coordinator's 1ms scan; a
 			// sample taken between scan cycles can read stale. Re-probe once
 			// after a short settle before declaring a failure (spec 37: log a
@@ -205,7 +209,12 @@ public final class FoliaDiagnostics {
 				due += scheduler.dueRegionCount();
 			}
 		}
-		if (pool.workerCount() > 0 && (busy > 0 || due == 0)) {
+		if (tickPhase) {
+			// Gate closed = the normal tick phase: due regions + idle workers
+			// is exactly the intended state (dispatch resumes at end of tick).
+			checks.add(Check.ok("worker pool (tick phase — " + pool.workerCount()
+					+ " workers parked, " + due + " due region(s) waiting for the gate)"));
+		} else if (pool.workerCount() > 0 && (busy > 0 || due == 0)) {
 			checks.add(Check.ok("worker pool (" + pool.workerCount() + " workers, " + busy + " busy)"));
 		} else if (due > 0 && busy == 0) {
 			checks.add(Check.error("worker pool — regions are due but no worker is executing them"));
@@ -213,7 +222,9 @@ public final class FoliaDiagnostics {
 			checks.add(Check.warn("worker pool — no workers running"));
 		}
 
-		if (summary.queuedTasks() > 0 && busy == 0) {
+		if (tickPhase) {
+			checks.add(Check.ok("scheduler dispatch (tick phase; queue=" + summary.queuedTasks() + ")"));
+		} else if (summary.queuedTasks() > 0 && busy == 0) {
 			checks.add(Check.error("scheduler — " + summary.queuedTasks()
 					+ " queued region tasks but no worker picked them up"));
 		} else {

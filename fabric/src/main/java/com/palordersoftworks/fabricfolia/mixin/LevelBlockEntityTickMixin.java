@@ -50,16 +50,22 @@ public abstract class LevelBlockEntityTickMixin {
 			ticker.tick(); // region-worker execution context: run inline
 			return;
 		}
-		if (!RegionStageHub.isStaging((Level) (Object) this, RegionStageHub.Slice.BLOCK_ENTITY)) {
-			ticker.tick(); // staging inactive: vanilla
-			return;
+		RegionStageHub hub = RegionStageHub.hubFor((Level) (Object) this);
+		if (hub != null && hub.stagingEnabled(RegionStageHub.Slice.BLOCK_ENTITY)) {
+			// Removal is pruned by vanilla's own pass right after this call
+			// site; a removed ticker staged now is a no-op tick, consistent
+			// with vanilla's own late-removal behavior within a pass.
+			final BlockPos pos = ticker.getPos();
+			// Staging-time vanilla-truth probe (no probe existed here before):
+			// a block entity whose 3x3 is not vanilla-loadable keeps the inline
+			// path — on a worker it would block in getChunk().join().
+			if (hub.vanillaNeighborhoodLoaded(new net.minecraft.world.level.ChunkPos(pos.getX() >> 4, pos.getZ() >> 4))
+					&& hub.stageIfRoom(RegionStageHub.Slice.BLOCK_ENTITY,
+							new StagedBlockEntityBody(ticker, pos))) {
+				return;
+			}
 		}
-		// Removal is pruned by vanilla's own pass right after this call
-		// site; a removed ticker staged now is a no-op tick, consistent
-		// with vanilla's own late-removal behavior within a pass.
-		final BlockPos pos = ticker.getPos();
-		RegionStageHub.stage((Level) (Object) this, RegionStageHub.Slice.BLOCK_ENTITY,
-				new StagedBlockEntityBody(ticker, pos));
+		ticker.tick(); // staging inactive, neighborhood not loadable, or backlog: vanilla
 	}
 
 	/**

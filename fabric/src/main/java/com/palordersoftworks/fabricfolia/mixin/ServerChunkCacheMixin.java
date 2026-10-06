@@ -12,6 +12,8 @@ import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -73,6 +75,46 @@ public abstract class ServerChunkCacheMixin {
 
 	@Shadow
 	protected abstract ChunkHolder getVisibleChunkIfPresent(long packedPos);
+
+	/**
+	 * Region-worker fast path for vanilla's off-main {@code getChunk} (26.2
+	 * verified): off the main thread vanilla UNCONDITIONALLY does
+	 * {@code supplyAsync(mainThreadProcessor).join()} — even for an
+	 * already-loaded chunk — and that queued supplier only runs when the
+	 * server thread polls the chunk executor. A staged body (entity tick)
+	 * therefore stalls until the quiesce barrier pumps it: observed live as
+	 * a worker parked in {@code EntityFluidInteraction.hasFluidAndLoaded}
+	 * → {@code getChunk().join()} on EVERY tick, 1s quiesce tax each, until
+	 * the vanilla watchdog killed the server (2026-10-05).
+	 *
+	 * <p><strong>Why this is safe and exact:</strong> vanilla only ticks
+	 * entities in ticking chunks, so the body's chunk is loaded by
+	 * definition — the present-chunk read is the same answer vanilla's
+	 * main-path cache gives. The lookup chain is
+	 * {@code visibleChunkMap} (volatile, clone-on-write) →
+	 * {@code GenerationChunkHolder.getChunkIfPresent}, which is purely
+	 * volatile/atomic {@code getNow} reads — no mutation, no blocking.
+	 * Absent chunk (unload race between staging and execution) falls
+	 * through to vanilla's join, which the barrier pump completes.</p>
+	 */
+	@Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+			at = @At("HEAD"), cancellable = true)
+	private void fabricfolia$regionWorkerPresentChunk(int x, int z, ChunkStatus status, boolean create,
+			CallbackInfoReturnable<ChunkAccess> cir) {
+		if (com.palordersoftworks.fabricfolia.thread.ThreadOwnership.current().kind() != Kind.REGION) {
+			return; // vanilla paths (server thread, netty, async scheduler) unchanged
+		}
+		ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.pack(x, z));
+		if (holder == null) {
+			return; // absent → vanilla fall-through (join; barrier pump completes it)
+		}
+		ChunkAccess chunk = holder.getChunkIfPresent(status);
+		if (chunk != null) {
+			// Present at the requested status: the exact result vanilla's
+			// main path would return from its lastChunk/holder lookup.
+			cir.setReturnValue(chunk);
+		}
+	}
 
 	/**
 	 * Drains worker-deferred broadcast candidates into the vanilla set at

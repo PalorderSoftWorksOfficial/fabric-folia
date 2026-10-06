@@ -77,14 +77,24 @@ public abstract class LevelTicksTickMixin {
 			java.util.function.BiConsumer<Object, Object> raw =
 					(java.util.function.BiConsumer<Object, Object>) consumer;
 			BlockPos blockPos = (BlockPos) pos;
-			RegionStageHub.stage(
-					ScheduledTickDeferral.levelOf(container),
-					RegionStageHub.Slice.SCHEDULED_TICK,
-					new StagedDrainBody(raw, blockPos, type));
-			return;
+			RegionStageHub hub = RegionStageHub.hubFor(ScheduledTickDeferral.levelOf(container));
+			// This slice previously had NO staging-time probe — fluid bodies
+			// reached workers and blocked in getChunk().join() against the
+			// quiesce (watchdog kill, 2026-10-05). The vanilla-truth 3x3 probe
+			// closes that hole: un-loadable neighborhoods run inline where
+			// vanilla tolerates any sync load itself.
+			if (hub != null && hub.stagingEnabled(RegionStageHub.Slice.SCHEDULED_TICK)
+					&& hub.vanillaNeighborhoodLoaded(new net.minecraft.world.level.ChunkPos(
+							blockPos.getX() >> 4, blockPos.getZ() >> 4))
+					&& hub.stageIfRoom(RegionStageHub.Slice.SCHEDULED_TICK,
+							new StagedDrainBody(raw, blockPos, type))) {
+				return;
+			}
+			// Not staging-eligible (inactive / neighborhood not vanilla-loadable /
+			// backlog-suppressed): fall through to vanilla inline execution.
 		}
-		// Vanilla path: server thread, unregistered container, or staging
-		// inactive — invoked at the original call site.
+		// Vanilla path: server thread, unregistered container, staging
+		// inactive, or backlog-suppressed — invoked at the original call site.
 		@SuppressWarnings("unchecked")
 		java.util.function.BiConsumer<Object, Object> raw =
 				(java.util.function.BiConsumer<Object, Object>) consumer;

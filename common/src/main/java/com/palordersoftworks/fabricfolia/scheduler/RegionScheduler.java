@@ -193,6 +193,20 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		return pool.queuedTaskCount();
 	}
 
+	/**
+	 * @return total entries pending across ALL region task queues (not the
+	 * pool handoff): O(regions), called from flush-time backlog math once
+	 * per tick. This is the measure that tells "bodies are still waiting in
+	 * region queues" from "nothing is pending".
+	 */
+	public int pendingRegionQueueEntries() {
+		int total = 0;
+		for (RegionTaskQueue queue : queuesByRegion.values()) {
+			total += queue.size();
+		}
+		return total;
+	}
+
 	/** @return cumulative regions absorbed by merges (structural diagnostics). */
 	public long regionMerges() {
 		return regionizer.mergedRegionCount();
@@ -540,9 +554,34 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	// Dispatch loop (EDF)
 	// =================================================================================
 
+	/**
+	 * Per-region-tick drain budget: a region tick drains at most this long or
+	 * {@link #DRAIN_MAX_ENTRIES} tasks, whichever comes first; the remainder
+	 * stays queued for the region's next tick. Bounded work is the fix for
+	 * the drain-until-empty wedge: against a sustained producer (the
+	 * end-of-tick flush enqueues every server tick) an unbounded drain could
+	 * loop forever, latching the region TICKING while its queue grew without
+	 * limit (observed: 28.1M queued bodies → heap OOM crash).
+	 */
+	static final long DRAIN_BUDGET_NANOS = 35_000_000L;
+	/** Entry-count cap for one region tick's drain (belt alongside the time budget). */
+	static final int DRAIN_MAX_ENTRIES = 4096;
+
 	private void coordinateLoop() {
 		ThreadOwnership.clear();
 		while (running.get()) {
+			if (!pool.isExecutionOpen()) {
+				// Tick phase: the server thread owns gameplay state until the
+				// end-of-tick flush reopens execution. Due regions are picked
+				// up by the same1ms scan right after the gate opens.
+				try {
+					Thread.sleep(1);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return;
+				}
+				continue;
+			}
 			long now = nanoClock.getAsLong();
 			if (schedulerDispatchPatch) {
 				// Zero-allocation scan: iterate the live set in place instead of
@@ -616,27 +655,50 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			//    entry's target position so a later split still re-homes them.
 			RegionTaskQueue queue = queuesByRegion.get(region);
 			if (queue != null) {
-				for (RegionTaskQueue.Entry entry : queue.drainEntries()) {
+				// Bounded drain: poll at most DRAIN_MAX_ENTRIES tasks within
+				// DRAIN_BUDGET_NANOS. This always terminates, so the region
+				// tick completes and the tick-end protocol runs even while the
+				// server thread is still enqueuing — the previous
+				// drain-until-empty loop never returned under sustained
+				// production (region latched TICKING, queue grew unboundedly).
+				// Not-due delayed tasks are collected and re-queued AFTER the
+				// loop so the poll loop can never re-poll its own re-queue.
+				long drainDeadline = nanoClock.getAsLong() + DRAIN_BUDGET_NANOS;
+				int drained = 0;
+				java.util.ArrayList<RegionTaskQueue.Entry> notDueYet = null;
+				RegionTaskQueue.Entry entry;
+				while (drained < DRAIN_MAX_ENTRIES
+						&& nanoClock.getAsLong() < drainDeadline
+						&& (entry = queue.pollEntry()) != null) {
+					drained++;
 					Runnable task = entry.task();
 					try {
 						if (task instanceof DelayedRegionTask delayed
 								&& delayed.targetTick() > region.tickCount()) {
-							queue.add(task, entry.chunkPos()); // not due yet
+							if (notDueYet == null) {
+								notDueYet = new java.util.ArrayList<>(8);
+							}
+							notDueYet.add(entry); // not due yet
 							continue;
 						}
-					long taskStart = nanoClock.getAsLong();
-					task.run();
-					long taskDur = nanoClock.getAsLong() - taskStart;
-					if (taskDur > 1_000_000_000L) {
-						diagnostics.accept("SLOW TASK in " + region + ": " + (taskDur / 1_000_000) + "ms");
+						long taskStart = nanoClock.getAsLong();
+						task.run();
+						long taskDur = nanoClock.getAsLong() - taskStart;
+						if (taskDur > 1_000_000_000L) {
+							diagnostics.accept("SLOW TASK in " + region + ": " + (taskDur / 1_000_000) + "ms");
+						}
+					} catch (Throwable t) {
+						// Spec 26/§34: failures are contained by the per-region
+						// failure policy — reported with full context, never silent;
+						// a region that fails every tick is aborted rather than
+						// wedging its chunks as eternal TICKING.
+						failurePolicy.reportTaskFailure(region, "queued task", t);
 					}
-				} catch (Throwable t) {
-					// Spec 26/§34: failures are contained by the per-region
-					// failure policy — reported with full context, never silent;
-					// a region that fails every tick is aborted rather than
-					// wedging its chunks as eternal TICKING.
-					failurePolicy.reportTaskFailure(region, "queued task", t);
 				}
+				if (notDueYet != null) {
+					for (RegionTaskQueue.Entry pending : notDueYet) {
+						queue.add(pending.task(), pending.chunkPos());
+					}
 				}
 			}
 			// 2. The region tick body (engine hook; vanilla integration later).

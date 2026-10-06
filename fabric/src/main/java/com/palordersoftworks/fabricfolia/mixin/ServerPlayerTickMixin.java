@@ -60,8 +60,12 @@ public abstract class ServerPlayerTickMixin {
 			require = 1)
 	private void fabricfolia$moveOnServerThread(ServerChunkCache chunkCache, ServerPlayer player) {
 		if (ThreadOwnership.current().kind() == ThreadContext.Kind.REGION) {
-			// level() is ServerPlayer's covariant override returning ServerLevel.
-			((ServerPlayer) (Object) this).level().getServer().execute(() -> chunkCache.move(player));
+			// Deferred to the server thread's next tick phase (the deferral
+			// drains at tickChildren HEAD with workers quiesced) — a raw
+			// server.execute would pump during the inter-tick window while
+			// phase-B workers are running.
+			com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.defer(
+					() -> chunkCache.move(player));
 			return;
 		}
 		chunkCache.move(player);
@@ -78,10 +82,8 @@ public abstract class ServerPlayerTickMixin {
 			require = 1)
 	private void fabricfolia$gameModeOnServerThread(ServerPlayerGameMode gameMode) {
 		if (ThreadOwnership.current().kind() == ThreadContext.Kind.REGION) {
-			// The mixin body merges into ServerPlayer: `this` IS the player
-			// whose game mode is ticking (verified: the redirect site is
-			// player.tick()'s single gameMode.tick() call).
-			((ServerPlayer) (Object) this).level().getServer().execute(gameMode::tick);
+			// Same phase-A deferral as the chunk-view move above.
+			com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.defer(gameMode::tick);
 			return;
 		}
 		gameMode.tick();

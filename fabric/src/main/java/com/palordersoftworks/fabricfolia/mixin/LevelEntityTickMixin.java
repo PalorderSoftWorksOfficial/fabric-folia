@@ -55,36 +55,32 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * order.</p>
  */
 @Mixin(Level.class)
-public abstract class LevelEntityTickMixin {
-
-	@Redirect(
+public abstract class LevelEntityTickMixin {	@Redirect(
 			method = "guardEntityTick",
 			at = @At(value = "INVOKE",
 					target = "Ljava/util/function/Consumer;accept(Ljava/lang/Object;)V"),				require = 1)
 	private void fabricfolia$stageEntityTick(java.util.function.Consumer<?> consumer, Object entity) {
-		boolean staging = ThreadOwnership.current().kind() != ThreadContext.Kind.REGION
-				&& RegionStageHub.isStaging((Level) (Object) this, RegionStageHub.Slice.ENTITY);
-		if (staging && entity instanceof net.minecraft.server.level.ServerPlayer player) {
-			if (!fabricfolia$playerPhysicsSafe(player)) {
-				// A staged player body whose 3x3 chunk neighborhood is not
-				// fully loaded parks a worker on a synchronous chunk load (the
-				// same hazard as any edge entity). Keep the vanilla inline
-				// path for edge players until chunk access is region-safe.
+		// One hub lookup per entity (the old path did a map lookup in
+		// isStaging AND another in stage, plus a registry map get).
+		RegionStageHub hub = ThreadOwnership.current().kind() != ThreadContext.Kind.REGION
+				? RegionStageHub.hubFor((Level) (Object) this) : null;
+		if (hub != null && hub.stagingEnabled(RegionStageHub.Slice.ENTITY)) {
+			if (entity instanceof net.minecraft.server.level.ServerPlayer player) {
+				if (fabricfolia$playerPhysicsSafe(player)
+						&& hub.stageIfRoom(RegionStageHub.Slice.ENTITY,
+								new StagedEntityBody(consumer, (Entity) entity))) {
+					return;
+				}
+				// Edge player (unloaded neighborhood) or backlog-suppressed:
+				// vanilla inline path.
 				runInline(consumer, entity);
 				return;
 			}
-			// Player body: stage like any entity (the two server-thread
-			// couplings inside are handled by ServerPlayerTickMixin).
-			RegionStageHub.stage((Level) (Object) this, RegionStageHub.Slice.ENTITY,
-					new StagedEntityBody(consumer, (Entity) entity));
-			return;
-		}
-		if (staging && fabricfolia$neighborhoodLoaded((Entity) entity)) {
-			// Stage the vanilla body; the region worker executes it in
-			// REGION context via the hub's runSafely guard.
-			RegionStageHub.stage((Level) (Object) this, RegionStageHub.Slice.ENTITY,
-					new StagedEntityBody(consumer, (Entity) entity));
-			return;
+			if (fabricfolia$neighborhoodLoaded((Entity) entity)
+					&& hub.stageIfRoom(RegionStageHub.Slice.ENTITY,
+							new StagedEntityBody(consumer, (Entity) entity))) {
+				return;
+			}
 		}
 		// Vanilla path: invoked at the original call site, inside
 		// guardEntityTick's try range — vanilla's crash guard applies.
@@ -107,9 +103,8 @@ public abstract class LevelEntityTickMixin {
 		if (!(((Object) this) instanceof net.minecraft.server.level.ServerLevel level)) {
 			return true;
 		}
-		net.minecraft.world.level.ChunkPos center = player.chunkPosition();
-		return com.palordersoftworks.fabricfolia.engine.ChunkResidency.isNeighborhoodResident(
-				level.dimension().identifier().toString(), center.x(), center.z());
+		RegionStageHub hub = RegionStageHub.hubFor(level);
+		return hub != null && hub.vanillaNeighborhoodLoaded(player.chunkPosition());
 	}
 
 	/**
@@ -130,9 +125,8 @@ public abstract class LevelEntityTickMixin {
 		if (!(((Object) this) instanceof net.minecraft.server.level.ServerLevel level)) {
 			return true; // non-server levels are not regionized anyway
 		}
-		net.minecraft.world.level.ChunkPos center = entity.chunkPosition();
-		return com.palordersoftworks.fabricfolia.engine.ChunkResidency.isNeighborhoodResident(
-				level.dimension().identifier().toString(), center.x(), center.z());
+		RegionStageHub hub = RegionStageHub.hubFor(level);
+		return hub != null && hub.vanillaNeighborhoodLoaded(entity.chunkPosition());
 	}
 
 	/**

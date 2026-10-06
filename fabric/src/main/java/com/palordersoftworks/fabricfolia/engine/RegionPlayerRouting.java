@@ -172,20 +172,25 @@ public final class RegionPlayerRouting {
 		if (!(player.level() instanceof ServerLevel level)) {
 			return false;
 		}
-		if (!RegionStageHub.isStaging(level, RegionStageHub.Slice.PLAYER)) {
+		RegionStageHub hub = RegionStageHub.hubFor(level);
+		if (hub == null || !hub.stagingEnabled(RegionStageHub.Slice.PLAYER)) {
 			return false;
 		}
-		if (!fabricfolia$physicsNeighborhoodLoaded(player)) {
+		if (!hub.vanillaNeighborhoodLoaded(player.chunkPosition())) {
 			// The staged body runs the physics chain (doTick -> Player.tick),
-			// which can request edge-adjacent chunk data; an unloaded 3x3
-			// neighborhood would park a worker on a synchronous chunk load the
-			// worker cannot pump (the same hazard the entity pass gates).
-			// Vanilla's server-thread execution stays until chunk access is
-			// region-safe. Server-thread probe: getChunkNow never blocks.
+			// which can request edge-adjacent chunk data; a neighborhood not
+			// fully loaded in VANILLA's own terms would park a worker on a
+			// synchronous chunk load the worker cannot pump (the same hazard
+			// the entity pass gates). Server-thread vanilla probe: getChunkNow
+			// never blocks there.
 			return false;
 		}
-		RegionStageHub.stage(level, RegionStageHub.Slice.PLAYER,
-				new StagedConnectionBody(player, body));
+		if (!hub.stageIfRoom(RegionStageHub.Slice.PLAYER,
+				new StagedConnectionBody(player, body))) {
+			// Backlog-suppressed: the caller runs the connection tick
+			// vanilla on the server thread this tick.
+			return false;
+		}
 		STAGED_CONNECTIONS.incrementAndGet();
 		return true;
 	}
@@ -386,9 +391,8 @@ public final class RegionPlayerRouting {
 		if (!(player.level() instanceof net.minecraft.server.level.ServerLevel level)) {
 			return true;
 		}
-		ChunkPos center = player.chunkPosition();
-		return ChunkResidency.isNeighborhoodResident(
-				level.dimension().identifier().toString(), center.x(), center.z());
+		RegionStageHub hub = RegionStageHub.hubFor(level);
+		return hub != null && hub.vanillaNeighborhoodLoaded(player.chunkPosition());
 	}
 
 	private static boolean stagingPlayerPath() {

@@ -388,6 +388,9 @@ public final class FabricFoliaEngine {
 		// Vanilla still decides WHAT to tick (its passes run on the server
 		// thread); only the bodies move. The scheduled-tick deferral buffers
 		// worker-side scheduleTick calls and replays them server-thread.
+		// Quiesce/shutdown pump coverage for this level (independent of the
+		// gameplay-staging gate below — random-tick workers also join).
+		pumpLevels.put(worldName, level);
 		if (config.regionizedGameplay()) {
 			RegionStageHub stageHub = stagingHubsByWorld.computeIfAbsent(worldName, name ->
 					new RegionStageHub(level, regionizer, scheduler, metrics, info::accept));
@@ -425,6 +428,301 @@ public final class FabricFoliaEngine {
 			hub.flushStaged();
 		}
 		com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayOnServerThread();
+	}
+
+	/**
+	 * Tick-phase quiesce (the single-writer rule): called at
+	 * processPacketsAndTick HEAD — before vanilla's packet drain and world
+	 * passes — to close the worker execution gate and wait (bounded) for
+	 * in-flight region work. After this returns, only the server thread
+	 * touches gameplay state until {@link #endTickPhase()} reopens at the
+	 * end of tick.
+	 */
+	private static final long QUIESCE_TIMEOUT_MILLIS = 1_000L;
+	private final java.util.concurrent.atomic.AtomicLong quiesceWaits =
+			new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong quiesceTimeouts =
+			new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong quiesceWaitNanos =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** Tasks the quiesce pump ran for waiting workers (diagnostics). */
+	private final java.util.concurrent.atomic.AtomicLong quiescePumpedTasks =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** Times the barrier invoked the pump (diagnostics: pump-not-running detection). */
+	private final java.util.concurrent.atomic.AtomicLong quiescePumpCalls =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** Pump invocations that threw (diagnostics: silent-swallow detection). */
+	private final java.util.concurrent.atomic.AtomicLong quiescePumpErrors =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** First pump failure message (diagnostics: reported once with the timeout). */
+	private volatile String quiescePumpLastError;
+	/**
+	 * {@code BlockableEventLoop.pendingRunnables} — the chunk executor's task
+	 * queue — resolved once for direct draining (see {@link #pumpChunkExecutors()}).
+	 * Vanilla's {@code MainThreadExecutor.pollTask()} runs a distance-manager
+	 * round FIRST and returns true without ever touching that queue when the
+	 * round reports work; live evidence (2026-10-06) showed it returning true
+	 * 21,552 consecutive times while the queue held exactly the one supplier
+	 * task a parked worker needed — so a pollTask-based pump can never drain
+	 * under that load. Reflective field access into the unnamed module is the
+	 * escape hatch: this queue is otherwise unreachable from mod code.
+	 */
+	private static final java.lang.reflect.Field CHUNK_EXECUTOR_QUEUE_FIELD = resolveChunkExecutorQueueField();
+
+	private static java.lang.reflect.Field resolveChunkExecutorQueueField() {
+		try {
+			java.lang.reflect.Field field = net.minecraft.util.thread.BlockableEventLoop.class
+					.getDeclaredField("pendingRunnables");
+			field.setAccessible(true);
+			return field;
+		} catch (Throwable t) {
+			// Fall back to pollTask-only pumping (works when the distance
+			// branch converges); the timeout report shows queue depth.
+			return null;
+		}
+	}
+
+	/** Per pump call, upper bound on directly drained executor tasks (barrier time cap). */
+	private static final int PUMP_DRAIN_BUDGET = 128;
+	/**
+	 * Live levels by world key, recorded at entity-tracking attach — the
+	 * quiesce/shutdown pump drains each one's chunk executor so workers
+	 * parked in {@code getChunk().join()} can finish (see
+	 * {@link WorkerPool#closeExecutionAndAwait(long, Runnable)}). Kept
+	 * separate from the staging hubs so the pump covers worlds even when
+	 * gameplay staging is off (regionized random ticks still join).
+	 */
+	private final java.util.concurrent.ConcurrentHashMap<String, net.minecraft.server.level.ServerLevel> pumpLevels =
+			new java.util.concurrent.ConcurrentHashMap<>();
+
+	/**
+	 * Runs ONE pending chunk-system task on this (server) thread per call.
+	 * Vanilla routes every off-main-thread {@code ServerChunkCache.getChunk}
+	 * through {@code supplyAsync(mainThreadExecutor).join()}, so an in-flight
+	 * worker's future only completes when THIS thread polls the chunk
+	 * executor — exactly what {@code managedBlock} does when vanilla itself
+	 * waits. Chunk executors only: no gameplay task ever runs under a
+	 * partially-quiesced worker set.
+	 */
+	private void pumpChunkExecutors() {
+		if (!com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.isServerThread()) {
+			// Vanilla's pollTask is main-thread-only; a pump from anywhere
+			// else would run chunk tasks off-thread. The barrier still waits
+			// (bounded) — it just does not get help from us.
+			return;
+		}
+		quiescePumpCalls.incrementAndGet();
+		for (java.util.Map.Entry<String, net.minecraft.server.level.ServerLevel> entry : pumpLevels.entrySet()) {
+			try {
+				net.minecraft.server.level.ServerChunkCache source = entry.getValue().getChunkSource();
+				if (source.pollTask()) {
+					quiescePumpedTasks.incrementAndGet();
+				}
+				drainChunkExecutorQueue(source);
+			} catch (Throwable t) {
+				// A failing chunk task is reported by vanilla's executor; the
+				// barrier must keep waiting for the remaining workers. Record
+				// the first failure so a permanently-poisoned poll shows up in
+				// the quiesce-timeout report instead of vanishing here.
+				quiescePumpErrors.incrementAndGet();
+				if (quiescePumpLastError == null) {
+					quiescePumpLastError = t + " @ " + java.util.Arrays.stream(t.getStackTrace())
+							.filter(el -> el.getClassName().contains("fabricfolia")
+									|| el.getClassName().startsWith("net.minecraft"))
+									.limit(4).map(Object::toString)
+									.reduce((a, b) -> a + " <- " + b).orElse("(no frames)");
+				}
+			}
+		}
+	}
+
+	/**
+	 * Runs queued chunk-executor tasks DIRECTLY, bypassing
+	 * {@code MainThreadExecutor.pollTask()}'s distance-manager short-circuit
+	 * (see {@link #CHUNK_EXECUTOR_QUEUE_FIELD}). We are the server thread —
+	 * exactly the context vanilla would run these in; workers only ever
+	 * {@code add} to this queue, and no other drainer can run while we are
+	 * inside the barrier, so single-drainer semantics hold. Bounded by
+	 * {@link #PUMP_DRAIN_BUDGET} so one barrier iteration can't run away.
+	 */
+	@SuppressWarnings("unchecked")
+	private void drainChunkExecutorQueue(net.minecraft.server.level.ServerChunkCache source) {
+		if (CHUNK_EXECUTOR_QUEUE_FIELD == null) {
+			return;
+		}
+		java.util.Queue<Runnable> queue;
+		try {
+			queue = (java.util.Queue<Runnable>) CHUNK_EXECUTOR_QUEUE_FIELD.get(source);
+		} catch (IllegalAccessException | IllegalArgumentException e) {
+			// Unreachable for a resolved field; degrade to pollTask-only pumping.
+			return;
+		}
+		if (queue == null) {
+			return;
+		}
+		for (int drained = 0; drained < PUMP_DRAIN_BUDGET; drained++) {
+			Runnable task = queue.poll();
+			if (task == null) {
+				return;
+			}
+			try {
+				task.run();
+				quiescePumpedTasks.incrementAndGet();
+			} catch (Throwable t) {
+				// Vanilla's doRunTask logs executor failures itself; record
+				// the first one so a poisoned task can't hide in the pump.
+				quiescePumpErrors.incrementAndGet();
+				if (quiescePumpLastError == null) {
+					quiescePumpLastError = t.toString();
+				}
+			}
+		}
+	}
+
+	public void beginTickPhase() {
+		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
+		if (pool == null) {
+			return;
+		}
+		long start = System.nanoTime();
+		boolean quiesced = pool.closeExecutionAndAwait(QUIESCE_TIMEOUT_MILLIS, this::pumpChunkExecutors);
+		long waited = System.nanoTime() - start;
+		if (waited >= 1_000_000L) {
+			quiesceWaits.incrementAndGet();
+			quiesceWaitNanos.addAndGet(waited);
+		}
+		if (!quiesced) {
+			long attempt = quiesceTimeouts.incrementAndGet();
+			StringBuilder pending = new StringBuilder();
+			for (java.util.Map.Entry<String, net.minecraft.server.level.ServerLevel> entry : pumpLevels.entrySet()) {
+				if (pending.length() > 0) {
+					pending.append(' ');
+				}
+				int queued;
+				try {
+					queued = entry.getValue().getChunkSource().getPendingTasksCount();
+				} catch (Throwable t) {
+					queued = -1;
+				}
+				pending.append(entry.getKey()).append('=').append(queued);
+			}
+			reportError("Worker quiesce timed out after " + QUIESCE_TIMEOUT_MILLIS
+					+ "ms (attempt " + attempt + ", " + pool.busyCount()
+					+ " task(s) still in flight) — proceeding with the server tick degraded"
+					+ " [pumpCalls=" + quiescePumpCalls.get()
+					+ " pumpTasks=" + quiescePumpedTasks.get()
+					+ " pumpErrors=" + quiescePumpErrors.get()
+					+ " chunkQueue=" + pending
+					+ (quiescePumpLastError != null ? " lastPumpError=" + quiescePumpLastError : "") + "]");
+		}
+	}
+
+	/** Reopens worker execution after the end-of-tick flush dispatched staged bodies. */
+	public void endTickPhase() {
+		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
+		if (pool != null) {
+			pool.setExecutionOpen(true);
+		}
+	}
+
+	/**
+	 * Inter-tick drain window budget: how long {@link #awaitStagedDrain()}
+	 * may hold the server thread after reopening the gate while workers
+	 * execute the staged backlog.
+	 */
+	static final long DRAIN_WINDOW_MILLIS = 20L;
+
+	/** Ticks where the drain window actually waited ≥1 ms (diagnostics). */
+	private final java.util.concurrent.atomic.AtomicLong drainWindowWaits =
+			new java.util.concurrent.atomic.AtomicLong();
+	/** Total nanoseconds spent in the drain window (diagnostics). */
+	private final java.util.concurrent.atomic.AtomicLong drainWindowWaitNanos =
+			new java.util.concurrent.atomic.AtomicLong();
+	/**
+	 * Drain windows that hit the budget with staged work still pending:
+	 * sustained growth here means the budget is too small for the load (or
+	 * the pending gauge is leaking — flush reconciles leaks every tick).
+	 */
+	private final java.util.concurrent.atomic.AtomicLong drainWindowExhausted =
+			new java.util.concurrent.atomic.AtomicLong();
+
+	/**
+	 * Bounded inter-tick drain window (the starvation fix): after
+	 * {@link #endTickPhase()} reopens the gate, hold the server thread for up
+	 * to {@link #DRAIN_WINDOW_MILLIS} while workers execute the staged
+	 * backlog. When the server runs BEHIND, vanilla's own inter-tick sleep is
+	 * ~0, so without this window queued bodies never run — measured
+	 * 2026-10-06: the backlog gate latched at its 8192 cap, nearly every body
+	 * fell back vanilla-inline, and tick start still blocked ~6.4 s per
+	 * minute quiescing in-flight batches. Waiting here — gate OPEN, chunk
+	 * pump running — turns that quiesce dead-time into execution time and
+	 * unlatches the backlog. When the server is ahead, the work completes in
+	 * a few milliseconds and vanilla's own sleep covers the rest.
+	 */
+	public void awaitStagedDrain() {
+		if (stagingHubsByWorld.isEmpty()) {
+			return;
+		}
+		long start = System.nanoTime();
+		boolean exhausted = drainWindow(DRAIN_WINDOW_MILLIS * 1_000_000L,
+				this::stagedDrainComplete, this::pumpChunkExecutors, FabricFoliaEngine::parkBriefly);
+		long waited = System.nanoTime() - start;
+		if (waited >= 1_000_000L) {
+			drainWindowWaits.incrementAndGet();
+			drainWindowWaitNanos.addAndGet(waited);
+		}
+		if (exhausted) {
+			drainWindowExhausted.incrementAndGet();
+		}
+	}
+
+	/**
+	 * @return true when every staged body dispatched this tick has finished
+	 *         and no worker is still executing one. Queued-but-not-started
+	 *         batches keep this false (workers wake within microseconds);
+	 *         a genuine pending leak burns the budget instead and shows up
+	 *         in {@link #drainWindowExhausted}.
+	 */
+	private boolean stagedDrainComplete() {
+		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
+		if (pool != null && pool.busyCount() > 0) {
+			return false;
+		}
+		return pendingStagedBodies() == 0;
+	}
+
+	/**
+	 * The drain-window loop: runs {@code pump} and parks in short slices
+	 * until {@code caughtUp} or the budget expires. Returns true only when
+	 * the budget ran out with work still remaining. Static with injected
+	 * pump/park so tests drive the loop without a server.
+	 */
+	static boolean drainWindow(long budgetNanos, java.util.function.BooleanSupplier caughtUp,
+			Runnable pump, java.util.function.LongConsumer parkNanos) {
+		long deadline = System.nanoTime() + budgetNanos;
+		while (!caughtUp.getAsBoolean()) {
+			long remaining = deadline - System.nanoTime();
+			if (remaining <= 0L) {
+				return true;
+			}
+			pump.run();
+			parkNanos.accept(Math.min(remaining, 1_000_000L));
+		}
+		return false;
+	}
+
+	/** One drain-window park slice (the server thread sleeps in vanilla's own wait too). */
+	private static void parkBriefly(long nanos) {
+		java.util.concurrent.locks.LockSupport.parkNanos(nanos);
+	}
+
+	/** @return staged bodies dispatched but not yet completed across worlds (gauge). */
+	public int pendingStagedBodies() {
+		int pending = 0;
+		for (RegionStageHub hub : stagingHubsByWorld.values()) {
+			pending += hub.pendingBodies();
+		}
+		return pending;
 	}
 
 	/** @return the server-wide gameplay metrics snapshot (mandate 35). */
@@ -471,6 +769,20 @@ public final class FabricFoliaEngine {
 		lines.add("staged bodies executed on server thread: " + RegionStageHub.executedOnServerThread());
 		lines.add("staged bodies bounced to server thread (probe stale): " + RegionStageHub.bouncedToServer());
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
+		lines.add("staged bodies pending (backlog): " + pendingStagedBodies()
+				+ ", staging suppressed by backlog: " + RegionStageHub.suppressedBacklog());
+		lines.add("bodies run inline at flush (no parallel headroom): " + RegionStageHub.inlineNoParallel()
+				+ ", skipped (region behind, slow-motion): " + RegionStageHub.regionBehindSkipped());
+		lines.add("staged drain window (inter-tick): waits=" + drainWindowWaits.get()
+				+ " totalWaitMs=" + (drainWindowWaitNanos.get() / 1_000_000L)
+				+ " budgetExhausted=" + drainWindowExhausted.get()
+				+ " budgetMs=" + DRAIN_WINDOW_MILLIS);
+		lines.add("worker quiesce at tick start: waits=" + quiesceWaits.get()
+				+ " timeouts=" + quiesceTimeouts.get()
+				+ " totalWaitMs=" + (quiesceWaitNanos.get() / 1_000_000L)
+				+ ", pumpCalls=" + quiescePumpCalls.get()
+				+ " pumpTasks=" + quiescePumpedTasks.get()
+				+ " pumpErrors=" + quiescePumpErrors.get());
 		lines.add("neighborhood probes: pass=" + RegionStageHub.probePass()
 				+ " world-down=" + RegionStageHub.probeFailWorldDown()
 				+ " chunk-missing=" + RegionStageHub.probeFailChunkMissing());
@@ -573,6 +885,7 @@ public final class FabricFoliaEngine {
 
 	/** Detaches a world (server stop): stops its scheduler, drops its queues. */
 	public void detachWorld(String worldName) {
+		pumpLevels.remove(worldName);
 		ChunkResidency.clearWorld(worldName);
 		com.palordersoftworks.fabricfolia.entity.EntityRegionTracker tracker = entityTrackersByWorld.remove(worldName);
 		if (tracker != null) {
@@ -755,6 +1068,10 @@ public final class FabricFoliaEngine {
 			watchdog.close();
 		}
 		async.close();
-		workerPool.shutdown(5000);
+		// Pumped shutdown: workers resumed by the gate reopen can re-enter
+		// getChunk().join() immediately; without a drain they hold non-daemon
+		// threads hostage for the full timeout and stall JVM exit.
+		workerPool.shutdown(5000, this::pumpChunkExecutors);
+		pumpLevels.clear();
 	}
 }

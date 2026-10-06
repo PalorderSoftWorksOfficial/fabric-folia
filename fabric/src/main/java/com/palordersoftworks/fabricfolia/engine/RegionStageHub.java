@@ -110,6 +110,70 @@ public final class RegionStageHub {
 	private static final AtomicLong PROBE_PASS = new AtomicLong();
 	private static final AtomicLong PROBE_FAIL_WORLD_DOWN = new AtomicLong();
 	private static final AtomicLong PROBE_FAIL_CHUNK_MISSING = new AtomicLong();
+	private static final AtomicLong SUPPRESSED_BACKLOG = new AtomicLong();
+	private static final AtomicLong INLINE_NO_PARALLEL = new AtomicLong();
+	private static final AtomicLong REGION_BEHIND_SKIPPED = new AtomicLong();
+
+	/**
+	 * Backlog gate (backpressure): staging suspends for a world once its
+	 * pending staged bodies exceed {@code max(BACKLOG_FLOOR,
+	 * BACKLOG_MULTIPLE × last-flush size)}. While suspended, bodies execute
+	 * vanilla-inline on the server thread — exact vanilla semantics, bounded
+	 * memory, zero lost ticks. Non-final for tests.
+	 */
+	static volatile int BACKLOG_FLOOR = 8192;
+	static volatile int BACKLOG_MULTIPLE = 2;
+
+	/**
+	 * Parallel-headroom gate for batch dispatch: a flush only ships its
+	 * bodies to region workers when
+	 * {@code totalBodies - largestRegionBodies >= MIN_PARALLEL_BODIES} —
+	 * i.e. when concurrent execution across regions can actually recover
+	 * more time than the stage/dispatch/worker-hop costs. Single-writer
+	 * alternation means a dispatched body only RELOCATES serial work (the
+	 * server waits it out at the next quiesce anyway); it saves wall time
+	 * only through cross-region concurrency. On a one-hot-region load
+	 * (measured 2026-10-06: 1500-entity clump, staging ON = 10.9 TPS vs
+	 * staging OFF = 18.5 TPS, plus a suppressed-backlog latch and 6.4 s/min
+	 * of quiesce blocking) unconditional dispatch was a net loss. Below the
+	 * threshold the flush runs the batch inline on the server thread —
+	 * same moment the workers would have started, gate still closed, zero
+	 * queue/round-trip overhead. Non-final for tests (0 = always dispatch).
+	 */
+	static volatile int MIN_PARALLEL_BODIES = 32;
+
+	/**
+	 * Dispatch floor for single-region batches: at or above this many bodies
+	 * a batch dispatches even without cross-region headroom — the point is
+	 * ISOLATION. Chunked queue tasks (see {@link #BODIES_PER_TASK}) let a
+	 * hot region's round drain across many inter-tick windows while the
+	 * server never waits for more than one in-flight task, so shedding a
+	 * large body load onto the region's own worker keeps the server tick
+	 * fast instead of paying the bodies inline. Below the floor the batch
+	 * runs inline at flush (dispatch overhead would exceed the saving).
+	 * Non-final for tests.
+	 */
+	static volatile int MIN_DISPATCH_TOTAL = 64;
+
+	/**
+	 * Bodies per queue task. Bounds what a tick-start quiesce can wait on
+	 * (one in-flight task, not a whole round: 256 × ~46 µs worst-case clump
+	 * body ≈ 12 ms) and lets a slow region's round spread across windows.
+	 * Non-final for tests.
+	 */
+	static volatile int BODIES_PER_TASK = 256;
+
+	/**
+	 * Region slow-motion intake gate: when a region's queue already holds
+	 * more than this many TASKS at flush time, this round's bodies for that
+	 * region are SKIPPED (counted, never run inline, never queued) — the
+	 * region ticks at its own pace (Folia-style slow-motion for an
+	 * overloaded region) instead of stalling the server tick or inflating
+	 * the backlog until the suppression latch fires. Healthy regions drain
+	 * between flushes and never hit this. PLAYER slices are exempt (packet
+	 * processing must run every tick). Non-final for tests.
+	 */
+	static volatile int REGION_SKIP_THRESHOLD = 3;
 
 	/** The gameplay slices, each with its vanilla capture site. */
 	public enum Slice {
@@ -139,27 +203,59 @@ public final class RegionStageHub {
 
 	/** @return true when the calling level's slice is staged to regions this session. */
 	public static boolean isStaging(Level level, Slice slice) {
-		if (!ACTIVE.get() || !HUBS_BY_LEVEL.containsKey(level)) {
-			return false;
+		RegionStageHub hub = hubFor(level);
+		return hub != null && hub.stagingEnabled(slice);
+	}
+
+	/**
+	 * @return this level's hub, or null when staging is inactive for it.
+	 * One map lookup — hot paths fetch the hub once and reuse it (the old
+	 * isStaging-then-stage pattern cost two lookups plus a PatchRegistry
+	 * map get per entity per tick).
+	 */
+	public static RegionStageHub hubFor(Level level) {
+		return ACTIVE.get() ? HUBS_BY_LEVEL.get(level) : null;
+	}
+
+	/**
+	 * @return true when this world's slice is registered as staged this
+	 * session. Patch states are STARTUP_ONLY, so the per-slice flags are
+	 * read from the registry exactly once (at first use, and again only if
+	 * the registry's resolved state itself changes) — the hot path is an
+	 * array read.
+	 */
+	public boolean stagingEnabled(Slice slice) {
+		boolean resolved = com.palordersoftworks.fabricfolia.patches.PatchRegistry.isResolved();
+		if (resolved != flagsResolved) {
+			for (Slice s : Slice.values()) {
+				stagingEnabledByPatch[s.ordinal()] = com.palordersoftworks.fabricfolia.patches.PatchRegistry
+						.isEnabled(patchIdOf(s));
+			}
+			flagsResolved = resolved;
 		}
-		return com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled(switch (slice) {
+		return stagingEnabledByPatch[slice.ordinal()];
+	}
+
+	private static String patchIdOf(Slice slice) {
+		return switch (slice) {
 			case ENTITY -> "stage-entity-ticks";
 			case BLOCK_ENTITY -> "stage-block-entity-ticks";
 			case SCHEDULED_TICK -> "stage-scheduled-ticks";
 			case PLAYER -> "stage-player-path";
-		});
+		};
 	}
 
 	/**
 	 * Stages one vanilla execution body instead of running it on the server
-	 * thread. Server thread only (vanilla's passes). No-op when inactive
-	 * (the mixins already checked, but the hub must stay safe alone).
+	 * thread. Server thread only (vanilla's passes).
+	 *
+	 * @return true when the body was staged; false means the CALLER MUST
+	 *         execute it inline (vanilla) — either staging is inactive or
+	 *         the world's backlog gate is suppressing staging.
 	 */
-	public static void stage(Level level, Slice slice, Runnable body) {
-		RegionStageHub hub = HUBS_BY_LEVEL.get(level);
-		if (hub != null) {
-			hub.stage(slice, body);
-		}
+	public static boolean stage(Level level, Slice slice, Runnable body) {
+		RegionStageHub hub = hubFor(level);
+		return hub != null && hub.stageIfRoom(slice, body);
 	}
 
 	/** Activates staging globally and installs {@code level}'s hub. */
@@ -227,6 +323,21 @@ public final class RegionStageHub {
 		return PROBE_FAIL_CHUNK_MISSING.get();
 	}
 
+	/** @return bodies that would have staged but ran vanilla-inline because of the backlog gate. */
+	public static long suppressedBacklog() {
+		return SUPPRESSED_BACKLOG.get();
+	}
+
+	/** @return bodies that flushed without parallel headroom and ran inline on the server thread (diagnostics). */
+	public static long inlineNoParallel() {
+		return INLINE_NO_PARALLEL.get();
+	}
+
+	/** @return bodies skipped at flush because their region's queue was backed up (slow-motion intake gate). */
+	public static long regionBehindSkipped() {
+		return REGION_BEHIND_SKIPPED.get();
+	}
+
 	// =================================================================================
 	// Per-world hub
 	// =================================================================================
@@ -236,6 +347,58 @@ public final class RegionStageHub {
 	/** @return the live level this hub stages for (diagnostics). */
 	public ServerLevel level() {
 		return level;
+	}
+
+	/** @return bodies dispatched but not yet completed (backlog gauge). */
+	public int pendingBodies() {
+		return pendingBodies.get();
+	}
+
+	/** @return true while the backlog gate is forcing vanilla-inline execution. */
+	public boolean stagingSuppressed() {
+		return stagingSuppressed;
+	}
+
+	/** Test hook: forces the backlog gate state (null-safe; tests only). */
+	void setStagingSuppressedForTests(boolean suppressed) {
+		stagingSuppressed = suppressed;
+	}
+
+	/**
+	 * Staging-time loadedness in VANILLA'S OWN terms: every chunk in the
+	 * body's 3x3 neighborhood must be resolvable by
+	 * {@code ServerChunkCache.getChunkNow} right now. Server thread only
+	 * (vanilla's passes) — getChunkNow is main-thread-safe there and is the
+	 * authoritative "vanilla would not join" check. A body that fails here
+	 * runs inline on the server thread (vanilla semantics, including any
+	 * sync load — which vanilla does itself, on its own thread).
+	 *
+	 * <p>Why this exists beyond {@link ChunkResidency}: residency is an
+	 * engine-side approximation; a stale positive lets a body reach a worker
+	 * and block in {@code getChunk(...).join()} — a synchronous chunk load
+	 * no worker can pump. Under the tick-phase gate that becomes a quiesce
+	 * livelock (observed live: fluid-tick bodies joining every tick,
+	 * watchdog kill, 2026-10-05). The vanilla probe closes the gap at the
+	 * only moment vanilla truth is cheap and safe to ask.</p>
+	 *
+	 * <p>No phase-A mutation happens between this staging check and the
+	 * body's execution (workers only run in the inter-tick window), so a
+	 * pass here means the body cannot join when it executes.</p>
+	 */
+	public boolean vanillaNeighborhoodLoaded(net.minecraft.world.level.ChunkPos pos) {
+		if (level == null) {
+			// Unit tests: no Minecraft level — fall back to engine residency.
+			return ChunkResidency.isNeighborhoodResident(worldKey, pos.x(), pos.z());
+		}
+		var source = level.getChunkSource();
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				if (source.getChunkNow(pos.x() + dx, pos.z() + dz) == null) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 	private final WorldRegionizer regionizer;
 	private final RegionScheduler scheduler;
@@ -256,15 +419,38 @@ public final class RegionStageHub {
 		}
 	}
 
+	/** Backlog gate state (see {@link #BACKLOG_FLOOR}); read per stage() call. */
+	private volatile boolean stagingSuppressed;
+	/** Bodies dispatched but not yet completed (or dropped with their batch). */
+	private final java.util.concurrent.atomic.AtomicInteger pendingBodies =
+			new java.util.concurrent.atomic.AtomicInteger();
+	/** Bodies staged at the last flush — sizes the backlog limit (2× this, floor-bounded). */
+	private volatile int lastFlushBodies;
+	/** Cached per-slice patch flags (STARTUP_ONLY — resolved once, see stagingEnabled). */
+	private final boolean[] stagingEnabledByPatch = new boolean[Slice.values().length];
+	private volatile boolean flagsResolved;
+
 	RegionStageHub(ServerLevel level, WorldRegionizer regionizer, RegionScheduler scheduler,
 	               RegionMetrics metrics, Consumer<String> diagnostics) {
+		this(level, level.dimension().identifier().toString(), regionizer, scheduler, metrics, diagnostics);
+	}
+
+	/** Full constructor: explicit level + world key (the delegating entry points above/below). */
+	RegionStageHub(ServerLevel level, String worldKey, WorldRegionizer regionizer,
+	               RegionScheduler scheduler, RegionMetrics metrics, Consumer<String> diagnostics) {
 		this.level = level;
-		this.worldKey = level.dimension().identifier().toString();
+		this.worldKey = worldKey;
 		this.regionizer = regionizer;
 		this.scheduler = scheduler;
 		this.metrics = metrics;
 		this.diagnostics = diagnostics;
 		regionizer.addListener(new StagingListener());
+	}
+
+	/** Package-private constructor keyed by world key (unit tests — no Minecraft level). */
+	RegionStageHub(String worldKey, WorldRegionizer regionizer, RegionScheduler scheduler,
+	               RegionMetrics metrics, Consumer<String> diagnostics) {
+		this(null, worldKey, regionizer, scheduler, metrics, diagnostics);
 	}
 
 	/** This level's dimension key (drain scoping for the retry ledger). */
@@ -282,6 +468,22 @@ public final class RegionStageHub {
 	}
 
 	/**
+	 * The staging decision with backpressure: refuses new work while the
+	 * world's staged backlog exceeds the gate limit. Refusal is counted and
+	 * the caller runs the body vanilla-inline — never dropped.
+	 *
+	 * @return true when staged; false → caller must run the body inline
+	 */
+	public boolean stageIfRoom(Slice slice, Runnable body) {
+		if (stagingSuppressed) {
+			SUPPRESSED_BACKLOG.incrementAndGet();
+			return false;
+		}
+		stage(slice, body);
+		return true;
+	}
+
+	/**
 	 * Flushes this world's staged batches: groups every body by the region
 	 * that owns its position and enqueues it onto that region's task queue.
 	 * Server thread (engine end-of-server-tick hook), after all of vanilla's
@@ -289,6 +491,7 @@ public final class RegionStageHub {
 	 */
 	void flushStaged() {
 		flushTick.incrementAndGet();
+		int flushed = 0;
 		// Replay bodies that failed on a transient concurrent-modification
 		// race last tick (c2me async entity load): they are drained ahead of
 		// the fresh batch so a retried body keeps its relative tick order.
@@ -304,27 +507,124 @@ public final class RegionStageHub {
 			if (batch.isEmpty()) {
 				continue;
 			}
+			flushed += batch.size();
 			dispatch(entry.getKey(), batch);
 			entry.getValue().clear();
 		}
+		lastFlushBodies = flushed;
+		// Leak reconciliation: every region queue empty AND no worker in
+		// flight means any residual pending count belonged to batches
+		// dropped with a dead region or at shutdown — resync so the gate
+		// cannot stick on. (Region-queue sum, NOT the pool handoff: the
+		// pool only holds coordinator-submitted tick jobs.)
+		if (pendingBodies.get() > 0
+				&& scheduler.pendingRegionQueueEntries() == 0
+				&& scheduler.workerPool().busyCount() == 0) {
+			pendingBodies.set(0);
+		}
+		// Backpressure: past the limit, staging suspends and bodies run
+		// vanilla-inline until workers catch up (bounded memory, no lost ticks).
+		int limit = Math.max(BACKLOG_FLOOR, lastFlushBodies * BACKLOG_MULTIPLE);
+		boolean suppressed = pendingBodies.get() > limit;
+		if (suppressed != stagingSuppressed) {
+			stagingSuppressed = suppressed;
+			diagnostics.accept(suppressed
+					? "Region queue backlog " + pendingBodies.get() + " staged bodies exceeds limit "
+							+ limit + " — suspending staging for " + worldKey
+							+ "; bodies run vanilla-inline until workers catch up"
+						: "Region queue backlog cleared — resuming staged execution for " + worldKey);
+		}
+		// Visibility: the peak queue watermark was never fed before.
+		metrics.observeQueueDepth(scheduler.queuedRegionTasks());
 	}
 
 	private void dispatch(Slice slice, List<Runnable> batch) {
+		dispatch(slice, batch, true);
+	}
+
+	/**
+	 * @param allowRegionSkip false for retry replays — a retry that skipped
+	 *        would be lost (the ledger already drained it), so retries always
+	 *        execute even into a backed-up region.
+	 */
+	private void dispatch(Slice slice, List<Runnable> batch, boolean allowRegionSkip) {
 		Map<Region, List<Runnable>> byRegion = new java.util.IdentityHashMap<>();
+		Counters inline = null;
 		for (Runnable body : batch) {
 			Region region = regionFor(body);
 			if (region == null) {
-				runSafely(slice, body, null);
+				// Unowned position: run inline on the server thread (rare).
+				if (inline == null) {
+					inline = new Counters();
+				}
+				runBody(slice, body, null, inline);
 				continue;
 			}
-			final Region target = region;
-			byRegion.computeIfAbsent(target, r -> new java.util.ArrayList<>())
-					.add(() -> runSafely(slice, body, target));
+			byRegion.computeIfAbsent(region, r -> new java.util.ArrayList<>()).add(body);
 		}
+		if (inline != null) {
+			inline.flush(this, slice);
+		}
+		// Region slow-motion intake gate: a region whose queue is still
+		// holding prior rounds does not receive this round — its entities
+		// tick again when it catches up (counted, never silently dropped,
+		// never run inline: the inline fallback is what turned an overloaded
+		// region into a server-tick stall). PLAYER bodies always proceed.
+		if (allowRegionSkip && slice != Slice.PLAYER && !byRegion.isEmpty()) {
+			java.util.Iterator<Map.Entry<Region, List<Runnable>>> slowMotion = byRegion.entrySet().iterator();
+			while (slowMotion.hasNext()) {
+				Map.Entry<Region, List<Runnable>> entry = slowMotion.next();
+				var queue = scheduler.queueOf(entry.getKey());
+				if (queue != null && queue.size() > REGION_SKIP_THRESHOLD) {
+					REGION_BEHIND_SKIPPED.addAndGet(entry.getValue().size());
+					slowMotion.remove();
+				}
+			}
+		}
+		// Parallel-headroom gate: dispatch only what cross-region concurrency can
+		// pay for (see MIN_PARALLEL_BODIES). The flush runs on the server thread
+		// with the execution gate still closed, so inline execution here is the
+		// single-writer-safe equivalent of staged execution — minus the queue,
+		// worker hop, and next-tick quiesce tail.
+		int total = 0;
+		int largest = 0;
+		for (List<Runnable> group : byRegion.values()) {
+			total += group.size();
+			if (group.size() > largest) {
+				largest = group.size();
+			}
+		}
+		if (total - largest < MIN_PARALLEL_BODIES && total < MIN_DISPATCH_TOTAL) {
+			if (total > 0) {
+				INLINE_NO_PARALLEL.addAndGet(total);
+				Counters counters = new Counters();
+				for (Map.Entry<Region, List<Runnable>> entry : byRegion.entrySet()) {
+					for (Runnable body : entry.getValue()) {
+						runBody(slice, body, entry.getKey(), counters);
+					}
+				}
+				counters.flush(this, slice);
+			}
+			return;
+		}
+		// ONE queue entry per CHUNK per region per slice: bounded task size
+		// keeps the tick-start quiesce to one small in-flight task and lets a
+		// hot region's round drain across many inter-tick windows. The whole
+		// chunk list goes in a single enqueueBatch call, whose dead-region
+		// drop is all-or-nothing — pending accounting stays exact.
 		for (Map.Entry<Region, List<Runnable>> entry : byRegion.entrySet()) {
-			int dropped = scheduler.enqueueBatch(entry.getKey(), entry.getValue());
+			List<Runnable> bodies = entry.getValue();
+			List<Runnable> tasks = new java.util.ArrayList<>((bodies.size() + BODIES_PER_TASK - 1) / BODIES_PER_TASK);
+			for (int start = 0; start < bodies.size(); start += BODIES_PER_TASK) {
+				int end = Math.min(start + BODIES_PER_TASK, bodies.size());
+				Runnable[] chunk = bodies.subList(start, end).toArray(Runnable[]::new);
+				tasks.add(new StagedBatch(slice, chunk, entry.getKey()));
+			}
+			pendingBodies.addAndGet(bodies.size());
+			int dropped = scheduler.enqueueBatch(entry.getKey(), tasks);
 			if (dropped > 0) {
-				DROPPED_DEAD_REGION.addAndGet(dropped);
+				pendingBodies.addAndGet(-bodies.size());
+				DROPPED_DEAD_REGION.addAndGet(bodies.size());
 			}
 		}
 	}
@@ -339,42 +639,42 @@ public final class RegionStageHub {
 	}
 
 
-	private void runSafely(Slice slice, Runnable body, Region region) {
+	/**
+	 * Executes ONE staged body under shared batch counters. {@code region}
+	 * is the owning region captured at dispatch (null = server-thread inline
+	 * execution: unowned bodies at flush, and bounced bodies replayed in the
+	 * next tick phase).
+	 */
+	private void runBody(Slice slice, Runnable body, Region region, Counters counters) {
 		if (region != null
 				&& ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION
-				&& !fabricfolia$bodyNeighborhoodLoaded(body)) {
-			// Execution-time bounce. The staging capture's loadedness check can
-			// go stale when a region's queue is backed up: by the time this body
-			// runs, its edge chunks may have unloaded (a walking player's wake).
-			// Such a body parks a worker on a SYNCHRONOUS chunk load the worker
-			// cannot pump — observed live as a region latched TICKING for
-			// minutes while every packet and movement task for its chunks
-			// starved behind it. The server thread owns the chunk system (it
-			// pumps the load machinery), and vanilla runs these bodies there
-			// anyway, so bounce instead of blocking the worker. Re-entering
-			// runSafely with a null region runs the body under the identical
-			// isolation/metric path, inline, on the server thread.
-			// The WORLD-LOADED probe guards the same failure one dimension
-			// earlier: during world transition windows vanilla can keep a
-			// ServerLevel instance ticking after its chunk source has shut down
-			// (observed on Palorder Central, 2026-09-25: getChunkNow NPE'd inside
-			// DistanceManager.forEachEntityTickingChunk reached THROUGH the
-			// probe — every staged body in that window bounced). A null
-			// getChunkNow means the level cannot serve chunk data at all: run
-			// the body on the server thread, where vanilla tolerates the state.
-			BOUNCED_TO_SERVER.incrementAndGet();
-			level.getServer().execute(() -> runSafely(slice, body, null));
+				&& !bodyNeighborhoodLoaded(body, counters)) {
+			// Execution-time bounce: the staging capture's loadedness check can
+			// go stale when a region's queue is backed up — by the time this
+			// body runs, its edge chunks may have unloaded (a walking player's
+			// wake). Such a body would park a worker on a SYNCHRONOUS chunk
+			// load the worker cannot pump (observed live as a region latched
+			// TICKING for minutes while every packet and movement task for its
+			// chunks starved behind it). The server thread owns the chunk
+			// system, so hand the body back there — through
+			// ServerThreadDeferral, which drains on the server thread during
+			// the TICK PHASE with workers quiesced. A raw server.execute would
+			// pump during the inter-tick window, i.e. concurrently with
+			// phase-B workers — exactly the cross-thread access the phase gate
+			// exists to remove.
+			counters.bounced++;
+			ServerThreadDeferral.defer(() -> runStandalone(slice, body));
 			return;
 		}
 		try {
 			body.run();
 			if (region != null
 					&& ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION) {
-				EXECUTED_ON_WORKERS.incrementAndGet();
+				counters.executedWorkers++;
 			} else {
-				EXECUTED_ON_SERVER.incrementAndGet();
+				counters.executedServer++;
 			}
-			metrics.increment(counterOf(slice));
+			counters.sliceTicks++;
 		} catch (Throwable t) {
 			metrics.increment(RegionMetrics.Counter.EXCEPTIONS_ISOLATED);
 			if (fabricfolia$isConcurrentEntityAccessFailure(t)) {
@@ -407,7 +707,7 @@ public final class RegionStageHub {
 	 * the body itself would read (the interim boundary the tick interceptor
 	 * already documents).
 	 */
-	private boolean fabricfolia$bodyNeighborhoodLoaded(Runnable body) {
+	private boolean bodyNeighborhoodLoaded(Runnable body, Counters counters) {
 		if (!(body instanceof Positioned positioned)) {
 			return true;
 		}
@@ -415,17 +715,100 @@ public final class RegionStageHub {
 		if (pos == null) {
 			return true;
 		}
-		String worldKey = level.dimension().identifier().toString();
+		// worldKey is the hub's cached dimension string — the old code built
+		// a fresh String per probe per body here.
 		if (!ChunkResidency.isNeighborhoodResident(worldKey, pos.x(), pos.z())) {
 			if (ChunkResidency.residentCount(worldKey) == 0) {
-				PROBE_FAIL_WORLD_DOWN.incrementAndGet();
+				counters.probeFailWorldDown++;
 			} else {
-				PROBE_FAIL_CHUNK_MISSING.incrementAndGet();
+				counters.probeFailChunkMissing++;
 			}
 			return false;
 		}
-		PROBE_PASS.incrementAndGet();
+		counters.probePass++;
 		return true;
+	}
+
+	/** Runs one body on the calling (server) thread, flushing its counters immediately. */
+	private void runStandalone(Slice slice, Runnable body) {
+		Counters counters = new Counters();
+		try {
+			runBody(slice, body, null, counters);
+		} finally {
+			counters.flush(this, slice);
+		}
+	}
+
+	/**
+	 * Per-batch tallies: plain locals on the hot path, flushed as ONE round
+	 * of atomic adds per batch — the old path took 4+ contended
+	 * AtomicLong CASes and a metrics-map lookup per body per tick.
+	 */
+	private static final class Counters {
+		long executedWorkers;
+		long executedServer;
+		long probePass;
+		long probeFailWorldDown;
+		long probeFailChunkMissing;
+		long bounced;
+		long sliceTicks;
+
+		void flush(RegionStageHub hub, Slice slice) {
+			if (executedWorkers > 0) {
+				EXECUTED_ON_WORKERS.addAndGet(executedWorkers);
+			}
+			if (executedServer > 0) {
+				EXECUTED_ON_SERVER.addAndGet(executedServer);
+			}
+			if (probePass > 0) {
+				PROBE_PASS.addAndGet(probePass);
+			}
+			if (probeFailWorldDown > 0) {
+				PROBE_FAIL_WORLD_DOWN.addAndGet(probeFailWorldDown);
+			}
+			if (probeFailChunkMissing > 0) {
+				PROBE_FAIL_CHUNK_MISSING.addAndGet(probeFailChunkMissing);
+			}
+			if (bounced > 0) {
+				BOUNCED_TO_SERVER.addAndGet(bounced);
+			}
+			if (sliceTicks > 0) {
+				hub.metrics.add(counterOf(slice), sliceTicks);
+			}
+		}
+	}
+
+	/**
+	 * ONE region-queue task carrying a whole slice's bodies for one region.
+	 * Executed on the owning region's worker in REGION context; completion
+	 * (or any throw) releases the batch's pending-backlog count.
+	 */
+	private final class StagedBatch implements Runnable {
+		private final Slice slice;
+		private final Runnable[] bodies;
+		private final Region target;
+
+		private StagedBatch(Slice slice, Runnable[] bodies, Region target) {
+			this.slice = slice;
+			this.bodies = bodies;
+			this.target = target;
+		}
+
+		@Override
+		public void run() {
+			Counters counters = new Counters();
+			try {
+				for (int i = 0; i < bodies.length; i++) {
+					runBody(slice, bodies[i], target, counters);
+				}
+			} finally {
+				counters.flush(RegionStageHub.this, slice);
+				// Clamp at zero: if a flush-time reconcile already zeroed the
+				// gauge (queue empty + no worker in flight), this completion
+				// must not drive it negative.
+				pendingBodies.updateAndGet(p -> Math.max(0, p - bodies.length));
+			}
+		}
 	}
 
 	// =================================================================================
@@ -451,9 +834,9 @@ public final class RegionStageHub {
 		}
 	}
 
-	/** Re-dispatches one due retry through the same pipeline as a fresh body. */
+	/** Re-dispatches one due retry through the same pipeline as a fresh body (never skipped — the ledger already drained it). */
 	private void dispatchRetry(RetryBody retry, int attempt) {
-		dispatch(retry.slice(), java.util.List.<Runnable>of(retry));
+		dispatch(retry.slice(), java.util.List.<Runnable>of(retry), false);
 	}
 
 	/** Wraps a failed body for retry, preserving its slice. */

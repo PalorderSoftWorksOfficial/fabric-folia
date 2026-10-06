@@ -268,6 +268,15 @@ public class FabricFoliaMod implements ModInitializer {
 			if (health != null) {
 				Console.warning(health);
 			}
+			// End of tick: all of this tick's staged work is dispatched —
+			// reopen the worker gate so region execution fills the inter-tick
+			// window (closed again at the next processPacketsAndTick HEAD),
+			// then hold a bounded drain window so workers actually get that
+			// window even when the server is behind (gate open + pump; the
+			// old zero-window behavior latched the backlog gate and forced
+			// everything vanilla-inline — see FabricFoliaEngine.awaitStagedDrain).
+			current.endTickPhase();
+			current.awaitStagedDrain();
 		}
 	}
 
@@ -477,6 +486,10 @@ public class FabricFoliaMod implements ModInitializer {
 		} catch (Exception e) {
 			Console.error("Engine shutdown reported a problem (worlds were still saved by vanilla): " + e.getMessage(), e);
 		} finally {
+			// Reopen the execution gate before the engine reference drops:
+			// the tick phase closes it every tick, and with the engine gone
+			// nobody would ever reopen it (workers would stay parked).
+			current.endTickPhase();
 			engine = null;
 			interceptor = null;
 		}
