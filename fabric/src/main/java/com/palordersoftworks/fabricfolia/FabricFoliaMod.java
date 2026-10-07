@@ -12,6 +12,7 @@ import com.palordersoftworks.fabricfolia.console.Console;
 import com.palordersoftworks.fabricfolia.engine.FabricFoliaEngine;
 import com.palordersoftworks.fabricfolia.engine.RegionTickInterceptor;
 import com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy;
+import com.llamalad7.mixinextras.MixinExtrasBootstrap;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -62,6 +63,10 @@ public class FabricFoliaMod implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+		// Initialize MixinExtras (included in FabricLoader 0.15.0+).
+		// Required for @WrapOperation used by the collision optimization mixin.
+		MixinExtrasBootstrap.init();
+
 		Console.info("Starting Fabric Folia...");
 		Console.info("Fabric Folia version: " + FabricLoader.getInstance().getModContainer(MOD_ID)
 				.map(c -> c.getMetadata().getVersion().getFriendlyString()).orElse("unknown")
@@ -362,6 +367,13 @@ public class FabricFoliaMod implements ModInitializer {
 						"RegionTaskQueue add/drain/size",
 						Set.of(), Set.of(),
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("entity-collision-opt", "Entity Collision Optimization",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
+						"skips block-level collision checks when entity movement is below threshold (lithium-style OFEM pattern)",
+						"Entity.collideBoundingBox: getBlockCollisions → empty list",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 	}
 
 	/**
@@ -403,6 +415,9 @@ public class FabricFoliaMod implements ModInitializer {
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_SCHEDULER_DISPATCH, true));
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("task-queue",
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_TASK_QUEUE, true));
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("entity-collision-opt",
+				config.patchEnabled(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_COLLISION_OPT, false));
 
 		var blocked = com.palordersoftworks.fabricfolia.patches.PatchRegistry.resolveAndApply();
 		int active = 0;

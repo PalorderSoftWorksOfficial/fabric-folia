@@ -58,6 +58,7 @@ public final class ConfigSchema {
 	public static final String KEY_PATCH_REGION_LOOKUP = "patches.fabricfolia.region-lookup";
 	public static final String KEY_PATCH_SCHEDULER_DISPATCH = "patches.fabricfolia.scheduler-dispatch";
 	public static final String KEY_PATCH_TASK_QUEUE = "patches.fabricfolia.task-queue";
+	public static final String KEY_PATCH_ENTITY_COLLISION_OPT = "patches.minecraft.entity-collision-optimization";
 	public static final String KEY_VERSION = "config-version";
 	public static final String KEY_SERVER_BRAND = "general.server-brand";
 	public static final String KEY_SERVER_BRAND_NAME = "general.server-brand-name";
@@ -504,6 +505,19 @@ public final class ConfigSchema {
 				"Default: true",
 				"Restart required: yes. When disabled, the original O(n) size",
 				"scan and fixed-size drain buffers are used."
+		}));
+		add(opt(KEY_PATCH_ENTITY_COLLISION_OPT, Boolean.class, Boolean.FALSE, v -> v, new String[] {
+				"Minecraft layer: entity collision optimization (lithium-style).",
+				"Skips the expensive block-level collision check when an entity's",
+				"movement this tick is below threshold (squared length < 1.0).",
+				"Entity-vs-entity collisions still run — only the block/voxel pass",
+				"is elided for small movements (standing/idle entities, jitter).",
+				"",
+				"Default: false (operator opt-in — test in your world first).",
+				"Restart required: yes. When disabled, vanilla collision runs unchanged.",
+				"Compatibility: non-conflicting with Lithium's collision optimization;",
+				"both can run simultaneously (Lithium optimizes tickChunk internals;",
+				"this skips getBlockCollisions at the Entity level)."
 		}));
 
 		add(opt(KEY_METRICS, Boolean.class, Boolean.FALSE, v -> v, new String[] {

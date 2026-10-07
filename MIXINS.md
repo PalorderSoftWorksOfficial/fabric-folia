@@ -39,6 +39,19 @@ Fabric API events (lifecycle, commands).
 | Purpose | per-entity ownership tracking: registers entities with the region entity registry and records their section so migration across region boundaries is detectable |
 | Effect when disarmed | no entity ownership; entity scheduling falls back to global dispatch |
 
+### EntityMixin (collision optimization)
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `EntityMixin` |
+| Target | `Entity.collide(Vec3)` — `@Redirect` of the `collideBoundingBox(CollisionContext, Vec3, AABB, Level, List)` invoke; `Entity.collideBoundingBox(CollisionContext, Vec3, AABB, Level, List)` — `@Redirect` of the `collectCollidersIgnoringWorldBorder` invoke |
+| Transformation | when `patches.entity-collision-opt` is enabled and the entity's movement this tick is below threshold (squared length < 1.0), skips the expensive block-level collision check by returning an empty collider list (or the movement unchanged). Entity-vs-entity collisions ({@code getEntityCollisions}) still run — only the block/voxel pass is elided |
+| Why this seam | the collision pipeline is the dominant cost for dense entity clusters (measured ~46µs/entity/tick for armor stands in a 50×50 area at 26.2). The lithium/Carpet TIS Addition OFEM pattern skips block collision when movement is small because a tiny step cannot change collision outcome. This is the Fabric-Folia implementation of that pattern |
+| Movement threshold | squared-movement < 1.0 (i.e., entity moved less than 1 block in any direction). Tuned so standing/idle entities skip block collision while walking/swimming/jumping pay full cost |
+| Compatibility | gated behind {@code patches.entity-collision-opt} (default off — operator opt-in). Lithium-safe: targets a different method layer than Lithium's collision optimization, so both can co-exist. Non-conflicting with C2ME, FerriteCore, and other optimization mods |
+| Effect when disarmed | byte-for-byte vanilla collision (full block + entity pass) |
+| Effect when armed | block collision skipped for small movements; entity-vs-entity collision unchanged; returns movement unchanged (same as vanilla's empty-list fast path) |
+
 ### LevelTicksQueryMixin
 
 **Target:** `net.minecraft.world.ticks.LevelTicks#hasScheduledTick` (HEAD, cancellable)

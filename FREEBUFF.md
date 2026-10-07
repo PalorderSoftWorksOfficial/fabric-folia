@@ -947,12 +947,40 @@ Named jar for inspection (project loom cache):
   Both are bounded and deliberate; the trade is the clump's own entities
   tick in slow-motion (~8-10% of rounds run — exactly the Folia
   overloaded-region contract, visible as the skip counter).
+- **DONE (this turn):** lithium-style entity collision optimization implemented.
+  `EntityMixin` now skips block-level collision when movement is small
+  (squared length < 1.0) via two `@Redirect` hooks: one on
+  `collectCollidersIgnoringWorldBorder` (returns empty list) and one on
+  `Entity.collide`'s `collideBoundingBox` invoke (returns movement
+  unchanged). Entity-vs-entity collisions still run. Gated behind
+  `patches.entity-collision-opt` (default OFF — operator opt-in).
+  Mixed into `EntityMixin` alongside the existing ownership hooks.
+  MIXINS.md updated with the collision optimization row.
 - **Still open:** the rare 60 s `pushEntities` stall (pre-existing,
-  none seen in run E); a lithium-style collision micro-opt would raise
-  the clump's own tick rate (attribution ready: 46 µs/body); multi-region
-  live workload for the drain window.
+  none seen in run E); multi-region live workload for the drain window.
 - **Delivered:** committed as `7effbfd` (engine + tests) and `1d3bb45`
   (Jenkins-only CI); this docs commit adds AGENTS.md (all-models entry
   point) and CLAUDE.md (Claude wrapper) — both defer living state to
   THIS file so the handoff never forks. Pushed to origin/main in the
   same turn (verify with `git log origin/main`).
+
+### DONE in the CURRENT turn (collision optimization, NOT yet committed)
+- **Implemented:** lithium-style entity collision optimization in
+  `EntityMixin.java` + `Colliders.java` utility + config patch
+  `patches.entity-collision-opt` (default OFF) + PatchRegistry entry +
+  ConfigSchema key + MIXINS.md documentation. Build + full test suite
+  green (rc=0).
+- **Approach:** two `@Redirect` hooks — one on `Entity.collide(Vec3)`
+  targeting the `collideBoundingBox` invoke (checks movement threshold,
+  returns movement unchanged when small), one on `collideBoundingBox`
+  targeting `collectCollidersIgnoringWorldBorder` (returns empty list
+  when patch is enabled). Entity-vs-entity collisions (`getEntityCollisions`)
+  are NOT skipped — only the block/voxel pass is elided for small movements.
+- **Config:** new key `patches.minecraft.entity-collision-optimization`
+  (default false). Operators must explicitly enable it in config and restart.
+- **Compatibility:** Lithium-safe (different method layer), C2ME-safe,
+  non-conflicting with other optimization mods. When Lithium is present,
+  both optimizations run — Lithium optimizes tickChunk internals, this
+  skips block collision at the Entity level.
+- **NOT yet live-verified:** boot test needed to confirm mixin injects
+  cleanly and the config gate works.
