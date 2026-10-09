@@ -59,6 +59,9 @@ public final class ConfigSchema {
 	public static final String KEY_PATCH_SCHEDULER_DISPATCH = "patches.fabricfolia.scheduler-dispatch";
 	public static final String KEY_PATCH_TASK_QUEUE = "patches.fabricfolia.task-queue";
 	public static final String KEY_PATCH_ENTITY_COLLISION_OPT = "patches.minecraft.entity-collision-optimization";
+	public static final String KEY_GPU_ENABLED = "gpu.enabled";
+	public static final String KEY_GPU_DEVICE = "gpu.device";
+	public static final String KEY_GPU_VERIFY = "gpu.verify-on-boot";
 	public static final String KEY_VERSION = "config-version";
 	public static final String KEY_SERVER_BRAND = "general.server-brand";
 	public static final String KEY_SERVER_BRAND_NAME = "general.server-brand-name";
@@ -507,17 +510,83 @@ public final class ConfigSchema {
 				"scan and fixed-size drain buffers are used."
 		}));
 		add(opt(KEY_PATCH_ENTITY_COLLISION_OPT, Boolean.class, Boolean.FALSE, v -> v, new String[] {
-				"Minecraft layer: entity collision optimization (lithium-style).",
-				"Skips the expensive block-level collision check when an entity's",
-				"movement this tick is below threshold (squared length < 1.0).",
-				"Entity-vs-entity collisions still run — only the block/voxel pass",
-				"is elided for small movements (standing/idle entities, jitter).",
+				"Minecraft layer: axis-only entity collision (lithium-style OFEM).",
+				"Vanilla collects block colliders for the full 3D-expanded box, then",
+				"resolves movement axis by axis. A shape can only limit movement along",
+				"an axis if it intersects the box swept along that axis — so for",
+				"sub-block movement (squared length < 1.0: idle, walking, falling",
+				"entities) this patch queries a thin per-axis slab instead. The",
+				"collision result is identical to vanilla; only the shape-set size",
+				"changes. Entity-vs-entity colliders and the world border are never",
+				"affected.",
 				"",
 				"Default: false (operator opt-in — test in your world first).",
 				"Restart required: yes. When disabled, vanilla collision runs unchanged.",
-				"Compatibility: non-conflicting with Lithium's collision optimization;",
-				"both can run simultaneously (Lithium optimizes tickChunk internals;",
-				"this skips getBlockCollisions at the Entity level)."
+				"Compatibility: force-disabled when Lithium is installed — Lithium's",
+				"own entity-movement optimization owns this path, and double-",
+				"optimizing the same methods is an unverified combination."
+		}));
+
+		add(opt(KEY_GPU_ENABLED, Boolean.class, Boolean.FALSE, v -> v, new String[] {
+				"EXPERIMENTAL: OpenCL GPU acceleration master switch.",
+				"",
+				"What it does: when true, at startup the mod probes for an OpenCL",
+				"runtime (OpenCL.dll / libOpenCL.so.1 / OpenCL.framework — shipped",
+				"with GPU drivers), selects a device, compiles its compute kernels,",
+				"and runs a CPU-vs-GPU parity verification battery before the GPU",
+				"is allowed to serve anything. Kernels currently accelerate bulk",
+				"AABB overlap filtering (entity broadphase math); the CPU reference",
+				"path is always present.",
+				"",
+				"Failure handling is designed in, not best-effort: any failure -",
+				"missing runtime, no device, build error, verification mismatch, or",
+				"a mid-flight kernel error - degrades to the CPU reference backend",
+				"with the reason recorded in /folia metrics. Queries never fail",
+				"because of the GPU.",
+				"",
+				"Default: false (strictly opt-in; vanilla/CPU behavior unchanged).",
+				"Valid values: true, false",
+				"Performance: GPU only wins above the per-batch crossover size; run",
+				"  /folia gpu bench on your hardware to measure it.",
+				"Compatibility: no gameplay path depends on the GPU; disabling",
+				"  restores the exact vanilla code path.",
+				"Restart required: yes (OpenCL context lifecycle is startup-bound)."
+		}));
+		add(opt(KEY_GPU_DEVICE, String.class, "", v -> {
+			if (v.length() > 256) {
+				throw new ConfigException("gpu.device must be 256 characters or fewer");
+			}
+			return v;
+		}, new String[] {
+				"Which OpenCL device to use when gpu.enabled=true.",
+				"",
+				"What it does: selects the compute device. Empty string = auto",
+				"(prefer a GPU; fall back to any device with fp64 support).",
+				"\"gpu\"/\"cpu\" select by type; any other string matches the",
+				"device, vendor, or platform name case-insensitively",
+				"(e.g. \"RTX\", \"Radeon\", \"Apple\" - see /folia gpu for",
+				"the discovered list).",
+				"",
+				"Default: empty string (auto-select preferred GPU)",
+				"Valid values: empty, \"gpu\", \"cpu\", or a name substring.",
+				"Restart required: yes."
+		}));
+		add(opt(KEY_GPU_VERIFY, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Run the CPU-vs-GPU parity battery at startup.",
+				"",
+				"What it does: after kernel compilation, executes hand-picked edge",
+				"cases (touching faces, NaN, denormals, extreme magnitudes) and",
+				"seeded random batches through both the GPU kernel and the CPU",
+				"reference, requiring bit-exact agreement. A mismatch refuses the",
+				"GPU backend (CPU fallback with the mismatch in the reason).",
+				"",
+				"Why you might disable it: it adds well under one second at boot.",
+				"Only disable if a driver bug makes it falsely fail on healthy",
+				"hardware - and then please report the mismatch.",
+				"",
+				"Default: true",
+				"Valid values: true, false",
+				"Restart required: yes."
 		}));
 
 		add(opt(KEY_METRICS, Boolean.class, Boolean.FALSE, v -> v, new String[] {

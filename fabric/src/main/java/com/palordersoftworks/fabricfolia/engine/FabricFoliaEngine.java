@@ -771,6 +771,7 @@ public final class FabricFoliaEngine {
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
 		lines.add("staged bodies pending (backlog): " + pendingStagedBodies()
 				+ ", staging suppressed by backlog: " + RegionStageHub.suppressedBacklog());
+		lines.addAll(com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.metricsLines());
 		lines.add("bodies run inline at flush (no parallel headroom): " + RegionStageHub.inlineNoParallel()
 				+ ", skipped (region behind, slow-motion): " + RegionStageHub.regionBehindSkipped());
 		lines.add("staged drain window (inter-tick): waits=" + drainWindowWaits.get()

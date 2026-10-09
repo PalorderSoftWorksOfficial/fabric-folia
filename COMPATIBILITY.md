@@ -180,3 +180,16 @@ Every combo is re-runnable from the harness and its result is recorded. A
 compatibility regression is a harness phase that
 flips from PASS to FAIL at unchanged versions — re-run, bisect with the
 isolation combos, and fix the cause (never mask it in the core).
+
+## Experimental GPU subsystem (OpenCL)
+
+The opt-in OpenCL acceleration layer (`gpu.enabled`, default off) is
+isolated by design: no gameplay path depends on it, and every failure —
+missing runtime, no device, no fp64, kernel build error, boot-parity
+mismatch, or a mid-flight enqueue error — degrades to the CPU reference
+backend with the reason visible in `/folia metrics`. A machine without any
+OpenCL installation (or with a broken driver) cannot be broken further by
+this subsystem: its worst case is one startup WARNING line and the CPU
+serving path. It also adds no mixins and no dependencies. Full design,
+measured numbers (including where the GPU loses), and OS coverage:
+`docs/gpu.md`.

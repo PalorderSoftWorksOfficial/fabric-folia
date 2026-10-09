@@ -35,7 +35,10 @@ class FoliaConfigTest {
 		// not a near-empty stub.
 		for (String key : new String[] {
 				"config-version", "enabled", "regionized-random-ticks", "region-section-size",
-				"worker-threads", "thread-check-mode", "debug", "profiling", "metrics"}) {
+				"worker-threads", "thread-check-mode", "debug", "profiling", "metrics",
+				"verify-on-boot"}) {
+			// Note: the template is nested YAML — dotted keys like gpu.enabled
+			// appear as a gpu: section with leaf keys, so leaves are checked.
 			assertTrue(text.contains(key + ":"), "template missing key: " + key);
 		}
 		assertTrue(text.contains("Restart required"), "template missing documentation");
@@ -50,6 +53,10 @@ class FoliaConfigTest {
 		assertEquals(8, config.regionSectionSize());
 		assertEquals(-1, config.workerThreads());
 		assertEquals("WARN", config.threadCheckMode());
+		// GPU acceleration is strictly opt-in; verification defaults on.
+		assertFalse(config.gpuEnabled());
+		assertEquals("", config.gpuDevice());
+		assertTrue(config.gpuVerifyOnBoot());
 	}
 
 	@Test

@@ -5,10 +5,12 @@
 
 package com.palordersoftworks.fabricfolia.mixin;
 
+import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.palordersoftworks.fabricfolia.FabricFoliaMod;
 import com.palordersoftworks.fabricfolia.entity.EntityRegionTracker;
-import com.palordersoftworks.fabricfolia.patches.PatchRegistry;
-import com.palordersoftworks.fabricfolia.util.Colliders;
+import com.palordersoftworks.fabricfolia.util.OfemCollision;
 import com.palordersoftworks.fabricfolia.entity.FabricFoliaEntityHolder;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
@@ -20,8 +22,11 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArgs;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 import java.util.List;
 
 /**
@@ -50,29 +55,25 @@ import java.util.List;
  *
  * <h2>Collision optimization (lithium-style, Carpet TIS Addition OFEM pattern)</h2>
  *
- * <p>When an entity's movement vector is small, the expensive block-level
- * collision check (voxel shape iteration over every block in the expanded
- * AABB) is skipped because:
- * <ul>
- *   <li>small movement means the expanded bounding box barely differs from the
- *       entity's own AABB — if the entity fit in its cell before, it still fits
- *       after a tiny step;</li>
- *   <li>the entity-vs-entity pass ({@code Level.getEntityCollisions}) still runs
- *       — other living entities are not skipped;</li>
- *   <li>{@code collideWithShapes} on an empty list is a fast return (the list
- *       isEmpty check at its head), so the per-axis shape resolution is also
- *       skipped.</li>
- * </ul>
- * The threshold is squared-movement (avoids sqrt); tuned so a standing armor
- * stand that jitters by &lt;1 block/tick keeps its collision budget near zero
- * while anything that actually traverses space pays full cost.
- * </p>
+ * <p>Vanilla resolves movement one axis at a time in {@code collideWithShapes}
+ * via {@code Shapes.collide(axis, box, colliders, maxDist)}, but collects block
+ * colliders for the full 3D-expanded box up front. A shape can only limit
+ * movement along an axis if it intersects the box swept along that axis, so
+ * for small movements this patch defers block collection and queries a thin
+ * 1-axis slab per axis pass instead ({@link OfemCollision}). The
+ * {@code Shapes.collide} result is mathematically identical to vanilla; only
+ * the shape-set size changes. Entity-vs-entity colliders and the world-border
+ * shape always flow through unchanged.</p>
  *
- * <p><strong>Compatibility:</strong> gated behind {@code patches.entity-collision-opt}
- * (default off — operator opt-in). Lithium-safe: this patch targets a different
- * method layer than Lithium's collision optimization, so both can co-exist.
- * When Lithium is present it optimizes {@code tickChunk} internals; this patch
- * skips block collision at the {@code Entity} level for small movements.</p>
+ * <p><strong>Safety:</strong> behind {@code patches.entity-collision-opt}
+ * (default OFF — operator opt-in, startup-only). Every hook falls through to
+ * the original vanilla call when the patch is off, the movement exceeds the
+ * sub-block threshold, or any context is missing; the step-up path and the
+ * foreign {@code collideBoundingBox(CollisionContext, ...)} flow see a fully
+ * vanilla collider list (context is cleared at the Entity-overload TAIL).
+ * If Lithium is installed the patch is force-disabled at startup — Lithium's
+ * own entity-movement optimization owns this path; double-optimizing the same
+ * methods is an unverified combination, so we defer to it.
  */
 @Mixin(Entity.class)
 public abstract class EntityMixin implements FabricFoliaEntityHolder {
@@ -83,15 +84,9 @@ public abstract class EntityMixin implements FabricFoliaEntityHolder {
 	@Unique
 	private long fabricfolia$lastChunk;
 
-	// Movement-squared threshold for the cheap-collision skip.
-	// A value of 1.0 means: skip block collision when the entity moves
-	// less than 1 block in any direction this tick. Tuned to let jitter
-	// stand still cheaply while walking/swimming/jumping pays full cost.
-	@Unique
-	private static final double COLLISION_SKIP_MOVEMENT_SQR = 1.0;
-
 	@Override
 	public void fabricfolia$setTracker(EntityRegionTracker tracker) {
+
 		this.fabricfolia$tracker = tracker;
 	}
 
@@ -170,89 +165,82 @@ public abstract class EntityMixin implements FabricFoliaEntityHolder {
 	}
 
 	/**
-	 * Lithium-style collision skip (Carpet TIS Addition OFEM pattern).
-	 * When movement is small (below {@link #COLLISION_SKIP_MOVEMENT_SQR}
-	 * squared length), replace the block-collider list with an empty one.
-	 *
-	 * <p>Redirects {@code collectCollidersIgnoringWorldBorder} inside
-	 * {@code collideBoundingBox(CollisionContext, Vec3, AABB, Level, List)}
-	 * — the static method that collects block voxel shapes for collision.
-	 * When the skip fires, an empty list is returned and
-	 * {@code collideWithShapes} returns {@code movement} unchanged (its
-	 * first instruction checks {@code colliders.isEmpty()}).
-	 *
-	 * <p>Entity-vs-entity collisions ({@code getEntityCollisions}) run in the
-	 * caller before this method is entered — they are NOT skipped. Only the
-	 * block/voxel pass is elided for small movements.
-	 *
-	 * <p><strong>Safety:</strong> the skip is conservative (only tiny movements),
-	 * fully reversible (patch gate), and does not touch entity push logic.
-	 * A standing armor stand that jitters sub-block per tick drops from
-	 * ~46µs/tick collision cost to ~0 while still colliding with entities
-	 * (including other armor stands in the clump).</p>
+	 * Lithium-style axis-only collision (OFEM pattern, see class javadoc).
+	 * Block colliders are deferred: the full-box collection is replaced by
+	 * per-axis slab queries inside {@code collideWithShapes}. Gate: patch on
+	 * AND movement sub-block per tick AND a live context. Everything else
+	 * falls through to the original vanilla collection.
 	 */
-	@Redirect(
-			method = "collideBoundingBox(Lnet/minecraft/world/phys/shapes/CollisionContext;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
+	@WrapOperation(
+			method = "collectCollidersIgnoringWorldBorder(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/level/Level;Ljava/util/List;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;",
 			at = @At(
 					value = "INVOKE",
-					target = "(Lnet/minecraft/world/phys/shapes/CollisionContext;Lnet/minecraft/world/level/Level;Ljava/util/List;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;"
+					target = "Lnet/minecraft/world/level/Level;getBlockCollisions(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Ljava/lang/Iterable;"
 			)
 	)
-	@Unique
-	private static List<VoxelShape> folia$collisionOpt_skipBlockColliders(
-			net.minecraft.world.phys.shapes.CollisionContext source,
-			Level world, List<VoxelShape> entityColliders, AABB box) {
-		if (!PatchRegistry.isEnabled("entity-collision-opt")) {
-			return Colliders.callCollectColliders(source, world, entityColliders, box);
-		}
-		// When the patch is enabled, skip block collision entirely.
-		// Entity-vs-entity collisions still run via getEntityCollisions
-		// in the caller. The movement check is done at the higher level
-		// (Entity.collide) where we have the movement vector.
-		return Colliders.EMPTY;
+	private static Iterable<VoxelShape> folia$collisionOpt_axisOnlyBlockCollisions(
+			Level world, Entity entity, AABB box,
+			Operation<Iterable<VoxelShape>> original) {
+		return OfemCollision.collect(world, entity, box, original);
 	}
 
 	/**
-	 * Movement-based collision skip for the Entity.collide path.
-	 * When the entity barely moved this tick (below
-	 * {@link #COLLISION_SKIP_MOVEMENT_SQR} squared length), skip block
-	 * collision by returning the movement unchanged.
-	 *
-	 * <p>Targets {@code Entity.collide(Vec3)} at the INVOKE of
-	 * {@code collideBoundingBox(CollisionContext, Vec3, AABB, Level, List)}.
-	 * When the skip fires, the movement is returned unchanged — this is what
-	 * collideWithShapes does when given an empty list (its first instruction
-	 * checks isEmpty()).
-	 *
-	 * <p><strong>Why this works:</strong> Entity.collide computes the expanded
-	 * AABB from the movement direction, then calls getEntityCollisions
-	 * (entity-vs-entity, always runs) and getBlockCollisions (block-vs-voxel,
-	 * skipped here). By returning movement unchanged, we get the entity-vs-entity
-	 * check for free while skipping the expensive voxel iteration.
+	 * When the axis-only context is live, {@code collideWithShapes} must
+	 * not early-return on an empty entity/border list — the block shapes
+	 * arrive later via the per-axis rewrite. With no context this returns
+	 * the vanilla value untouched.
 	 */
-	@Redirect(
-			method = "collide(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;",
+	@ModifyExpressionValue(
+			method = "collideWithShapes",
+			at = @At(value = "INVOKE", target = "Ljava/util/List;isEmpty()Z", ordinal = 0)
+	)
+	private static boolean folia$collisionOpt_forceAxisResolution(boolean isEmpty) {
+		return OfemCollision.isOptimizing() ? false : isEmpty;
+	}
+
+	/**
+	 * Per-axis shape rewrite: append the axis-swept slab's block shapes to
+	 * the entity/border collider list so {@code Shapes.collide} sees exactly
+	 * the shapes that can limit movement on this axis — the same answer
+	 * vanilla computes from the full 3D box, at a fraction of the shape
+	 * count for sub-block movement.
+	 */
+	@ModifyArgs(
+			method = "collideWithShapes",
 			at = @At(
 					value = "INVOKE",
-					target = "(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;"
+					target = "Lnet/minecraft/world/phys/shapes/Shapes;collide(Lnet/minecraft/core/Direction$Axis;Lnet/minecraft/world/phys/AABB;Ljava/lang/Iterable;D)D"
 			)
 	)
-	@Unique
-	private static Vec3 folia$collisionOpt_checkMovement(
-			Entity entity,
-			Vec3 movement, AABB box, Level world, List<VoxelShape> entityColliders) {
-		if (!PatchRegistry.isEnabled("entity-collision-opt")) {
-			return Colliders.callCollideWithShapes(movement, box, entityColliders);
-		}
-		// Movement-squared threshold: skip block collision when the entity
-		// barely moved this tick. Entity-vs-entity collisions still run
-		// (they're computed in the caller before this method is entered).
-		if (movement.lengthSqr() > COLLISION_SKIP_MOVEMENT_SQR) {
-			return Colliders.callCollideWithShapes(movement, box, entityColliders);
-		}
-		// Return the movement unchanged — this is what collideWithShapes does
-		// when given an empty list (its first instruction checks isEmpty()).
-		// The block collision is effectively skipped.
-		return movement;
+	private static void folia$collisionOpt_axisSlabShapes(Args args) {
+		OfemCollision.rewriteShapes(args);
+	}
+
+	/**
+	 * HEAD movement capture for the OFEM gate. Returns the movement
+	 * unchanged — observer only.
+	 */
+	@ModifyVariable(
+			method = "collideBoundingBox(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
+			at = @At("HEAD"),
+			argsOnly = true
+	)
+	private static Vec3 folia$collisionOpt_captureMovement(Vec3 movement) {
+		return OfemCollision.captureMovement(movement);
+	}
+
+	/**
+	 * TAIL clear on the Entity overload: the step-up path and
+	 * collectAllColliders run after this method returns and must see a
+	 * fully vanilla collider list (pooled workers never inherit state).
+	 */
+	@Inject(
+			method = "collideBoundingBox(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
+			at = @At("RETURN")
+	)
+	private static void folia$collisionOpt_clearAfterResolution(
+			Entity entity, Vec3 movement, AABB box, Level world,
+			List<VoxelShape> entityColliders, CallbackInfoReturnable<Vec3> cir) {
+		OfemCollision.clear();
 	}
 }

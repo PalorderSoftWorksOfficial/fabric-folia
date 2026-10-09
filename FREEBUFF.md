@@ -179,6 +179,68 @@ Named jar for inspection (project loom cache):
 
 ## 6. Work state (update this section every turn!)
 
+### 2026-10-09 turn — GPU subsystem + collision patch + stall soak (verified; commit pending user-visible check)
+- **OFEM collision patch (verified earlier this session):** `Colliders.java`
+  REPLACED by `util/OfemCollision.java` + `EntityMixin` OFEM design
+  (`@WrapOperation`/`@ModifyArgs` + ThreadLocal context). Config key
+  `patches.minecraft.entity-collision-optimization` (default false,
+  Lithium force-disable). Live tests: plain stands stop at wall face minus
+  half-width (x=805.7500 vs face 806.0) and land stable at y=101.0 — PASS.
+  **Two test artifacts explained earlier "freezes": vanilla
+  `ArmorStand.hasPhysics()` returns false for NoGravity stands (travel()
+  never runs — verify stands on test subjects WITHOUT NoGravity), and
+  chunks not force-loaded don't entity-tick (stands at x=799.5 were in
+  chunk [49,50] while only [50,50] was loaded).**
+- **Stall soak verdict:** background monitor polled gametime over RCON
+  every 2s for ~75 min against the live server: ZERO stalls, zero RCON
+  errors. The suspected 60s pushEntities stall does not reproduce on this
+  build/host.
+- **OpenCL GPU subsystem (NEW, opt-in, default OFF):**
+  - `common/.../gpu/`: `GpuBackend`, `CpuBackend` (canonical vanilla
+    AABB#intersects reference — strict inequalities), `OpenClRuntime`
+    (hand-rolled FFM binding of ~20 CL1.2 entry points, JDK 25, no deps),
+    `GpuVerification` (boot/test parity battery: edge cases incl. NaN,
+    ±1e308, touching faces + seeded random batches), `GpuSubsystem`
+    (lifecycle/dispatch/degradation/metrics/bench), `GpuDevice`,
+    `GpuException`. ONE real kernel: `aabb_overlap_mask` (bulk overlap
+    filtering, pure IEEE-754 comparisons → bit-exact by construction).
+  - Config: `gpu.enabled` (false), `gpu.device` (auto),
+    `gpu.verify-on-boot` (true). Fabric wiring: startup init + config
+    summary line, `GpuSubsystem.close()` in stopEngine, GPU lines in
+    `/folia metrics`, `/folia gpu` + `/folia gpu bench [n]` commands,
+    `/folia help gpu` topic.
+  - **CRASH ROOT-CAUSE (JVM EXCEPTION_ACCESS_VIOLATION in nvopencl64):**
+    `clCreateContext`'s `devices` (and `clBuildProgram`'s `device_list`)
+    are pointers to an ARRAY of handles; passing the raw handle made the
+    ICD dereference driver memory as a device pointer (platform derived
+    from device when props=NULL) and jump to garbage. Fixed with a slot
+    holding the handle (why-comment in `OpenClRuntime.open()`). Python
+    ctypes proved the driver fine; FFM probe isolated the parameter.
+  - **Measured (RTX 5060 Ti, OpenCL 3.0 CUDA, 36 CU):** boot battery
+    PASSED live in-server (`Boot parity verified: true`); JUnit
+    `GpuParityTest` bit-exact on 8 seeded batches (device present, zero
+    skips); bench parity=EXACT at 200k/1M/4M boxes but **CPU wins at all
+    sizes** (1.24/3.95/11.97 ms vs 9.34/40.07/142.90 ms) — per-call
+    round-trip dominates; GPU ceiling ~28k boxes/ms vs CPU ~334k. Honest
+    conclusion + path to crossover (persistent buffers, batched queries)
+    in `docs/gpu.md`.
+  - Tests: `AabbOverlapTest` (11: pinned literals incl. NaN/extremes,
+    validation, opt-in/fallback contracts), `GpuParityTest` (2, skips
+    cleanly without a device). Full suite **178 tests, 0 failures,
+    0 skipped**; `./gradlew :common:test :fabric:test :api:test build`
+    EXIT=0.
+  - Live boot of the GPU build: `Done (` + zero mixin errors; `/folia
+    gpu` shows GPU_ACTIVE + devices + verified; TPS ~20.2 via gametime
+    deltas; stall monitor re-armed against the new build.
+- **Jenkinsfile:** default lane UNCHANGED (`agent any`, `sh`); NEW opt-in
+  `CROSS_OS` boolean param gates a declarative matrix (labels `windows`,
+  `macos`) running the same test protocol with `bat`/`sh` switch + junit
+  publishing. Default builds never queue on missing labels. README CI
+  section documents it.
+- **Docs this turn:** `docs/gpu.md` (design + measured results + OS
+  coverage + the clCreateContext trap), COMPATIBILITY.md GPU section,
+  README CI matrix note.
+
 ### Done & pushed
 - `8a7dd96` player path (connection tick staging + packet re-homes) — live-verified,
   100/100 tests, metrics balanced, pushed to origin/main.

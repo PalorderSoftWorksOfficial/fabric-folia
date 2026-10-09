@@ -148,6 +148,18 @@ public class FabricFoliaMod implements ModInitializer {
 		Console.config("  Debug logging: " + (config.debugLogging() ? "ON (per-tick dispatch/worker evidence in the log)"
 				: "off (normal operation is quiet; set diagnostics.debug-logging=true while troubleshooting)"));
 
+		// Experimental GPU subsystem (opt-in): discovery + kernel build + boot
+		// parity battery. Never throws — any failure lands in CPU fallback with
+		// the reason below and in /folia metrics.
+		var gpu = com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.initialize(
+				config.gpuEnabled(), config.gpuDevice(), config.gpuVerifyOnBoot());
+		Console.config("  GPU acceleration: " + switch (gpu.state()) {
+			case DISABLED -> "disabled (experimental opt-in: set gpu.enabled=true; see /folia gpu)";
+			case GPU_ACTIVE -> "ACTIVE on " + gpu.description()
+					+ (gpu.verified() ? " (boot parity battery passed)" : " (verification skipped by config)");
+			default -> "CPU fallback - " + gpu.fallbackReason();
+		});
+
 		try {
 			// Measured-compatibility policy (COMPATIBILITY.md): C2ME's
 			// runtime-measured interaction (CheckedThreadLocalRandom guard vs.
@@ -370,8 +382,9 @@ public class FabricFoliaMod implements ModInitializer {
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry
 				.register("entity-collision-opt", "Entity Collision Optimization",
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
-						"skips block-level collision checks when entity movement is below threshold (lithium-style OFEM pattern)",
-						"Entity.collideBoundingBox: getBlockCollisions → empty list",
+						"axis-only block collision for sub-block movement (lithium-style OFEM pattern); "
+								+ "force-disabled when Lithium is installed",
+						"Entity.collectCollidersIgnoringWorldBorder/getBlockCollisions + collideWithShapes Shapes.collide",
 						Set.of(), Set.of(),
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 	}
@@ -415,9 +428,16 @@ public class FabricFoliaMod implements ModInitializer {
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_SCHEDULER_DISPATCH, true));
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("task-queue",
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_TASK_QUEUE, true));
+		boolean lithiumPresent = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("lithium");
+		boolean collisionOptRequested = config.patchEnabled(
+				com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_COLLISION_OPT, false);
+		if (collisionOptRequested && lithiumPresent) {
+			// Lithium owns the entity-movement collision path; double-optimizing
+			// the same methods is an unverified combination — defer to Lithium.
+			Console.config("  Entity collision optimization: disabled (Lithium installed — its entity-movement optimization owns this path)");
+		}
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("entity-collision-opt",
-				config.patchEnabled(
-						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_COLLISION_OPT, false));
+				collisionOptRequested && !lithiumPresent);
 
 		var blocked = com.palordersoftworks.fabricfolia.patches.PatchRegistry.resolveAndApply();
 		int active = 0;
@@ -484,6 +504,9 @@ public class FabricFoliaMod implements ModInitializer {
 	private static volatile LegacyDispatchPolicy pendingPolicy;
 
 	private static void stopEngine(MinecraftServer server) {
+		// GPU resources are startup-lifecycle-bound; release before the drain
+		// (the subsystem degrades to CPU on its own if anything still queries).
+		com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.close();
 		FabricFoliaEngine current = engine;
 		RegionTickInterceptor currentInterceptor = interceptor;
 		if (current == null) {

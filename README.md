@@ -59,6 +59,18 @@ Archive Fabric mod JAR
 The Jenkins pipeline is defined in Jenkinsfile, so the build
 configuration is version-controlled alongside the source code.
 
+Cross-OS test matrix (opt-in)
+
+Default builds run on the primary agent (Linux, `sh`). Triggering a build
+with the `CROSS_OS` parameter additionally runs the full test protocol on
+every OS via a declarative matrix, using agents labelled `windows` and
+`macos` (Jenkins picks the right shell automatically — `gradlew.bat` on
+Windows). If no agent carries a given label, only the parameterised run
+waits in queue; ordinary pushes are unaffected. This validates the
+cross-platform claims (file paths, FFM/OpenCL loading, YAML config IO)
+on real Windows and macOS agents — the GPU test layer additionally
+skips itself cleanly on agents without an OpenCL device.
+
 What CI Verifies
 
 Every automated build currently runs:

@@ -294,6 +294,24 @@ public final class FoliaConfig {
 		return (String) values.get(ConfigSchema.KEY_SERVER_BRAND_NAME);
 	}
 
+	/**
+	 * @return whether the experimental OpenCL subsystem is enabled
+	 * ({@code gpu.enabled}; default false = strictly opt-in).
+	 */
+	public boolean gpuEnabled() {
+		return (Boolean) values.get(ConfigSchema.KEY_GPU_ENABLED);
+	}
+
+	/** @return the OpenCL device selector ({@code gpu.device}; empty = auto). */
+	public String gpuDevice() {
+		return (String) values.get(ConfigSchema.KEY_GPU_DEVICE);
+	}
+
+	/** @return whether the boot-time GPU parity battery runs ({@code gpu.verify-on-boot}). */
+	public boolean gpuVerifyOnBoot() {
+		return (Boolean) values.get(ConfigSchema.KEY_GPU_VERIFY);
+	}
+
 	/** Resolves the {@code auto} sentinel for worker threads (also used by tests). */
 	public static final class WorkerThreads {
 		private WorkerThreads() {

@@ -31,6 +31,7 @@ public final class FoliaHelp {
 				"<aqua>/folia workers</aqua> <dark_gray>—</dark_gray> <gray>worker-pool state and utilization</gray>",
 				"<aqua>/folia scheduler</aqua> <dark_gray>—</dark_gray> <gray>scheduler health and queue diagnostics</gray>",
 				"<aqua>/folia patches</aqua> <dark_gray>—</dark_gray> <gray>active optimization patches and their state</gray>",
+				"<aqua>/folia gpu [bench [n]]</aqua> <dark_gray>—</dark_gray> <gray>experimental GPU acceleration status and benchmark</gray>",
 				"<aqua>/folia health</aqua> <dark_gray>—</dark_gray> <gray>overall system health with reasons</gray>",
 				"<aqua>/folia threads</aqua> <dark_gray>—</dark_gray> <gray>thread and region-ownership diagnostics</gray>",
 				"<aqua>/folia help [topic]</aqua> <dark_gray>—</dark_gray> <gray>this documentation</gray>",
@@ -84,6 +85,17 @@ public final class FoliaHelp {
 				"<gray>regionization and thread checks are never affected. Patches",
 				"<gray>resolve once at server start (config changes need a restart).",
 				"<gray>Use </gray><aqua>/folia patches</aqua><gray> to see every patch and its status."));
+		TOPICS.put("gpu", List.of(
+				"<gold><bold>Help: gpu</bold></gold>",
+				"<gray>EXPERIMENTAL: opt-in OpenCL acceleration of bulk AABB overlap",
+				"<gray>filtering (entity broadphase math). Enable with </gray><aqua>gpu.enabled=true</aqua><gray> in",
+				"<gray>config/fabric-folia.yml; the CPU reference path is always present.",
+				"<gray>At boot the kernel is compiled and must pass a CPU-vs-GPU parity",
+				"<gray>bit-exactness battery before it may serve anything; any failure -",
+				"<gray>missing runtime, no device, verification mismatch, or a mid-flight",
+				"<gray>error - degrades to CPU with the reason in </gray><aqua>/folia metrics</aqua><gray>.</gray>",
+				"<gray>Measure before assuming a win: </gray><aqua>/folia gpu bench [n]</aqua><gray> reports CPU vs GPU</gray>",
+				"<gray>throughput and re-checks parity on your hardware."));
 		TOPICS.put("health", List.of(
 				"<gold><bold>Help: health</bold></gold>",
 				"<gray>Runs the built-in invariants: region creation, region",

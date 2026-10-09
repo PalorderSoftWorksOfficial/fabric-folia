@@ -402,6 +402,35 @@ public final class FoliaCommand {
 					return 1;
 				}));
 
+		root.then(Commands.literal("gpu")
+				.requires(source -> allowed(source, "admin"))
+				.executes(context -> {
+					var snap = com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.snapshot();
+					List<MutableComponent> lines = new ArrayList<>();
+					lines.add(FoliaMessages.header("GPU Subsystem (experimental)"));
+					lines.add(FoliaMessages.rule());
+					lines.add(FoliaMessages.row("State", snap.state().name()));
+					lines.add(FoliaMessages.row("Backend", snap.description()));
+					if (!snap.fallbackReason().isBlank()) {
+						lines.add(FoliaMessages.row("Fallback reason", snap.fallbackReason()));
+					}
+					if (!snap.devices().isEmpty()) {
+						lines.add(FoliaMessages.toMinecraft("<gray>  Devices: "
+								+ com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.describeDevices() + "</gray>"));
+					}
+					lines.add(FoliaMessages.row("Boot parity verified", String.valueOf(snap.verified())));
+					lines.add(FoliaMessages.row("Dispatches", snap.invocations() + " (boxes=" + snap.boxesTested()
+							+ ", errors=" + snap.errors() + ", fallbacks=" + snap.fallbacks() + ")"));
+					lines.add(FoliaMessages.info("Measure it: /folia gpu bench [boxes]. Config: gpu.enabled, gpu.device."));
+					send(context.getSource(), lines);
+					return 1;
+				})
+				.then(Commands.literal("bench")
+						.executes(context -> gpuBench(context.getSource(), 65536))
+						.then(Commands.argument("boxes", com.mojang.brigadier.arguments.IntegerArgumentType.integer(64, 4_000_000))
+								.executes(context -> gpuBench(context.getSource(),
+										com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "boxes"))))));
+
 		root.then(Commands.literal("compat")
 				.requires(source -> allowed(source, "admin"))
 				.executes(context -> {
@@ -433,6 +462,17 @@ public final class FoliaCommand {
 								.executes(context -> unpin(context.getSource(),
 										IntegerArgumentType.getInteger(context, "chunkX"),
 										IntegerArgumentType.getInteger(context, "chunkZ"))))));
+	}
+
+	/** Runs the CPU-vs-GPU overlap-mask benchmark and replies with the numbers. */
+	private static int gpuBench(CommandSourceStack source, int boxes) {
+		List<MutableComponent> lines = new ArrayList<>();
+		lines.add(FoliaMessages.header("GPU Bench (n=" + boxes + ")"));
+		for (String line : com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.bench(boxes)) {
+			lines.add(FoliaMessages.toMinecraft("<gray>  " + line + "</gray>"));
+		}
+		send(source, lines);
+		return 1;
 	}
 
 	private static String randomTickLine(FabricFoliaEngine engine) {
