@@ -94,6 +94,37 @@ pipeline {
                 )
             }
         }
+
+        stage('Publish to Fill') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    set -eu
+                    set +x
+
+                    VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
+                    if [ -z "$VERSION" ]; then
+                        echo "mod_version was not found in gradle.properties"
+                        exit 1
+                    fi
+
+                    ARTIFACT_COUNT=0
+
+                    for ARTIFACT in fabric/build/libs/*.jar; do
+                        [ -f "$ARTIFACT" ] || continue
+                        /home/administrator/palorder-fill/jenkins-publish.sh fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT"
+                        ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+                    done
+
+                    if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+                        echo "No publishable Fabric-Folia artifacts found"
+                        exit 1
+                    fi
+                '''
+            }
+        }
     }
 
     post {
