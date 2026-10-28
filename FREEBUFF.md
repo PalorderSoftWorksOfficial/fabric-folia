@@ -1250,3 +1250,11 @@ Named jar for inspection (project loom cache):
   RCON `stop` -> all dimensions saved, ports free, `./gradlew --stop`,
   no own processes left. Working tree uncommitted on main per the
   standing rule (no commit without being asked).
+- **DELIVERED 2026-10-28 as `9e5a77e` (pushed `f60fccb..9e5a77e` to
+  origin main; user explicitly asked to commit+push):** pre-commit gate =
+  full suite `--rerun-tasks` rc=0 (184 tests, 0 failures) + fresh live
+  boot on the exact tree (`Done (2.052s)`, 0 mixin errors, ~20.2 TPS
+  direct, `skipped(sleep-window)=161` live, RCON `stop` -> all dimensions
+  saved, ports free, no own processes). Push initially rejected (remote
+  had `f60fccb` Jenkinsfile-only publish step); rebased our 1 commit
+  onto it (no overlap, no force) and pushed clean. Tree clean after push.
