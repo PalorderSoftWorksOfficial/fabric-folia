@@ -60,4 +60,21 @@ class StagedDrainWindowTest {
 				"the budget must bound the wait (elapsed=" + elapsed + "ns)");
 		assertTrue(pumps.get() > 0, "a waiting window must keep pumping");
 	}
+
+	@Test
+	void drainGateSkipsOnlyWhenTheCycleAlreadyHadSleep() {
+		long floor = TimeUnit.MILLISECONDS.toNanos(5);
+
+		assertTrue(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(50), TimeUnit.MILLISECONDS.toNanos(31), floor),
+				"19ms of cycle sleep must make the drain redundant");
+		assertFalse(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(49), TimeUnit.MILLISECONDS.toNanos(48), floor),
+				"a behind tick (1ms sleep) must keep the drain engaged");
+		assertFalse(FabricFoliaEngine.drainRedundant(0L, TimeUnit.MILLISECONDS.toNanos(20), floor),
+				"first tick (no cycle yet) must run the drain");
+		assertFalse(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(50), 0L, floor),
+				"no recorded work yet must run the drain");
+	}
 }

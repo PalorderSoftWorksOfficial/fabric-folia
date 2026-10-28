@@ -179,6 +179,173 @@ Named jar for inspection (project loom cache):
 
 ## 6. Work state (update this section every turn!)
 
+### 2026-10-10 SECOND turn — "fix the limitations and the performance issues" (verified live; on main, NOT committed)
+- **THE 60s STALL IS FULLY ROOT-CAUSED — and it was NEVER a hung tick:**
+  a 30-min vanilla soak + StallProbe caught the killer event live: the
+  watchdog killed at "A single server tick took 60.01 seconds" while the
+  probe (500ms polls on getTickCount) saw ZERO >5s stagnation — the tick
+  loop was PROGRESSING the whole time. **26.2 bytecode proof
+  (ServerWatchdog.run):** kill iff `Util.getNanos() − server.getNextTickTime()
+  > maxTickTimeNanos`, and the "single server tick took" message prints
+  that DRIFT — the wording is misleading. `nextTickTimeNanos` re-bases only
+  at the 100-tick "Can't keep up" gate ⇒ **at sustained TPS < ~1.67 the
+  re-base interval itself exceeds 60s and the server is killed with no
+  warnings in between** (empirically: last warn ≈ exactly 100 ticks before
+  each kill, both occurrences). The "stall" = the vanilla O(n²) 4,000-stand
+  clump pushing the server to 0.7-4 TPS (each tick 88% inside
+  ArmorStand.pushEntities per JFR) — vanilla's cost; regionized mode never
+  approaches it (0 stalls across all soaks). The ghost-section/GC theories
+  are formally DEAD (census probe armed but never needed; GC pauses were
+  8.4ms).
+- **StallProbe upgraded with the missing operator signal:** a sliding
+  30s TPS window; below CRAWL_KILL_TPS=2.0 it logs ONE concise warning
+  ("tick loop is PROGRESSING (not hung)… kill is on this trajectory…")
+  and a recovery line — fixing the "no warnings then sudden death"
+  limitation. Zero-cost (same poll loop). The hang-dump path stays for
+  genuine freezes.
+- **New server-MSPT instrumentation (attribution, not just numbers):**
+  per-phase rings in RegionMetrics — `quiesce/flush/drain/body p50/p95` —
+  paired in-engine (beginTickPhase/flushGameplay/awaitStagedDrain/
+  recordTickWork; recordTickWork must NOT zero lastTickPhaseStartNanos or
+  the cycle pairing dies — that bug made the first gate build inert,
+  caught by measurement: skipped(sleep-window)=0). The MSPT line is now
+  `Server MSPT (tick work): p50/p95/p99/max missed(>50ms)=cumulative
+  recent-window=X/100` — the windowed count fixes the boot-conflation
+  limitation (cumulative still reported, labeled honestly).
+- **PERF FIX 1 — adaptive drain gate (measured-bottleneck fix):**
+  breakdown proved the inter-tick drain burned p50≈23ms of EVERY tick
+  (75% of the 31ms work) while the server slept ~19ms/cycle — redundant.
+  `FabricFoliaEngine.drainRedundant(cycle, work, floor=5ms)`: skip the
+  drain when the previous cycle already handed workers ≥5ms of sleep
+  (the drain exists for BEHIND ticks where sleep≈0). Live: skips 68% of
+  ticks, engaged otherwise. Unit-pinned (StagedDrainWindowTest +1).
+- **PERF FIX 2 — BODIES_PER_TASK 256→64:** the breakdown showed quiesce
+  p95=46ms (tick-start wait on in-flight worker tasks); smaller tasks
+  cap each in-flight slice (test-derived expectation in
+  RegionStageHubParallelGateTest instead of the magic 3).
+- **BEFORE/AFTER (same clump world, one bot, work-based MSPT, mid-session
+  samples):** p50 31.11→21.77 (−30%), p95 77.83→61.80 (−21%), p99
+  92.31→78.35 (−15%), recent-window misses 33/100→16/100, Region#1 avg
+  12.5→7.1ms; end-of-session ring after full gameplay churn: p50=19.75
+  p95=50.38 p99=52.31, recent 8/100. TPS locked 20.0x throughout;
+  quiesce p95 (~46ms) persists — it is POOL-WIDE in-flight work (up to
+  8 workers mid-task), not single-task size; next lever = in-flight
+  attribution (which work is busy at quiesce), recorded as open.
+- **NEW known-issue observed (transient, loud, self-healing):** at a bot
+  RELOGIN mid-clump, one worker body joined a mid-load chunk (~2s):
+  quiesce timed out twice (attempt 1/2, "1 task(s) still in flight",
+  pump drained 128 chunk tasks meanwhile), 2 degraded ticks, 0 errors
+  afterwards, TPS recovered to 20 instantly. Trigger = relogin visibility
+  timing, not task granularity; tracked as open item.
+- **Suite: 184 tests, 0 failures, build rc=0** (final build live-verified
+  through the full bot lifecycle: walk/build//kill/respawn; clean RCON
+  stop "All dimensions are saved"; sweep left only foreign processes).
+- **Bot quirk:** the FIRST bot join after a fresh boot fails with
+  "socket closed" during login (~1 in 2 boots); immediate relaunch
+  succeeds — retry, do not debug the server for it.
+
+### 2026-10-10 stability-recovery turn (verified live; on main, NOT committed)
+- **Directive:** stability/concurrency/performance recovery — feature freeze,
+  GPU isolated, baseline first, root-cause fixes, before/after metrics.
+  State at start: main=`49a99a1`, clean tree, baseline build EXIT=0 with
+  178 tests / 0 failures / 0 skipped.
+- **CRITICAL PRE-EXISTING BUG FOUND + FIXED (root cause, not suppressed):**
+  `general.enabled=false` (the documented vanilla-fallback mode) CRASHED the
+  server at boot: `MinecraftServerMixin.fabricfolia$brand` called
+  `FabricFoliaMod.engine().config()` with engine==null (startEngine returns
+  early when disabled), NPE inside `loadLevel→getServerModName`. FIX: brand
+  now resolves from a new engine-independent
+  `FabricFoliaMod.config()` (static volatile, set on every startEngine path,
+  nulled on config-load failure); the mixin no longer touches the engine.
+  Repro'd live (crash report + stack), fixed, live-verified: disabled mode
+  boots to `Done (3.738s)!`. NEW `ServerBrandTest` (3: handler survives
+  missing engine+config; applies configured brand without engine;
+  server-brand=false leaves vanilla) invokes the REAL private handler via
+  reflection on a real CallbackInfoReturnable (construct it CANCELABLE —
+  non-cancellable throws CancellationException on setReturnValue).
+- **Watchdog-killer stall REPRODUCED under control (vanilla mode, one bot):**
+  60.2s single tick, watchdog kill; crash-report stack = Server thread
+  RUNNABLE in `ArmorStand.pushEntities:202 → Level.getEntities:652 →
+  EntitySectionStorage.getEntities:122 → EntitySection.getEntities:39`.
+  JFR (90s window over the kill): 4655/5299 samples (88%) in exactly this
+  chain via `LivingEntity.aiStep:3270`; GC RULED OUT (G1 pauses 8.4ms,
+  old gen 233MB); persisted entity data SANE (r.0.0.mca 573KB ≈ 4k stands);
+  range loops ruled out (delta between nested frames ≈50 samples) → time is
+  genuinely inside section entity-list iteration. Second boot: no killer
+  tick in 10 min (nondeterministic as recorded); grind state instead
+  (0.7-1.4 TPS). NOT YET ROOT-CAUSED: is one section's list exploding at
+  runtime (ghost/dup refs) or is it pure O(n²) clump volume — the census
+  probe below answers it on the next occurrence.
+- **NEW `engine/StallProbe` (always-on, zero steady-state cost):** daemon
+  thread, 500ms poll of `server.getTickCount()`; on ≥5s no-progress dumps
+  (max 1/8s) to `run/stall-probes/stall-*.log`: ALL thread stacks +
+  per-dimension section census (totalRefs/distinct/intra-section dups/
+  knownUuids/tickList active+passive+iterated/top sections + sample entity
+  pos+removed) via reflection on bytecode-verified names: `ServerLevel
+  .entityManager`, `PersistentEntitySectionManager.sectionStorage/.knownUuids`,
+  `EntitySectionStorage.sections`, `EntitySection.storage`,
+  `ClassInstanceMultiMap.allInstances`, `EntityTickList.active/.passive/
+  .iterated`. Reflection failure degrades to stacks-only (never crashes).
+  Started in startEngine BEFORE the disabled-return; stopped first in
+  stopEngine. 0 dumps during ~20 min regionized sessions (healthy).
+- **NEW server MSPT metric (directive requires p50/p95/p99):**
+  `RegionMetrics.recordServerTick` + `MsptRing.percentileMillis` (nearest-
+  rank) + line `Server MSPT (tick-to-tick): p50/p95/p99/max/
+  missed-deadlines(>50ms)`; recorded WORK-based (tick-phase start → flush+
+  drain complete via `FabricFoliaEngine.recordTickWork()` at end of
+  flushGameplayStaging) — loop-to-loop would include vanilla's sleep and
+  always read 50ms. NEW `RegionMetricsServerTickTest` (2: exact percentiles
+  on 1..100ms fixture [nearest-rank: p50=50, p95=95, p99=99 — NOT 100];
+  empty ring reports zeros).
+- **BEFORE/AFTER on the identical 4,000-stand-clump world, one player
+  (protocol bot), gametime-delta TPS (3×30s windows):**
+  - BEFORE (general.enabled=false, vanilla): **TPS 12.2 idle / 3.95-4.01
+    with player**; run 2 ground at 0.7-1.4 TPS; killed by watchdog once.
+    JFR: 88% of CPU = one armor stand pushing the clump on the server thread.
+  - AFTER (regionized, same world/bot): **TPS 20.03/19.99/20.00** (and
+    19.93/20.10/19.96 after restart); server work MSPT **p50=30.9-31.7,
+    p95=77.6-78.0, p99=92.4-93.3, max=278-330**; Region#1 (clump) avg
+    9.1-12.5ms; workers ~4.5% util; 0 quiesce timeouts, 0 pump errors,
+    0 bounced probes, 0 stalls, health all-OK. JFR: the pushEntities chain
+    runs under `WorkerPool.workerLoop→RegionScheduler.runRegionTick→
+    RegionStageHub.runBody` (parallelism real).
+  - Layer overhead itemized in metrics: quiesce waits 1390-1732 × ~30ms,
+    drain window 2347-2752 waits × ~25ms (budget 20ms, deliberate trade);
+    slow-motion skip absorbs the clump (11.0-14.7M skipped, by design).
+- **Gameplay + persistence:** bot `all` phase passed (640 moves/274
+  resyncs [known terrain-pin behavior], block place/break, /kill+respawn
+  → respawned at spawn); RCON stop → "All dimensions are saved" +
+  "Engine shut down cleanly"; restart reproduced the identical profile
+  (clump persisted, same MSPT/TPS). 0 ERROR lines across all regionized
+  sessions.
+- **GPU isolation:** run config `gpu.enabled: false` (boot log confirms
+  disabled); zero tick-path callers of overlapMask verified by grep (only
+  /folia gpu + metrics lines reach it).
+- **Suite at end of turn: 183 tests, 0 failures, 0 skipped, build rc=0.**
+  Files changed (UNCOMMITTED): FabricFoliaMod, MinecraftServerMixin,
+  FabricFoliaEngine, StallProbe (new), ServerBrandTest (new), RegionMetrics,
+  RegionMetricsServerTickTest (new).
+- **Honest limits:** killer stall not re-reproduced post-instrumentation
+  (one clean stack capture is the evidence); missed-deadline counter is
+  cumulative and conflates the boot burst (first ~1-2k ticks) with steady
+  state — steady p95 ≈78ms ≈ 5% of ticks over budget, absorbed by vanilla
+  catch-up; StallProbe reflection is 26.2-field-name-bound (degrades
+  gracefully); second vanilla run's worse grind (0.7-1.4 TPS vs 4) is
+  unexplained run-to-run variance (clump geometry shifts each run via
+  push-apart).
+- **Host quirks added this turn:** (1) MSYS path conversion applies to
+  ARGUMENTS only — python code that opens('/tmp/...') directly must use
+  `C:\Users\User\AppData\Local\Temp` (Git Bash /tmp = that dir);
+  (2) Windows python subprocess has cmd.exe shell → no `grep`, parse
+  netstat in python; (3) `time query gametime` returns "The time is N
+  tick(s)"-style text — regex the number; (4) **NEVER blanket-sed an
+  indented `enabled: true` in the runtime config** — it matched general,
+  patches AND gpu at once (self-inflicted incident this turn; fixed by
+  targeted line edits); (5) `execute if entity @e[...] Count` via mcrcon
+  errored this turn ("Incorrect argument") — 26.2 selector-census syntax
+  needs re-verification before reuse; (6) jcmd JFR.start writes to Windows
+  %TEMP% regardless of the /tmp argument.
+
 ### 2026-10-09 turn — GPU subsystem + collision patch + stall soak (verified; commit pending user-visible check)
 - **OFEM collision patch (verified earlier this session):** `Colliders.java`
   REPLACED by `util/OfemCollision.java` + `EntityMixin` OFEM design
@@ -1046,3 +1213,40 @@ Named jar for inspection (project loom cache):
   skips block collision at the Entity level.
 - **NOT yet live-verified:** boot test needed to confirm mixin injects
   cleanly and the config gate works.
+
+### DONE in the MSPT-breakdown + drain-gate + watchdog-truth turn (verified live; NOT yet committed)
+- **Watchdog drift-kill ROOT-CAUSED (bytecode-proven):** `ServerWatchdog.run`
+  kills on `now - nextTickTimeNanos > 60s` (drift, re-based only at the
+  100-tick gate) — the 30-min vanilla soak caught it with StallProbe polls
+  showing zero >5s stagnation across the kill. Any sustained crawl below
+  ~1.67 TPS dies with no warnings; the 'single tick took 60.01s' wording
+  is drift, not a hung tick. New `StallProbe` (500ms `getTickCount` polls
+  + 30s TPS trajectory window) warns below 2.0 TPS while the loop still
+  progresses; hang-dump path retained for genuine freezes.
+- **Per-tick MSPT attribution** (`RegionMetrics`: serverTick/quiesce/flush/
+  drain/body rings + `recent-window=X/100`) + `FabricFoliaEngine`
+  pairing (`recordTickWork`, called from `flushGameplayStaging`). Breakdown
+  showed the inter-tick drain burning p50~23ms (75% of tick work) while
+  the server slept ~19ms/cycle anyway.
+- **Adaptive drain gate** (`drainRedundant`: skip when previous cycle had
+  >=5ms sleep; pure + unit-tested): skips 68% of ticks live (4792 vs 2223
+  ran), engages exactly when behind. **A/B on the clump world:** p50
+  31.1->22.3ms, p95 77.8->62.3, p99 92.3->77.3, misses 33->9-18/100.
+- **`BODIES_PER_TASK` 256->64** (measured knob for the quiesce p95=46ms
+  tail; test derives from the constant). Post-change: p50 21.8, Region#1
+  7.1ms, max 222 (was 358). Remaining tail is pool-wide in-flight work
+  (8 workers mid-task), not task size — next lever is in-flight
+  attribution at quiesce time.
+- **Brand-crash fix:** `MinecraftServerMixin` brand hook read
+  `FabricFoliaMod.engine().config()` (NPE when `general.enabled=false`);
+  now reads the static `FabricFoliaMod.config()` (set before any early
+  return). New `ServerBrandTest` pins it.
+- **FINAL VERIFICATION (this turn, on the working tree): full suite
+  `./gradlew :common:test :fabric:test :api:test --rerun-tasks` rc=0 —
+  184 tests, 0 failures/errors (21 common files + 15 fabric files) — then
+  `./gradlew build` rc=0. Live boot: `Done (2.297s)`, 0 mixin errors,
+  20.0 TPS direct (100 ticks/5s), breakdown + `skipped(sleep-window)=405`
+  live in `/folia metrics` (gate-fix confirmed: pre-fix build had 0).
+  RCON `stop` -> all dimensions saved, ports free, `./gradlew --stop`,
+  no own processes left. Working tree uncommitted on main per the
+  standing rule (no commit without being asked).

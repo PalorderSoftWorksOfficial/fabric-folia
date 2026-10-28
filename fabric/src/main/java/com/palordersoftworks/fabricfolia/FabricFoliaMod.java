@@ -56,6 +56,11 @@ public class FabricFoliaMod implements ModInitializer {
 
 	/** The engine instance once started; null while disabled. */
 	private static volatile FabricFoliaEngine engine;
+
+	// The brand hook needs the config even when the engine never starts
+	// (general.enabled=false) or has already stopped — getServerModName()
+	// runs during loadLevel, before/after the engine's own lifecycle.
+	static volatile FoliaConfig config;
 	/** The vanilla intercept layer; non-null whenever the engine is live. */
 	private static volatile RegionTickInterceptor interceptor;
 	/** The startup compatibility scan result (for /folia compat). */
@@ -94,6 +99,9 @@ public class FabricFoliaMod implements ModInitializer {
 	}
 
 	private static void startEngine(MinecraftServer server) {
+		// Started before any early return: vanilla mode (general.enabled=false)
+		// needs stall evidence too — the watchdog dump alone cannot attribute.
+		com.palordersoftworks.fabricfolia.engine.StallProbe.start(server);
 		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.noteServerThread(Thread.currentThread());
 		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.installDiagnostics(Console::error);
 		Path configPath = Path.of("config", "fabric-folia.yml");
@@ -102,7 +110,9 @@ public class FabricFoliaMod implements ModInitializer {
 			config = FoliaConfig.at(configPath);
 			config.load();
 			config.freeze();
+			FabricFoliaMod.config = config;
 		} catch (ConfigException e) {
+			FabricFoliaMod.config = null;
 			// Actionable, not fatal-to-the-server: vanilla execution continues.
 			Console.error("Configuration is invalid - Fabric Folia is DISABLED and vanilla execution will be used. "
 					+ "Nothing is broken; fix the problem below and restart to enable regionized execution.");
@@ -110,6 +120,7 @@ public class FabricFoliaMod implements ModInitializer {
 			Console.error("  See TROUBLESHOOTING.md (configuration) and the generated template in config/fabric-folia.yml.");
 			return;
 		} catch (Exception e) {
+			FabricFoliaMod.config = null;
 			Console.error("Failed to load configuration - Fabric Folia is DISABLED. Problem: " + e);
 			return;
 		}
@@ -294,6 +305,7 @@ public class FabricFoliaMod implements ModInitializer {
 			// everything vanilla-inline — see FabricFoliaEngine.awaitStagedDrain).
 			current.endTickPhase();
 			current.awaitStagedDrain();
+			current.recordTickWork();
 		}
 	}
 
@@ -504,6 +516,7 @@ public class FabricFoliaMod implements ModInitializer {
 	private static volatile LegacyDispatchPolicy pendingPolicy;
 
 	private static void stopEngine(MinecraftServer server) {
+		com.palordersoftworks.fabricfolia.engine.StallProbe.stop();
 		// GPU resources are startup-lifecycle-bound; release before the drain
 		// (the subsystem degrades to CPU on its own if anything still queries).
 		com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.close();
@@ -536,6 +549,11 @@ public class FabricFoliaMod implements ModInitializer {
 	/** @return the live engine, or null when disabled (commands check this). */
 	public static FabricFoliaEngine engine() {
 		return engine;
+	}
+
+	/** @return the loaded configuration, or null when not loaded (vanilla execution). */
+	public static FoliaConfig config() {
+		return config;
 	}	/**
 	 * Containment sink for entity-hook failures (mixin hooks catch and route
 	 * here): bookkeeping must never break vanilla gameplay, so the failure is

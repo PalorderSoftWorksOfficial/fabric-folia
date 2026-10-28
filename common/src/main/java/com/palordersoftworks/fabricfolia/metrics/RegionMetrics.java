@@ -52,6 +52,15 @@ public final class RegionMetrics {
 	private final Map<Counter, AtomicLong> counters = new ConcurrentHashMap<>();
 	/** Per-region MSPT ring buckets, keyed by region id. */
 	private final Map<Long, MsptRing> msptByRegion = new ConcurrentHashMap<>();
+	/** Loop-to-loop server tick durations (deadline truth: p50/p95/p99 + misses). */
+	private final MsptRing serverTickRing = new MsptRing();
+	/** Ticks whose full cycle exceeded the 50ms deadline. */
+	private final AtomicLong serverTickMissedDeadlines = new AtomicLong();
+	/** Per-phase rings attributing one tick's work: quiesce/flush/drain/body. */
+	private final MsptRing quiesceRing = new MsptRing();
+	private final MsptRing flushRing = new MsptRing();
+	private final MsptRing drainRing = new MsptRing();
+	private final MsptRing bodyRing = new MsptRing();
 	/** Worker busy-tick counters (busy ticks per worker index). */
 	private final AtomicLong[] workerBusyTicks;
 	/** Worker tick totals since start (for utilization vs. elapsed ticks). */
@@ -107,6 +116,33 @@ public final class RegionMetrics {
 		}
 	}
 
+	/**
+	 * Records one full server-tick cycle (one tick-phase start to the next),
+	 * the loop-to-loop time vanilla's watchdog and the 20 TPS deadline care about.
+	 */
+	public void recordServerTick(long durationNanos) {
+		serverTickRing.record(durationNanos);
+		if (durationNanos > 50_000_000L) {
+			serverTickMissedDeadlines.incrementAndGet();
+		}
+	}
+
+	public void recordQuiesceWait(long nanos) {
+		quiesceRing.record(nanos);
+	}
+
+	public void recordFlush(long nanos) {
+		flushRing.record(nanos);
+	}
+
+	public void recordDrainWait(long nanos) {
+		drainRing.record(nanos);
+	}
+
+	public void recordTickBody(long nanos) {
+		bodyRing.record(nanos);
+	}
+
 	/** Observes the deepest total queue depth seen (call from dispatch scans). */
 	public void observeQueueDepth(long totalQueued) {
 		peakQueueDepth.accumulateAndGet(totalQueued, Math::max);
@@ -142,6 +178,20 @@ public final class RegionMetrics {
 		double utilization = 100.0 * workerBusyNanos.get() / (elapsedNanos * (double) workerBusyTicks.length);
 		lines.add(String.format(Locale.ROOT, "Workers: invocations=%d utilization~%.1f%% (busy nanos / elapsed / threads)",
 				workerInvocations.get(), utilization));
+		lines.add(String.format(Locale.ROOT,
+				"Server MSPT (tick work): p50=%.2f p95=%.2f p99=%.2f max=%.2f "
+						+ "missed(>50ms)=%d recent-window=%d/%d",
+				serverTickRing.percentileMillis(0.50), serverTickRing.percentileMillis(0.95),
+				serverTickRing.percentileMillis(0.99), serverTickRing.maxMillis(),
+				serverTickMissedDeadlines.get(),
+				serverTickRing.countAbove(50_000_000L), serverTickRing.count()));
+		lines.add(String.format(Locale.ROOT,
+				"Server MSPT breakdown: quiesce p50=%.2f p95=%.2f | flush p50=%.2f p95=%.2f | "
+						+ "drain p50=%.2f p95=%.2f | body p50=%.2f p95=%.2f",
+				quiesceRing.percentileMillis(0.50), quiesceRing.percentileMillis(0.95),
+				flushRing.percentileMillis(0.50), flushRing.percentileMillis(0.95),
+				drainRing.percentileMillis(0.50), drainRing.percentileMillis(0.95),
+				bodyRing.percentileMillis(0.50), bodyRing.percentileMillis(0.95)));
 		for (Map.Entry<Long, MsptRing> e : msptByRegion.entrySet()) {
 			MsptRing ring = e.getValue();
 			lines.add(String.format(Locale.ROOT, "Region #%d MSPT: last=%.2f avg=%.2f max=%.2f (n=%d)",
@@ -193,6 +243,32 @@ public final class RegionMetrics {
 
 		synchronized int count() {
 			return filled;
+		}
+
+		synchronized int countAbove(long nanos) {
+			int n = 0;
+			for (int i = 0; i < filled; i++) {
+				if (samples[i] > nanos) {
+					n++;
+				}
+			}
+			return n;
+		}
+
+		synchronized double percentileMillis(double p) {
+			if (filled == 0) {
+				return 0;
+			}
+			long[] copy = new long[filled];
+			System.arraycopy(samples, 0, copy, 0, filled);
+			java.util.Arrays.sort(copy);
+			int idx = (int) Math.ceil(p * filled) - 1;
+			if (idx < 0) {
+				idx = 0;
+			} else if (idx >= filled) {
+				idx = filled - 1;
+			}
+			return copy[idx] / 1_000_000.0;
 		}
 	}
 }

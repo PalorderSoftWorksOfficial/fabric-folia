@@ -31,7 +31,7 @@ class RegionStageHubParallelGateTest {
 	private static final int MIN_PARALLEL_DEFAULT = 32;
 	private static final int MIN_DISPATCH_DEFAULT = 64;
 	private static final int SKIP_THRESHOLD_DEFAULT = 3;
-	private static final int BODIES_PER_TASK_DEFAULT = 256;
+	private static final int BODIES_PER_TASK_DEFAULT = 64;
 
 	@AfterEach
 	void cleanup() {
@@ -187,8 +187,9 @@ class RegionStageHubParallelGateTest {
 		hub.flushStaged();
 
 		assertEquals(600, hub.pendingBodies(), "chunking must not change pending accounting");
-		assertEquals(3, scheduler.queueOf(region).size(),
-				"600 bodies at 256 per task must become exactly 3 queue tasks");
+		assertEquals((600 + BODIES_PER_TASK_DEFAULT - 1) / BODIES_PER_TASK_DEFAULT,
+				scheduler.queueOf(region).size(),
+				"600 bodies must chunk into exactly ceil(600/BODIES_PER_TASK) queue tasks");
 		scheduler.close();
 	}
 

@@ -18,7 +18,10 @@ public class MinecraftServerMixin {
 
     @Inject(method = "getServerModName", at = @At("HEAD"), cancellable = true)
     private void fabricfolia$brand(CallbackInfoReturnable<String> cir) {
-        FoliaConfig config = FabricFoliaMod.engine().config();
+        // Config, not engine: the engine is legitimately absent when
+        // general.enabled=false (vanilla mode) — dereferencing it crashed
+        // the server at loadLevel before the first tick.
+        FoliaConfig config = FabricFoliaMod.config();
 
         if (config != null && config.serverBrand()) {
             cir.setReturnValue(config.serverBrandName());

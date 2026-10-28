@@ -157,11 +157,13 @@ public final class RegionStageHub {
 
 	/**
 	 * Bodies per queue task. Bounds what a tick-start quiesce can wait on
-	 * (one in-flight task, not a whole round: 256 × ~46 µs worst-case clump
-	 * body ≈ 12 ms) and lets a slow region's round spread across windows.
+	 * (one in-flight task, not a whole round) and lets a slow region's
+	 * round spread across windows. Measured 2026-10-10 on the clump world:
+	 * at 256/task the quiesce tail hit p95=46ms (2-3 tasks in flight ×
+	 * ~12ms each); 64/task caps one in-flight task at ~3ms.
 	 * Non-final for tests.
 	 */
-	static volatile int BODIES_PER_TASK = 256;
+	static volatile int BODIES_PER_TASK = 64;
 
 	/**
 	 * Region slow-motion intake gate: when a region's queue already holds

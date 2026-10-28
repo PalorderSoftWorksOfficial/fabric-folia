@@ -84,6 +84,27 @@ public final class FabricFoliaEngine {
 			new java.util.concurrent.ConcurrentHashMap<>();
 	/** Server-wide gameplay metrics (mandate 35; reported by /folia metrics). */
 	private RegionMetrics metrics;
+	/** Previous tick-phase start (loop-to-loop MSPT pairing; 0 until first tick). */
+	private long lastTickPhaseStartNanos;
+	/** Full begin-to-begin cycle of the previous tick (health gating only). */
+	private volatile long lastCycleNanos;
+	/** Previous tick's recorded work duration (sleep = cycle − work). */
+	private volatile long lastTickWorkNanos;
+	/** This tick's phase durations, paired at recordTickWork(). */
+	private long thisTickQuiesceNanos;
+	private long lastTickFlushNanos;
+	private long lastTickDrainNanos;
+	/** Guards recordTickWork against double-recording within one tick. */
+	private boolean tickWorkRecorded;
+	/** Ticks where the drain was skipped because workers already had a sleep window. */
+	private final java.util.concurrent.atomic.AtomicLong drainSkippedBySleepWindow =
+			new java.util.concurrent.atomic.AtomicLong();
+	/**
+	 * Sleep in the previous cycle at or above which the inter-tick drain is
+	 * redundant: vanilla's own sleep already gave workers that window.
+	 * Non-final for tests (session-stable otherwise — no runtime flip API).
+	 */
+	static volatile long DRAIN_SLEEP_FLOOR_NANOS = 5_000_000L;
 	/** The public mod-facing API (mandate 41); created at bootstrap. */
 	private FabricFoliaApiImpl api;
 	/**
@@ -424,10 +445,16 @@ public final class FabricFoliaEngine {
 	 * never activated.
 	 */
 	public void flushGameplay() {
-		for (RegionStageHub hub : stagingHubsByWorld.values()) {
-			hub.flushStaged();
+		long start = System.nanoTime();
+		try {
+			for (RegionStageHub hub : stagingHubsByWorld.values()) {
+				hub.flushStaged();
+			}
+			com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayOnServerThread();
+		} finally {
+			lastTickFlushNanos = System.nanoTime() - start;
+			metrics.recordFlush(lastTickFlushNanos);
 		}
-		com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.replayOnServerThread();
 	}
 
 	/**
@@ -580,6 +607,13 @@ public final class FabricFoliaEngine {
 	}
 
 	public void beginTickPhase() {
+		long begin = System.nanoTime();
+		if (lastTickPhaseStartNanos != 0L) {
+			lastCycleNanos = begin - lastTickPhaseStartNanos;
+		}
+		lastTickPhaseStartNanos = begin;
+		thisTickQuiesceNanos = 0L;
+		tickWorkRecorded = false;
 		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
 		if (pool == null) {
 			return;
@@ -587,6 +621,8 @@ public final class FabricFoliaEngine {
 		long start = System.nanoTime();
 		boolean quiesced = pool.closeExecutionAndAwait(QUIESCE_TIMEOUT_MILLIS, this::pumpChunkExecutors);
 		long waited = System.nanoTime() - start;
+		thisTickQuiesceNanos = waited;
+		metrics.recordQuiesceWait(waited);
 		if (waited >= 1_000_000L) {
 			quiesceWaits.incrementAndGet();
 			quiesceWaitNanos.addAndGet(waited);
@@ -622,6 +658,25 @@ public final class FabricFoliaEngine {
 		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
 		if (pool != null) {
 			pool.setExecutionOpen(true);
+		}
+	}
+
+	/**
+	 * Records this tick's work duration (tick-phase start → flush + drain
+	 * complete), excluding vanilla's sleep-until-next-tick — the Spark-style
+	 * MSPT definition. Called at the end of the END_SERVER_TICK flush.
+	 */
+	public void recordTickWork() {
+		if (lastTickPhaseStartNanos != 0L && !tickWorkRecorded) {
+			tickWorkRecorded = true;
+			long work = System.nanoTime() - lastTickPhaseStartNanos;
+			metrics.recordServerTick(work);
+			long attributed = thisTickQuiesceNanos + lastTickFlushNanos + lastTickDrainNanos;
+			metrics.recordTickBody(Math.max(0L, work - attributed));
+			lastTickWorkNanos = work;
+			thisTickQuiesceNanos = 0L;
+			lastTickFlushNanos = 0L;
+			lastTickDrainNanos = 0L;
 		}
 	}
 
@@ -663,10 +718,22 @@ public final class FabricFoliaEngine {
 		if (stagingHubsByWorld.isEmpty()) {
 			return;
 		}
+		// Adaptive gate (measured 2026-10-10: the drain burned ~20-25ms on
+		// every tick even while the server slept ~19ms per cycle — vanilla's
+		// own sleep already hands workers that window). The drain exists for
+		// BEHIND ticks, where inter-tick sleep is ~0; skip it when the
+		// previous cycle demonstrably had sleep.
+		if (drainRedundant(lastCycleNanos, lastTickWorkNanos, DRAIN_SLEEP_FLOOR_NANOS)) {
+			drainSkippedBySleepWindow.incrementAndGet();
+			lastTickDrainNanos = 0L;
+			return;
+		}
 		long start = System.nanoTime();
 		boolean exhausted = drainWindow(DRAIN_WINDOW_MILLIS * 1_000_000L,
 				this::stagedDrainComplete, this::pumpChunkExecutors, FabricFoliaEngine::parkBriefly);
 		long waited = System.nanoTime() - start;
+		lastTickDrainNanos = waited;
+		metrics.recordDrainWait(waited);
 		if (waited >= 1_000_000L) {
 			drainWindowWaits.incrementAndGet();
 			drainWindowWaitNanos.addAndGet(waited);
@@ -714,6 +781,15 @@ public final class FabricFoliaEngine {
 	/** One drain-window park slice (the server thread sleeps in vanilla's own wait too). */
 	private static void parkBriefly(long nanos) {
 		java.util.concurrent.locks.LockSupport.parkNanos(nanos);
+	}
+
+	/**
+	 * @return true when the previous cycle's sleep alone already gave workers
+	 *         at least {@code floorNanos} of inter-tick window, making the
+	 *         drain redundant. Zeros (first tick / vanilla mode) = run the drain.
+	 */
+	static boolean drainRedundant(long cycleNanos, long workNanos, long floorNanos) {
+		return cycleNanos > 0L && workNanos > 0L && cycleNanos - workNanos >= floorNanos;
 	}
 
 	/** @return staged bodies dispatched but not yet completed across worlds (gauge). */
@@ -777,6 +853,7 @@ public final class FabricFoliaEngine {
 		lines.add("staged drain window (inter-tick): waits=" + drainWindowWaits.get()
 				+ " totalWaitMs=" + (drainWindowWaitNanos.get() / 1_000_000L)
 				+ " budgetExhausted=" + drainWindowExhausted.get()
+				+ " skipped(sleep-window)=" + drainSkippedBySleepWindow.get()
 				+ " budgetMs=" + DRAIN_WINDOW_MILLIS);
 		lines.add("worker quiesce at tick start: waits=" + quiesceWaits.get()
 				+ " timeouts=" + quiesceTimeouts.get()
