@@ -1250,6 +1250,47 @@ Named jar for inspection (project loom cache):
   RCON `stop` -> all dimensions saved, ports free, `./gradlew --stop`,
   no own processes left. Working tree uncommitted on main per the
   standing rule (no commit without being asked).
+- **Sync-audit + wakeup-signal turn (2026-10-28, on main, NOT committed):**
+  audited hot-path synchronization for the async/sync push — verdict:
+  `MsptRing.record` (5 calls/tick + per-region), stripe locks, and
+  ThreadLocals are all correctly scoped; the one real overhead was
+  `WorkerPool.submit()` broadcasting `signalAll()` per queue task, waking
+  all 8 workers dozens of times per tick while 7 re-parked (thundering
+  herd on the submit path). Changed to `signal()` — provably sufficient
+  (one task needs one worker; woken workers drain without parking; gate
+  reopen + shutdown keep broadcast). Two regression tests pin the
+  no-lost-wakeup contract (200-task open-gate burst, 50-task
+  closed-then-reopen burst). Full suite rc=0: **186 tests, 0 failures**
+  (184 + 2 new). No mixin changed ->  no live boot required; left
+  uncommitted (no commit asked this turn).
+- **Adversarial race-fix + permission + stress turn (2026-10-28, on main,
+  NOT committed):** (1) REAL RACE FIXED at the root in
+  `RegionTaskQueue.removeTask`: the counter decremented blindly after a
+  void CLQ-iterator remove, so a poll racing the scan drove pendingCount
+  permanently negative (masked by size()'s clamp, poisoning the
+  slow-motion gate + backlog math). Fix: decrement only when
+  `tasks.remove(entry)` confirms removal; keep scanning on lost races.
+  PROVEN: new 4-test hammer class fails on old code (`hammerKeepsExact-
+  Accounting FAILED`, exit 1 via stash check) and passes on fixed code.
+  (2) DEEPEN — `folia.command` umbrella node in `FoliaCommand.allowed()`
+  (LuckPerms: one grant unlocks the diagnostics tier) + per-sub
+  `folia.command.<sub>`, legacy atoms retained, OP default unchanged;
+  pure `grants()` + pinned node strings, 4-test contract class; help text
+  + class javadoc updated. (3) STRESS: pool churn test (60 rounds x
+  submit-30/quiesce/reopen, exact-once + clean idle) + queue hammer
+  (4 producers x 5k ops + racing drainer, exact balance). Full suite rc=0:
+  **195 tests, 0 failures** (186 + 9 new). Left uncommitted.
+- **HARDEN + COMMIT turn (2026-10-28, on main):** hardened weak tests to
+  catch silent bugs: MSPT test now asserts exact full lines (not
+  substrings) + a strict-> deadline boundary test (exactly 50ms is not a
+  miss); permission node pins use assertEquals; drain gate gets inclusive-
+  boundary cases (sleep == floor skips; 1ns under engages — the first
+  version of this test had the arithmetic inverted and FAILED, catching
+  the test bug before the code: fixed, green). New coverage: queue
+  lifecycle exactness (rehome/dropAll/partition counts + moved entry
+  identity) and pool shutdown abandonment (queued tasks never run after
+  shutdown, deterministic). Full suite rc=0: **200 tests, 0 failures**.
+  Committed + pushed per explicit user ask.
 - **DELIVERED 2026-10-28 as `9e5a77e` (pushed `f60fccb..9e5a77e` to
   origin main; user explicitly asked to commit+push):** pre-commit gate =
   full suite `--rerun-tasks` rc=0 (184 tests, 0 failures) + fresh live

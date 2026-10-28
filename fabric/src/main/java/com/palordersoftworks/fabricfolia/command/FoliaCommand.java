@@ -34,9 +34,11 @@ import java.util.function.Supplier;
  * <p><strong>Structure:</strong> an open information tier (/folia,
  * /folia version, /folia help) and an OP-default diagnostics tier
  * (regions, workers, scheduler, patches, health, threads, metrics, …).
- * Every subcommand requires the matching
- * {@code fabricfolia.command.folia.<sub>} permission atom — a permission
- * plugin can grant or revoke each one independently; defaults grant OP.</p>
+ * Every subcommand accepts the {@code folia.command} umbrella node (the
+ * LuckPerms-friendly grant: one node unlocks the whole diagnostics tier),
+ * the per-sub {@code folia.command.<sub>} node, or the matching legacy
+ * {@code fabricfolia.command.folia.<sub>} atom — a permission plugin can
+ * grant or revoke each one independently; OP is the default.</p>
  *
  * <p><strong>One source of truth (spec 36):</strong> every diagnostic reads
  * the real engine objects (regionizer, schedulers, worker pool, patch
@@ -55,18 +57,44 @@ public final class FoliaCommand {
 	}
 
 	private static Permission permission(String leaf) {
-		return Permission.Atom.create("fabricfolia.command.folia." + leaf);
+		return Permission.Atom.create(atomNode(leaf));
+	}
+
+	/** Legacy fine-grained node kept for existing permission setups. */
+	static String atomNode(String leaf) {
+		return "fabricfolia.command.folia." + leaf;
+	}
+
+	/** Umbrella node: one LuckPerms grant unlocks the whole diagnostics tier. */
+	static String umbrellaNode() {
+		return "folia.command";
+	}
+
+	/** Per-subcommand node under the umbrella (mirrors the legacy leaf set). */
+	static String subNode(String leaf) {
+		return "folia.command." + leaf;
 	}
 
 	/**
-	 * OP-default permission check: granted by the custom atom (fine-grained
-	 * override for permission plugins) OR by server owner level (OP default).
-	 * Level-based sets never contain custom atoms, so the OR is what makes
-	 * this OP-only-by-default rather than inaccessible-by-default.
+	 * Pure grant rule (unit-testable without a server): owner level, the
+	 * legacy atom, the {@code folia.command} umbrella, or the per-sub node.
+	 */
+	static boolean grants(boolean owner, boolean atom, boolean umbrella, boolean sub) {
+		return owner || atom || umbrella || sub;
+	}
+
+	/**
+	 * OP-default permission check: granted by owner level (OP default) OR
+	 * any of the three plugin nodes. Level-based sets never contain custom
+	 * atoms, so the OR is what makes this OP-only-by-default rather than
+	 * inaccessible-by-default.
 	 */
 	private static boolean allowed(CommandSourceStack source, String leaf) {
-		return source.permissions().hasPermission(permission(leaf))
-				|| source.permissions().hasPermission(Permissions.COMMANDS_OWNER);
+		var permissions = source.permissions();
+		return grants(permissions.hasPermission(Permissions.COMMANDS_OWNER),
+				permissions.hasPermission(permission(leaf)),
+				permissions.hasPermission(Permission.Atom.create(umbrellaNode())),
+				permissions.hasPermission(Permission.Atom.create(subNode(leaf))));
 	}
 
 	private static void send(CommandSourceStack source, List<MutableComponent> lines) {

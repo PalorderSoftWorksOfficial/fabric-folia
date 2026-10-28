@@ -110,7 +110,14 @@ public final class WorkerPool {
 		lock.lock();
 		try {
 			handoff.add(task);
-			wake.signalAll();
+			// Exactly one worker per task: a woken worker that finds more
+			// queued work loops straight back into takeTask without parking,
+			// so a burst of N submits drains fully with no lost wakeup.
+			// signalAll here would be a thundering herd — every staged batch
+			// submits dozens of queue tasks per tick, waking all 8 workers
+			// for each one while 7 immediately re-park. Broadcast stays only
+			// where every worker must re-check: gate reopen and shutdown.
+			wake.signal();
 		} finally {
 			lock.unlock();
 		}

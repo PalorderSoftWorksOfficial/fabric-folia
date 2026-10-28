@@ -77,4 +77,27 @@ class StagedDrainWindowTest {
 				TimeUnit.MILLISECONDS.toNanos(50), 0L, floor),
 				"no recorded work yet must run the drain");
 	}
+
+	@Test
+	void drainGateBoundaryIsInclusive() {
+		long floor = TimeUnit.MILLISECONDS.toNanos(5);
+		// Sleep exactly AT the floor counts as a sleep window (>= floor):
+		// an off-by-one here would either burn the drain every tick or
+		// skip it on the behind ticks it exists for.
+		assertTrue(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(50), TimeUnit.MILLISECONDS.toNanos(45), floor),
+				sleepOfExactly(floor) + " must make the drain redundant");
+		// Less work would mean MORE sleep; one nanosecond under the floor
+		// needs one nanosecond MORE work than the exact-boundary case.
+		assertFalse(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(50), TimeUnit.MILLISECONDS.toNanos(45) + 1, floor),
+				"one nanosecond under the floor must keep the drain engaged");
+		assertTrue(FabricFoliaEngine.drainRedundant(
+				TimeUnit.MILLISECONDS.toNanos(50), TimeUnit.MILLISECONDS.toNanos(45), 0L),
+				"a zero floor must treat any positive sleep as redundant");
+	}
+
+	private static String sleepOfExactly(long floor) {
+		return "sleep of exactly the " + floor + "ns floor";
+	}
 }

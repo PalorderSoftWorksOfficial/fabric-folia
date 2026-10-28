@@ -80,9 +80,13 @@ public final class RegionTaskQueue {
 	 * @return true if this queue held and removed the task
 	 */
 	public boolean removeTask(Runnable task) {
-		for (java.util.Iterator<Entry> it = tasks.iterator(); it.hasNext(); ) {
-			if (it.next().task() == task) {
-				it.remove();
+		// The counter follows the removal, never the lookup: a concurrent
+		// poll/drain can take the entry between our scan and the remove, and
+		// ConcurrentLinkedQueue's iterator remove is void — a blind decrement
+		// there drove pendingCount permanently negative (masked by size()'s
+		// clamp). Collection.remove answers whether anything actually left.
+		for (Entry entry : tasks) {
+			if (entry.task() == task && tasks.remove(entry)) {
 				pendingCount.decrementAndGet();
 				return true;
 			}

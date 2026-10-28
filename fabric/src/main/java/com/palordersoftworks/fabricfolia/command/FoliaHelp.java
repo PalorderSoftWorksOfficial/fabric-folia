@@ -36,7 +36,8 @@ public final class FoliaHelp {
 				"<aqua>/folia threads</aqua> <dark_gray>—</dark_gray> <gray>thread and region-ownership diagnostics</gray>",
 				"<aqua>/folia help [topic]</aqua> <dark_gray>—</dark_gray> <gray>this documentation</gray>",
 				FoliaMessages.RULE,
-				"<gray>Diagnostics are OP-only; /folia and /folia version are open. Use </gray><aqua>/folia help <topic></aqua><gray> for details.</gray>");
+				"<gray>Diagnostics need OP or the </gray><aqua>folia.command</aqua><gray> node (LuckPerms);</gray>",
+			"<gray>/folia and /folia version are open. Use </gray><aqua>/folia help <topic></aqua><gray> for details.</gray>");
 	}
 
 	/** @return the topic names accepted by /folia help <topic>. */
