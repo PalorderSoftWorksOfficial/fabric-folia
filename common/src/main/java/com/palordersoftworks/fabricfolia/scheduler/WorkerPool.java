@@ -200,6 +200,8 @@ public final class WorkerPool {
 			if (pump != null) {
 				try {
 					pump.run();
+				} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+					throw fatal;
 				} catch (Throwable t) {
 					// Vanilla's executor reports task failures itself; a pump
 					// error must never abort the barrier wait.
@@ -241,6 +243,8 @@ public final class WorkerPool {
 			if (pump != null) {
 				try {
 					pump.run();
+				} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+					throw fatal;
 				} catch (Throwable ignored) {
 					// reported by vanilla's executor; keep draining
 				}
@@ -262,6 +266,9 @@ public final class WorkerPool {
 		submit(() -> {
 			try {
 				task.run();
+		} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+				failureSink.accept(fatal);
+				throw fatal;
 			} catch (Throwable t) {
 				failureSink.accept(t);
 			}
@@ -297,6 +304,8 @@ public final class WorkerPool {
 						continue;
 					}
 					task.run();
+				} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+					throw fatal;
 				} catch (Throwable t) {
 					// The scheduler wraps tasks with its failure policy (spec 26);
 					// this catch is the last-resort guard so one bad task can

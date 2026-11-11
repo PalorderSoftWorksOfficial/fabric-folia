@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -73,6 +74,7 @@ public final class ScheduledTickDeferral {
 	private static final Map<LevelTicks<?>, RegionPendingTicks> CONTAINER_LEDGERS =
 			Collections.synchronizedMap(new ConcurrentHashMap<>());
 	private static final ConcurrentLinkedQueue<Entry<?>> PENDING = new ConcurrentLinkedQueue<>();
+	private static final AtomicInteger PENDING_COUNT = new AtomicInteger();
 	private static final AtomicLong DEFERRED_TOTAL = new AtomicLong();
 	private static final AtomicLong REPLAYED_TOTAL = new AtomicLong();
 	/** Ledger bookkeeping: capture-side records and drain-side releases. */
@@ -130,6 +132,7 @@ public final class ScheduledTickDeferral {
 		ACTIVE.set(false);
 		DRAIN_STAGING.remove();
 		PENDING.clear();
+		PENDING_COUNT.set(0);
 		CONTAINER_LEVELS.clear();
 		CONTAINER_LEDGERS.clear();
 	}
@@ -150,6 +153,7 @@ public final class ScheduledTickDeferral {
 			return false; // unregistered container: never defer, run vanilla
 		}
 		PENDING.add(new Entry<>(container, tick));
+		PENDING_COUNT.incrementAndGet();
 		DEFERRED_TOTAL.incrementAndGet();
 		// The pending-tick ledger records the capture in the capturing
 		// region's context (mandate 21): from now until drain execution the
@@ -196,12 +200,13 @@ public final class ScheduledTickDeferral {
 	 * container. Engine end-of-tick hook (after staged-body flush).
 	 */
 	public static void replayOnServerThread() {
-		if (PENDING.isEmpty()) {
+		if (PENDING_COUNT.get() <= 0) {
 			return;
 		}
 		long replayed = 0;
 		Entry<?> entry;
 		while ((entry = PENDING.poll()) != null) {
+			PENDING_COUNT.decrementAndGet();
 			scheduleVanilla(entry);
 			replayed++;
 		}
@@ -241,6 +246,6 @@ public final class ScheduledTickDeferral {
 
 	/** @return ticks currently buffered (diagnostics snapshot). */
 	public static int pendingCount() {
-		return PENDING.size();
+		return Math.max(0, PENDING_COUNT.get());
 	}
 }

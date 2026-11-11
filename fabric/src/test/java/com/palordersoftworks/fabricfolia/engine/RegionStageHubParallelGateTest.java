@@ -31,7 +31,7 @@ class RegionStageHubParallelGateTest {
 	private static final int MIN_PARALLEL_DEFAULT = 32;
 	private static final int MIN_DISPATCH_DEFAULT = 64;
 	private static final int SKIP_THRESHOLD_DEFAULT = 3;
-	private static final int BODIES_PER_TASK_DEFAULT = 64;
+	private static final int BODIES_PER_TASK_DEFAULT = 32;
 
 	@AfterEach
 	void cleanup() {
@@ -194,7 +194,7 @@ class RegionStageHubParallelGateTest {
 	}
 
 	@Test
-	void backedUpRegionSkipsTheNextRoundInsteadOfQueueing() throws Exception {
+	void backedUpRegionSkipsARoundExplicitlyAndResumes() throws Exception {
 		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
 				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
 		Region region = rz.addChunk(0, 0);
@@ -206,8 +206,6 @@ class RegionStageHubParallelGateTest {
 		ChunkPos chunk = new ChunkPos(0, 0);
 		AtomicInteger runs = new AtomicInteger();
 		long skippedBefore = RegionStageHub.regionBehindSkipped();
-		// Threshold 0: ANY outstanding queue counts as backed up. Round 1 has
-		// no queue at all (queueOf → null) → dispatches.
 		RegionStageHub.REGION_SKIP_THRESHOLD = 0;
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
@@ -215,25 +213,54 @@ class RegionStageHubParallelGateTest {
 		hub.flushStaged();
 		assertEquals(80, hub.pendingBodies(), "round 1 must dispatch");
 
-		// Never-started scheduler: the queue stays backed up. Round 2 must be
-		// SKIPPED for that region — not queued (backlog inflation), not run
-		// inline (the old server-tick stall).
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
 		hub.flushStaged();
-		assertEquals(80, hub.pendingBodies(), "a skipped round must not add backlog");
+		assertEquals(80, hub.pendingBodies(),
+				"a backed-up region must not grow the queue - the round is skipped, not piled on");
 		assertEquals(skippedBefore + 80, RegionStageHub.regionBehindSkipped(),
-				"every skipped body must be counted — never a silent drop");
+				"every skipped body must be counted - slow-motion is never silent");
 		assertEquals(0, runs.get(), "skipped bodies must not run inline either");
 
-		// Queue drains → intake resumes (slow-motion recovery).
 		scheduler.queueOf(region).dropAll();
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
 		hub.flushStaged();
-		assertEquals(160, hub.pendingBodies(), "staging must resume once the region catches up");
+		assertEquals(160, hub.pendingBodies(), "staging must resume once the region drains");
+		assertEquals(skippedBefore + 80, RegionStageHub.regionBehindSkipped(),
+				"no new skips once the region catches up");
+		scheduler.close();
+	}
+
+	@Test
+	void playerSliceIsExemptFromSlowMotion() throws Exception {
+		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
+				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
+		rz.addChunk(0, 0);
+		RegionScheduler scheduler = new RegionScheduler(rz, 1, ValidationMode.OFF,
+				r -> { }, message -> { });
+		RegionMetrics metrics = new RegionMetrics(1);
+		RegionStageHub hub = new RegionStageHub("test:world", rz, scheduler, metrics, message -> { });
+
+		ChunkPos chunk = new ChunkPos(0, 0);
+		AtomicInteger runs = new AtomicInteger();
+		RegionStageHub.REGION_SKIP_THRESHOLD = 0;
+		for (int i = 0; i < 80; i++) {
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
+		}
+		hub.flushStaged();
+		assertEquals(80, hub.pendingBodies(), "round 1 must dispatch");
+
+		for (int i = 0; i < 80; i++) {
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.PLAYER, new CountingBody(chunk, runs)));
+		}
+		long skippedBefore = RegionStageHub.regionBehindSkipped();
+		hub.flushStaged();
+		assertEquals(160, hub.pendingBodies(), "PLAYER bodies must always dispatch, even into a backed-up region");
+		assertEquals(skippedBefore, RegionStageHub.regionBehindSkipped(),
+				"PLAYER bodies must never count as slow-motion skips");
 		scheduler.close();
 	}
 }

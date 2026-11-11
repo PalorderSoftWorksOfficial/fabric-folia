@@ -644,12 +644,29 @@ public final class FabricFoliaEngine {
 			}
 			reportError("Worker quiesce timed out after " + QUIESCE_TIMEOUT_MILLIS
 					+ "ms (attempt " + attempt + ", " + pool.busyCount()
-					+ " task(s) still in flight) — proceeding with the server tick degraded"
+					+ " task(s) still in flight) — proceeding to fail-safe wait (Phase 1B: never ticking degraded)"
 					+ " [pumpCalls=" + quiescePumpCalls.get()
 					+ " pumpTasks=" + quiescePumpedTasks.get()
 					+ " pumpErrors=" + quiescePumpErrors.get()
 					+ " chunkQueue=" + pending
 					+ (quiescePumpLastError != null ? " lastPumpError=" + quiescePumpLastError : "") + "]");
+			// Phase 1B fail-safe: exclusive ownership is mandatory before the server thread
+			// touches gameplay state. A bounded timeout alone would let vanilla mutate state
+			// while workers are still in flight (corruption). Instead, keep pumping the
+			// chunk executors and waiting (logging each further second) until quiesced.
+			// Availability yields to correctness here by design.
+			while (pool.busyCount() > 0) {
+				boolean settled = pool.closeExecutionAndAwait(1_000L, this::pumpChunkExecutors);
+				waited = java.lang.System.nanoTime() - start;
+				thisTickQuiesceNanos = waited;
+				if (settled) {
+					break;
+				}
+				long extra = quiesceTimeouts.incrementAndGet();
+				reportError("Worker quiesce still pending (" + waited / 1_000_000L + "ms total, fail-safe wait #" + extra + ", " + pool.busyCount() + " task(s) in flight) - server tick held for exclusive ownership");
+			}
+			waited = java.lang.System.nanoTime() - start;
+			thisTickQuiesceNanos = waited;
 		}
 	}
 
@@ -849,7 +866,8 @@ public final class FabricFoliaEngine {
 				+ ", staging suppressed by backlog: " + RegionStageHub.suppressedBacklog());
 		lines.addAll(com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.metricsLines());
 		lines.add("bodies run inline at flush (no parallel headroom): " + RegionStageHub.inlineNoParallel()
-				+ ", skipped (region behind, slow-motion): " + RegionStageHub.regionBehindSkipped());
+				+ ", skipped (region behind, slow-motion): " + RegionStageHub.regionBehindSkipped()
+				+ ", staging probes served from tick cache: " + RegionStageHub.tickProbeCacheHits());
 		lines.add("staged drain window (inter-tick): waits=" + drainWindowWaits.get()
 				+ " totalWaitMs=" + (drainWindowWaitNanos.get() / 1_000_000L)
 				+ " budgetExhausted=" + drainWindowExhausted.get()

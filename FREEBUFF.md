@@ -1291,6 +1291,119 @@ Named jar for inspection (project loom cache):
   identity) and pool shutdown abandonment (queued tasks never run after
   shutdown, deterministic). Full suite rc=0: **200 tests, 0 failures**.
   Committed + pushed per explicit user ask.
+- **PHASE 1 CORRECTNESS turn (2026-11-01, on main, NOT committed):**
+  implemented the task Phase 1 root fixes. (A) ELIMINATED silent gameplay tick
+  loss: `RegionStageHub` slow-motion intake gate (`REGION_SKIP_THRESHOLD`) REMOVED -
+  a backed-up region now always enqueues every staged body and drains on its own
+  cadence (slower region, never a lossy one); memory stays bounded via the staging
+  backlog gate + scheduler drain budget. Counter/metric retained reading 0 for compat.
+  (B) Fail-safe quiescence: `beginTickPhase` no longer proceeds degraded on timeout -
+  it keeps pumping chunk executors and waiting (logging each second) until exclusive
+  ownership is established; availability yields to correctness by design. (C) O(1)
+  pending accounting: `ServerThreadDeferral` + `ScheduledTickDeferral` replaced linear
+  `CLQ.size()` with AtomicInteger counters (no more O(n) hot-path size checks).
+  (D) Fatal-error propagation: `VirtualMachineError|ThreadDeath|LinkageError` now
+  rethrow through every scheduler/deferral catch site (stage-hub runBody, pool pumps,
+  submitShared, worker last-resort guard, scheduler drain/outer/tick-end) instead of
+  being swallowed; ordinary failures keep the existing isolate-and-report behavior.
+  (1A-audit) `RegionTickInterceptor` pass backpressure extracted to a named, tested
+  policy (`isPassBackpressured`, 512-task boundary): random-tick pass skips are
+  delay-only, explicitly NOT exact parity; structural bodies never use that gate.
+  Tests: rewrote the skip-pinning test to `backedUpRegionNeverLosesARound` (160/240
+  pending, skipped-counter flat), +5 new (deferral fatal propagation + exactness,
+  hub fatal-through-inline-flush, sibling isolation, policy boundary + pin).
+  Full suite `--rerun-tasks` rc=0: **205 tests, 0 failures** (200 + 5 new) + `build` rc=0.
+  No mixin changed, so no live boot was required. Left uncommitted (no commit asked).
+  LIVE BENCHMARK 2026-11-09 (Phase 1 tree, clump world, NOT committed):
+  boot `Done (2.161s)`, 0 mixin errors, 0 ERROR lines, 12/12 patches, backfill=194.
+  Census 3,987 armor stands (same single-region O(n^2) pathology as runs D/E).
+  RESULT: server WATCHDOG-KILLED ~75s after boot (BUILD FAILED). Only 1 `Can`t keep
+  up` before the kill. TPS window0 = 3.75 (run E pre-change on this world: 23.7/30.1/22.0).
+  Server MSPT p50=311ms (body p50=274ms); skipped(retired gate)=0, dropped=0,
+  suppressed-by-backlog=285k with 36 suspend/35 resume flaps; workers ~1.3% utilized,
+  quiesce waits=71 timeouts=0, pending=7595 bounded.
+  ROOT CAUSE (crash-2026-11-09_17.11.25-server.txt, server thread RUNNABLE): kill stack is
+  `ArmorStand.pushEntities:202 -> Level.getEntities:652 -> EntitySection.getEntities:39`
+  reached via `Level.runInline` <- our staging redirect <- `guardEntityTick` — i.e. the
+  backlog-suspension inline fallback ran the WHOLE clump on the server thread and one
+  `pushEntities` call took the full 60s. The old skip gate never let a full clump round
+  run inline; the no-loss design + suspend-to-inline fallback recreated the exact
+  pre-existing single-tick stall deterministically. Fail-safe quiesce was never the
+  limiter (0 timeouts). Suspend-flap (36/35 in 75s) is the secondary defect.
+  VERDICT: correctness holds (zero loss: skipped=0 dropped=0, all bodies executed or
+  inline-run), but throughput on a single-region O(n^2) overload went 24 -> 3.75 TPS ->
+  watchdog death. Stable-alive options: (b) suspension hysteresis (stay inline = vanilla
+  ~5 TPS, proven alive in run D) or (c) cut per-body cost (collision/pushEntities work).
+  Repro note: kill took one boot (~75s), so future A/B iterations are cheap.
+  Cleanup done: RCON stop N/A (watchdog killed it), ports free, our Gradle daemon
+  stopped, only foreign PIDs left alone (CurseForge client, crash_assistant, other
+  server-26.2.jar). `bench1.py` removed; tree = Phase 1 files + this note.
+  LOWEST-MSPT TURN 2026-11-09 (user directive: target the lowest MSPT without errors;
+  same 3,987-stand clump world, NOT committed):
+  (1) Restored EXPLICIT counted region slow-motion (reverted the Phase 1A removal):
+  backed-up regions skip intake (counted, PLAYER + retry replays exempt) instead of
+  piling rounds onto the queue or forcing whole-clump inline batches. Restored code
+  was retained in-tree as a `false &&`-guarded block, so the re-enable is exact.
+  (2) Backlog-latch HYSTERESIS: engage at pending > limit, release at < limit/2
+  (was: immediate release at the limit — flapped 36x/75 s under overload).
+  (3) Stale metrics label fixed (`skipped (region behind, slow-motion)`).
+  (4) BODIES_PER_TASK 64 -> 32 A/B (smaller in-flight tail at tick-start quiesce).
+  Tests: rewrote `backedUpRegionNeverLosesARound` to pin new behavior (round skipped
+  + counted, queue flat, nothing inline, resumes after drain) + new PLAYER-exemption
+  test; FatalTest cleanup constant synced to 32. Suite `--rerun-tasks` rc=0:
+  206 tests, 0 failures; `build` rc=0.
+  LIVE (3 boots, all `Done`, 0 mixin errors, 0 ERROR/Exception lines throughout):
+  boot2 (64/task): TPS 20.06/19.99/20.00 -> 12-min soak 20.00/20.00/19.98,
+  0 Can`t-keep-up, 0 watchdog, MSPT p50=20.69 p95=52.51 p99=61.04,
+  quiesce p50=15.00 p95=46.19, drain p50=24.38, body p50=4.49, Region#1 avg=10.16,
+  skipped=69.4M (counted), suppressed=0, pending=1749 steady, timeouts=0.
+  boot3 (32/task): TPS 20.10/20.00/20.03, 0 warnings/errors in 10 min,
+  MSPT p50=20.68 p95=50.49 p99=62.18, quiesce p50=10.20 (-32%) p95=31.26 (-32%),
+  drain p50=24.07, body p50=4.92, Region#1 avg=8.98 (-12%), recent misses 6/100,
+  timeouts=0. WINNER: 32/task kept (strict improvement, TPS identical, zero errors).
+  vs pre-change baseline (watchdog death in ~75 s, MSPT p50=311): throughput 3.75 ->
+  20.0 TPS (+433%), MSPT p50 311 -> 20.7 (-93%), and the server lives indefinitely.
+  HONEST FLOOR: the remaining ~20 ms p50 is productive region drain (20 ms budget,
+  workers draining the clump backlog) + quiesce on in-flight tails — both wait, not
+  CPU. Cutting the drain budget would game the number while slowing the region`s
+  tick rate; pushEntities surgery would only move worker-side CPU (Region#1), not
+  server MSPT (already ~5 ms typical-tick work). So this is the MSPT floor for this
+  workload without changing region tick-rate or vanilla parity. Region#1 still
+  ticks the clump at its own pace (Folia contract, fully counted).
+  Cleanup: RCON `stop` x3 clean (`Engine shut down cleanly`, worlds saved), ports
+  free, our Gradle daemon stopped; leftover daemons 54800/73604 unproven-foreign,
+  left alone with the other pre-existing PIDs. Bench scripts removed.
+  STRESS + PERF-FIX TURN 2026-11-10 (user: benchmark and stress again, fix the bugs that arise;
+  same clump world, all boots `Done`, 0 ERROR/Exception lines throughout, NOT committed):
+  BASELINE (3,987 stands): TPS 20.06/20.00/20.00, MSPT p50=5.64, recent misses 0/100.
+  STRESS A (+4,000 stands at 2000,2000, 2 regions, ~8k total): TPS held 20, MSPT p50=31.40,
+  recent misses 10/100, 2x `Can`t keep up` (40 ticks/2s each, cause: forceload worldgen +
+  saturation onset). STRESS B (+4,000 at orig clump, 11,987 total): TPS 20.06/20.03/19.93,
+  MSPT p50=50.74 p95=55.60, recent misses 64/100, +1 can`t-keep-up — server at zero headroom.
+  JFR (real server PID 69248; first capture hit foreign client PID 73952 and was discarded):
+  workers 82% of samples in EntitySection.getEntities via ArmorStand.pushEntities (vanilla
+  O(n2), correctly parallel across regions, serial within a region = Folia parity, NOT a bug).
+  Server thread: ~30% in the 3x3 getChunkNow probe chain (vanillaNeighborhoodLoaded per body:
+  9 chunk lookups x 12k bodies x 20tps = 2.2M/s incl. CF getNow/reportJoin + ticket-map gets),
+  7% in ownerOfChunk (ReentrantLock structureLock per body at flush).
+  PERF FIX (root cause, not suppression): tick-scoped per-chunk caches in RegionStageHub —
+  loadedTickCache (stage-time 3x3 probe) + ownerTickCache (flush-time resolve); both cleared
+  at the end of every flushStaged (staleness within a tick is safe: execution-time
+  bodyNeighborhoodLoaded stays uncached as the net; merges during quiesced flush impossible).
+  New counter `staging probes served from tick cache` in /folia metrics. New test class
+  RegionStageHubTickCacheTest (2: staleness-scoping via ChunkResidency flips + flush-boundary
+  owner re-resolution after removeChunk); suite 208 tests 0 failures, build rc=0.
+  AFTER (same 11,987 load, reboot): TPS 20.13/20.00/20.00, MSPT p50=20.17 (-60%), p95=40.85,
+  p99=46.90, recent misses 64/100 -> 1/100, flush p50 1.99->0.51 (-74%), body p50 10.69->4.94
+  (-54%), pending 6456->2785, cache hits 103.6M, 0 can`t-keep-up in 10 min. REMAINING p50
+  (~20ms) is quiesce 15.1 + drain 20.8 WAITS (single-writer correctness, not CPU) — the honest
+  floor for 12k stands; region rounds still serial-per-region by design (Folia parity).
+  Collateral: fixed a comment-swallowed duplicate `int limit` line in RegionStageHub (cosmetic,
+  compiled fine). Cleanup: RCON `stop` clean x2, ports free, our daemon stopped, bench scripts
+  removed. REMAINING: bot-gameplay pass on this build; multi-region spread-entity benchmark.
+  Open: live TPS validation of the removed skip path; engine-level quiesce fail-safe
+  live exercise; worker replacement after a fatal worker death; `deactivate()` clear-vs-capture race.
+
 - **DELIVERED 2026-10-28 as `9e5a77e` (pushed `f60fccb..9e5a77e` to
   origin main; user explicitly asked to commit+push):** pre-commit gate =
   full suite `--rerun-tasks` rc=0 (184 tests, 0 failures) + fresh live

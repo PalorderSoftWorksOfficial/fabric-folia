@@ -687,6 +687,9 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 						if (taskDur > 1_000_000_000L) {
 							diagnostics.accept("SLOW TASK in " + region + ": " + (taskDur / 1_000_000) + "ms");
 						}
+					} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+						failurePolicy.reportTaskFailure(region, "queued task", fatal);
+						throw fatal;
 					} catch (Throwable t) {
 						// Spec 26/§34: failures are contained by the per-region
 						// failure policy — reported with full context, never silent;
@@ -703,7 +706,10 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			}
 			// 2. The region tick body (engine hook; vanilla integration later).
 			regionTickBody.accept(region);
-		} catch (Throwable t) {
+		} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+				diagnostics.accept("Region tick fatal in " + region + ": " + fatal);
+				throw fatal;
+			} catch (Throwable t) {
 			diagnostics.accept("Region tick failed in " + region + ": " + t);
 		} finally {
 			ThreadOwnership.exit(token);
@@ -724,7 +730,10 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			}
 			try {
 				regionizer.completeTick(region, duration);
-			} catch (Throwable t) {
+			} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+					diagnostics.accept("FATAL: region tick-end protocol hit a fatal error for " + region + ": " + fatal);
+					throw fatal;
+				} catch (Throwable t) {
 				// Spec 26 fail-safe: a region whose tick-END protocol failed can
 				// never be dispatched again safely — abort it (listener drops
 				// its queue) and report loudly rather than wedge it as eternal

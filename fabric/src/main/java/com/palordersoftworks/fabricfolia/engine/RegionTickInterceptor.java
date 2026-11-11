@@ -152,7 +152,24 @@ public final class RegionTickInterceptor {
 	 * results reads world state, which is single-writer per chunk by
 	 * construction: each chunk belongs to exactly one region, invariant 1).</p>
 	 */
-	public void flushPass(String worldName) {
+		/**
+	 * Random-tick pass backpressure limit: a region whose queue already holds
+	 * more than this many tasks skips the current random-tick pass for that
+	 * region only. Defined simulation policy (Phase 1A audit): random ticks
+	 * are advisory, probabilistic gameplay - skipping one pass under saturation
+	 * delays growth/melting by one pass interval; the next pass re-offers the
+	 * same chunks, so no chunk is ever permanently lost. This is NOT exact
+	 * simulation parity for the skipped pass, and is never claimed as such.
+	 * Structural work (entity/block-entity/scheduled-tick bodies) is never
+	 * subject to this gate: RegionStageHub always enqueues every staged body.
+	 */
+	static final int PASS_BACKPRESSURE_QUEUE_TASKS = 512;
+
+	static boolean isPassBackpressured(int queueSize) {
+		return queueSize > PASS_BACKPRESSURE_QUEUE_TASKS;
+	}
+
+public void flushPass(String worldName) {
 		Pass pass = passesByWorld.get(worldName);
 		if (pass == null) {
 			return;
@@ -208,7 +225,7 @@ public final class RegionTickInterceptor {
 			// movement and packet handling share this queue). The next pass
 			// re-offers the same chunks: nothing is lost but one pass's delay.
 			RegionTaskQueue queue = attachment.scheduler().queueOf(region);
-			if (queue != null && queue.size() > 512) {
+			if (queue != null && isPassBackpressured(queue.size())) {
 				backpressured++;
 				continue;
 			}

@@ -139,4 +139,29 @@ class ServerThreadDeferralTest {
 			assertEquals(expected, replayed.get(w), "worker " + w + " mutations replay in submission order");
 		}
 	}
+
+	@Test
+	void fatalErrorPropagatesAndAccountingStaysExact() {
+		List<String> ran = new ArrayList<>();
+		ServerThreadDeferral.defer(() -> ran.add("before"));
+		LinkageError fatal = new LinkageError("boom");
+		ServerThreadDeferral.defer(() -> {
+			throw fatal;
+		});
+		ServerThreadDeferral.defer(() -> ran.add("after"));
+		assertEquals(3, ServerThreadDeferral.pendingCount());
+		long failedBefore = ServerThreadDeferral.failed();
+		try {
+			ServerThreadDeferral.drainAll();
+			assertTrue(false, "drainAll must propagate fatal errors, not swallow them");
+		} catch (LinkageError e) {
+			assertTrue(e == fatal, "the exact fatal instance must propagate");
+		}
+		assertEquals(failedBefore + 1, ServerThreadDeferral.failed());
+		assertEquals(1, ServerThreadDeferral.pendingCount(), "entries behind the fatal stay queued");
+		assertEquals(List.of("before"), ran);
+		assertEquals(1, ServerThreadDeferral.drainAll(), "the remaining entry must still replay");
+		assertEquals(List.of("before", "after"), ran);
+		assertEquals(0, ServerThreadDeferral.pendingCount());
+	}
 }

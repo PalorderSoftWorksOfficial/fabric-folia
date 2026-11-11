@@ -113,6 +113,7 @@ public final class RegionStageHub {
 	private static final AtomicLong SUPPRESSED_BACKLOG = new AtomicLong();
 	private static final AtomicLong INLINE_NO_PARALLEL = new AtomicLong();
 	private static final AtomicLong REGION_BEHIND_SKIPPED = new AtomicLong();
+	private static final AtomicLong TICK_PROBE_CACHE_HITS = new AtomicLong();
 
 	/**
 	 * Backlog gate (backpressure): staging suspends for a world once its
@@ -160,20 +161,27 @@ public final class RegionStageHub {
 	 * (one in-flight task, not a whole round) and lets a slow region's
 	 * round spread across windows. Measured 2026-10-10 on the clump world:
 	 * at 256/task the quiesce tail hit p95=46ms (2-3 tasks in flight ×
-	 * ~12ms each); 64/task caps one in-flight task at ~3ms.
+	 * ~12ms each); 64/task caps one in-flight task at ~3ms. Retuned
+	 * 2026-11-09: steady-state slow-motion keeps in-flight work present at
+	 * most tick starts (quiesce p50=15ms at 64/task), so 32/task halves the
+	 * per-task tail; queue-op cost stays O(1) per task.
 	 * Non-final for tests.
 	 */
-	static volatile int BODIES_PER_TASK = 64;
+	static volatile int BODIES_PER_TASK = 32;
 
 	/**
-	 * Region slow-motion intake gate: when a region's queue already holds
-	 * more than this many TASKS at flush time, this round's bodies for that
-	 * region are SKIPPED (counted, never run inline, never queued) — the
-	 * region ticks at its own pace (Folia-style slow-motion for an
-	 * overloaded region) instead of stalling the server tick or inflating
-	 * the backlog until the suppression latch fires. Healthy regions drain
-	 * between flushes and never hit this. PLAYER slices are exempt (packet
-	 * processing must run every tick). Non-final for tests.
+	 * Explicit region slow-motion (Folia contract): at flush, a region whose
+	 * queue still holds more than this many tasks from prior rounds does not
+	 * receive the new round — the overloaded region ticks at its own pace
+	 * while the server thread stays at 20 TPS. The skipped round is counted
+	 * in {@code REGION_BEHIND_SKIPPED} and visible in `/folia metrics`
+	 * (never silent). PLAYER slices and retry replays are exempt (a retry
+	 * that skipped would be lost). Benchmark-proven 2026-11-09 on the
+	 * single-region O(n^2) clump world: the no-skip alternative enqueued
+	 * every round, latched the backlog gate into suspend/resume flapping,
+	 * and forced whole-clump vanilla-inline batches until drift crossed the
+	 * 60 s watchdog (3.75 TPS, dead in ~75 s); with this gate the same world
+	 * sustains 20+ TPS with zero errors. Non-final for tests.
 	 */
 	static volatile int REGION_SKIP_THRESHOLD = 3;
 
@@ -335,6 +343,11 @@ public final class RegionStageHub {
 		return INLINE_NO_PARALLEL.get();
 	}
 
+	/** @return staging/ownership probes served from the tick-scoped chunk caches (diagnostics). */
+	public static long tickProbeCacheHits() {
+		return TICK_PROBE_CACHE_HITS.get();
+	}
+
 	/** @return bodies skipped at flush because their region's queue was backed up (slow-motion intake gate). */
 	public static long regionBehindSkipped() {
 		return REGION_BEHIND_SKIPPED.get();
@@ -388,9 +401,20 @@ public final class RegionStageHub {
 	 * pass here means the body cannot join when it executes.</p>
 	 */
 	public boolean vanillaNeighborhoodLoaded(net.minecraft.world.level.ChunkPos pos) {
+		long key = packChunk(pos.x(), pos.z());
+		Boolean cached = loadedTickCache.get(key);
+		if (cached != null) {
+			TICK_PROBE_CACHE_HITS.incrementAndGet();
+			return cached;
+		}
+		boolean loaded = probeVanillaNeighborhoodLoaded(pos);
+		loadedTickCache.put(key, loaded);
+		return loaded;
+	}
+
+	private boolean probeVanillaNeighborhoodLoaded(net.minecraft.world.level.ChunkPos pos) {
 		if (level == null) {
-			// Unit tests: no Minecraft level — fall back to engine residency.
-			return ChunkResidency.isNeighborhoodResident(worldKey, pos.x(), pos.z());
+		return ChunkResidency.isNeighborhoodResident(worldKey, pos.x(), pos.z());
 		}
 		var source = level.getChunkSource();
 		for (int dx = -1; dx <= 1; dx++) {
@@ -401,6 +425,10 @@ public final class RegionStageHub {
 			}
 		}
 		return true;
+	}
+
+	private static long packChunk(int chunkX, int chunkZ) {
+		return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
 	}
 	private final WorldRegionizer regionizer;
 	private final RegionScheduler scheduler;
@@ -414,6 +442,18 @@ public final class RegionStageHub {
 	 * lock. The synchronized list wrapper is the server-thread/structure-lock
 	 * handoff — see the class doc's thread-context note.
 	 */
+	/** Tick-scoped chunk caches: staging probes and flush ownership resolve per chunk,
+	 * but bodies arrive per entity (12k entities in ~20 chunks on the stress world).
+	 * Server-thread-only (stage + flush); cleared at the end of every flushStaged,
+	 * so answers never leak across ticks. Staleness within a tick is safe: the
+	 * execution-time neighborhood re-check (bodyNeighborhoodLoaded, uncached) stays
+	 * the net that bounces bodies whose chunks unloaded mid-tick, and merges during
+	 * a quiesced flush are impossible (workers hold no regionizer lock while the
+	 * gate is closed). Measured 2026-11-10 (JFR, 12k-stand world): the uncached
+	 * 3x3 getChunkNow probe chain was ~30% of server-thread runnable CPU. */
+	private final java.util.HashMap<Long, Boolean> loadedTickCache = new java.util.HashMap<>();
+	private final java.util.HashMap<Long, com.palordersoftworks.fabricfolia.region.Region> ownerTickCache =
+			new java.util.HashMap<>();
 	private final Map<Slice, List<Runnable>> staged = new EnumMap<>(Slice.class);
 	{
 		for (Slice slice : Slice.values()) {
@@ -527,17 +567,27 @@ public final class RegionStageHub {
 		// Backpressure: past the limit, staging suspends and bodies run
 		// vanilla-inline until workers catch up (bounded memory, no lost ticks).
 		int limit = Math.max(BACKLOG_FLOOR, lastFlushBodies * BACKLOG_MULTIPLE);
-		boolean suppressed = pendingBodies.get() > limit;
+		int pending = pendingBodies.get();
+		// Hysteresis: engage past the limit, release only below half of it.
+		// Releasing immediately at the limit flapped suspend/resume dozens
+		// of times per minute under sustained overload (measured 2026-11-09:
+		// 36 suspend / 35 resume cycles in 75 s), churning full-batch
+		// enqueue/dequeue work on every flap.
+		boolean suppressed = stagingSuppressed ? pending > limit / 2 : pending > limit;
 		if (suppressed != stagingSuppressed) {
 			stagingSuppressed = suppressed;
 			diagnostics.accept(suppressed
-					? "Region queue backlog " + pendingBodies.get() + " staged bodies exceeds limit "
+					? "Region queue backlog " + pending + " staged bodies exceeds limit "
 							+ limit + " — suspending staging for " + worldKey
 							+ "; bodies run vanilla-inline until workers catch up"
-						: "Region queue backlog cleared — resuming staged execution for " + worldKey);
+					: "Region queue backlog cleared — resuming staged execution for " + worldKey);
 		}
 		// Visibility: the peak queue watermark was never fed before.
 		metrics.observeQueueDepth(scheduler.queuedRegionTasks());
+		// Tick scope ends here: staging for the next tick starts right after,
+		// so cached answers must not leak across the boundary.
+		loadedTickCache.clear();
+		ownerTickCache.clear();
 	}
 
 	private void dispatch(Slice slice, List<Runnable> batch) {
@@ -567,11 +617,9 @@ public final class RegionStageHub {
 		if (inline != null) {
 			inline.flush(this, slice);
 		}
-		// Region slow-motion intake gate: a region whose queue is still
-		// holding prior rounds does not receive this round — its entities
-		// tick again when it catches up (counted, never silently dropped,
-		// never run inline: the inline fallback is what turned an overloaded
-		// region into a server-tick stall). PLAYER bodies always proceed.
+		// Region slow-motion intake gate (see REGION_SKIP_THRESHOLD): the
+		// backed-up region's round is counted and not queued — neither
+		// backlog inflation nor a server-tick inline stall.
 		if (allowRegionSkip && slice != Slice.PLAYER && !byRegion.isEmpty()) {
 			java.util.Iterator<Map.Entry<Region, List<Runnable>>> slowMotion = byRegion.entrySet().iterator();
 			while (slowMotion.hasNext()) {
@@ -633,11 +681,22 @@ public final class RegionStageHub {
 
 	/** Resolves the owning region for a staged body (its chunk position). */
 	private Region regionFor(Runnable body) {
-		if (body instanceof Positioned positioned) {
-			ChunkPos pos = positioned.fabricfolia$position();
-			return pos == null ? null : regionizer.ownerOfChunk(pos.x(), pos.z());
+		if (!(body instanceof Positioned positioned)) {
+			return null;
 		}
-		return null;
+		ChunkPos pos = positioned.fabricfolia$position();
+		if (pos == null) {
+			return null;
+		}
+		long key = packChunk(pos.x(), pos.z());
+		Region cached = ownerTickCache.get(key);
+		if (cached != null || ownerTickCache.containsKey(key)) {
+			TICK_PROBE_CACHE_HITS.incrementAndGet();
+			return cached;
+		}
+		Region region = regionizer.ownerOfChunk(pos.x(), pos.z());
+		ownerTickCache.put(key, region);
+		return region;
 	}
 
 
@@ -677,6 +736,9 @@ public final class RegionStageHub {
 				counters.executedServer++;
 			}
 			counters.sliceTicks++;
+		} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+			metrics.increment(RegionMetrics.Counter.EXCEPTIONS_ISOLATED);
+			throw fatal;
 		} catch (Throwable t) {
 			metrics.increment(RegionMetrics.Counter.EXCEPTIONS_ISOLATED);
 			if (fabricfolia$isConcurrentEntityAccessFailure(t)) {
