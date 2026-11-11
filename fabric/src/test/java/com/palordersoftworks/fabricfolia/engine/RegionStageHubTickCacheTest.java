@@ -86,6 +86,37 @@ class RegionStageHubTickCacheTest {
 	}
 
 	@Test
+	void sameChunkRunsGroupWithoutPerBodyMapLookups() throws Exception {
+		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
+				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
+		rz.addChunk(0, 0);
+		rz.addChunk(0, 1);
+		RegionScheduler scheduler = new RegionScheduler(rz, 1, ValidationMode.OFF,
+				r -> { }, message -> { });
+		RegionMetrics metrics = new RegionMetrics(1);
+		RegionStageHub hub = hub(rz, scheduler, metrics);
+		ChunkPos first = new ChunkPos(0, 0);
+		ChunkPos second = new ChunkPos(0, 1);
+		AtomicInteger runs = new AtomicInteger();
+		long hitsBefore = RegionStageHub.dispatchRunHits();
+		for (int i = 0; i < 40; i++) {
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(first, runs)));
+		}
+		for (int i = 0; i < 40; i++) {
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(second, runs)));
+		}
+		hub.flushStaged();
+
+		assertEquals(80, hub.pendingBodies(),
+				"two-chunk batches must dispatch to region queues, never inline");
+		// 40 + 40 consecutive same-chunk bodies = 78 run-length hits (the
+		// first body of each run resolves normally).
+		assertEquals(hitsBefore + 78, RegionStageHub.dispatchRunHits(),
+				"consecutive same-chunk bodies must skip the per-body map lookups");
+		scheduler.close();
+	}
+
+	@Test
 	void flushBoundaryClearsTheOwnerCache() throws Exception {
 		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
 				new AtomicInteger(1)::getAndIncrement, System::nanoTime);

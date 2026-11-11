@@ -867,7 +867,8 @@ public final class FabricFoliaEngine {
 		lines.addAll(com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.metricsLines());
 		lines.add("bodies run inline at flush (no parallel headroom): " + RegionStageHub.inlineNoParallel()
 				+ ", skipped (region behind, slow-motion): " + RegionStageHub.regionBehindSkipped()
-				+ ", staging probes served from tick cache: " + RegionStageHub.tickProbeCacheHits());
+				+ ", staging probes served from tick cache: " + RegionStageHub.tickProbeCacheHits()
+				+ ", dispatch run-length hits: " + RegionStageHub.dispatchRunHits());
 		lines.add("staged drain window (inter-tick): waits=" + drainWindowWaits.get()
 				+ " totalWaitMs=" + (drainWindowWaitNanos.get() / 1_000_000L)
 				+ " budgetExhausted=" + drainWindowExhausted.get()
