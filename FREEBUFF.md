@@ -1401,6 +1401,26 @@ Named jar for inspection (project loom cache):
   Collateral: fixed a comment-swallowed duplicate `int limit` line in RegionStageHub (cosmetic,
   compiled fine). Cleanup: RCON `stop` clean x2, ports free, our daemon stopped, bench scripts
   removed. REMAINING: bot-gameplay pass on this build; multi-region spread-entity benchmark.
+  50K-SPREAD STRESS + RUN-LENGTH FIX, PUSHED 2026-11-11 (b479791, b822b25, b8c97d9):
+  Killed the 12k clump world clean (kill 11,987 stands, forceload remove all), built 20
+  forceloaded patches (5x5 chunks each, 720 chunks, spread +-2600 blocks), summoned 61,425
+  armor stands randomly scattered (single RCON caps at tick pace: 259/s empty, ~12/s at 20k+;
+  two summoners accidentally overlapped after a runner restart — final count 61,425, kept as-is).
+  61k RESULT: TPS 10.7/10.0/9.6, MSPT p50=101.8, flush 9.5, body 52.1, 0 errors, workers evenly
+  saturated (~1.0-1.5k JFR samples each — multi-region parallelism working). JFR named the next
+  engine hotspot: dispatch grouping ~30% of server runnable (HashMap probe + grouping-map lookup
+  per body); vanilla per-entity ticking-range checks 36% + tracking 17% (parity costs, untouchable).
+  RUN-LENGTH FIX: same packed chunk key as previous body reuses region+group (vanilla iterates
+  sections in order, ~99.7% hit rate, 201M hits). SAME 61,425 world: TPS 10.1 -> 12.5 (+23%),
+  MSPT p50 101.8 -> 80.2, flush 9.5 -> 1.9 (-80%). Remaining tick = vanilla per-region pushEntities
+  rounds + vanilla server-side iteration/tracking (Folia parity). Test +209/209 green, build rc=0.
+  OPS NOTES: (1) a pre-fix RCON stop hung the Server thread in vanilla stopServer ->
+  waitUntilNextTick -> light-engine tryScheduleUpdate spin (1 core, ports closed, world lock held);
+  had to taskkill; new launcher then failed on the stale lock until the kill landed. All 61,425
+  stands survived (no rollback). Post-fix stop was clean in 90s. (2) runner restarted mid-turn;
+  /tmp analysis files survived but python-vs-bash /tmp mapping differs — copy JFR dumps into the
+  tree before analyzing with windows python. (3) NEXT: 12k-clump regression check on the new build;
+  vanilla A/B at 61k was skipped (no engine kill-switch found); region-round length now sets the pace.
   Open: live TPS validation of the removed skip path; engine-level quiesce fail-safe
   live exercise; worker replacement after a fatal worker death; `deactivate()` clear-vs-capture race.
 
