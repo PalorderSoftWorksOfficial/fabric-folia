@@ -1439,3 +1439,10 @@ Named jar for inspection (project loom cache):
 - Jenkinsfile now creates the Windows and macOS checks as parallel scripted branches. Each branch has a one-minute timeout around agent allocation. If no matching agent becomes available, the branch emits an explicit skip message and the pipeline continues. If an agent is available, it checks out the source, runs the platform-appropriate Gradle wrapper, and publishes JUnit results even when tests fail. Actual test failures still fail the branch; non-timeout interruptions are rethrown.
 - `CROSS_OS` remains opt-in and defaults to false. Main checkout, Linux tests, build, artifact archive, and Fill publishing are unchanged.
 - Commit: `57565a7b1e2bb7649dd0b5f673d4b3a8bd644861` (`ci: skip cross-os matrix agents that are unavailable`). Jenkins has not yet run the updated pipeline, so runtime behavior still needs confirmation on the next build; this change only modifies the Jenkinsfile.
+
+
+### 2026-11-13 — Jenkins Fill publisher permission fix (committed to main)
+- Jenkins build #16 verified the cross-OS change: with CROSS_OS=false, that optional stage was skipped; Linux test stage passed; ./gradlew build passed; artifacts archived and fingerprinted.
+- The first failure was isolated to Publish to Fill. Direct execution of /home/administrator/palorder-fill/jenkins-publish.sh returned shell exit 126 (Permission denied), after which the pipeline correctly failed rather than reporting success.
+- Jenkinsfile now checks that the publisher script is readable by the Jenkins user, then invokes it explicitly with bash "$PUBLISH_SCRIPT" instead of requiring the script's executable bit. Publisher arguments, artifact selection, version/build/channel values, and failure propagation are unchanged. If the script is not readable or the parent path cannot be traversed, the pipeline emits an explicit diagnostic.
+- Commit: 988b58744feaf44a400fa6e0319c21375160b57d (ci: invoke fill publisher through bash). The next Jenkins run must confirm that the Jenkins account can read the file and that the publisher itself succeeds; no live publisher invocation was performed during this change.
