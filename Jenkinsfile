@@ -5,7 +5,7 @@ pipeline {
         booleanParam(
             name: 'CROSS_OS',
             defaultValue: false,
-            description: 'Also run the test protocol on windows/macos labelled agents (requires agents labelled windows and macos; default builds stay on the primary agent)'
+            description: 'Also run tests on windows/macos labelled agents; unavailable agents are skipped after a 1-minute queue timeout'
         )
     }
 
@@ -41,35 +41,43 @@ pipeline {
 
         stage('Cross-OS Test') {
             when {
-                beforeAgent true
                 expression { params.CROSS_OS == true }
             }
-            matrix {
-                axes {
-                    axis {
-                        name 'TARGET_OS'
-                        values 'windows', 'macos'
-                    }
-                }
-                agent { label "${TARGET_OS}" }
-                stages {
-                    stage('Cross-OS tests') {
-                        steps {
-                            checkout scm
-                            script {
-                                if (isUnix()) {
-                                    sh 'chmod +x ./gradlew && ./gradlew :common:test :fabric:test :api:test --stacktrace'
-                                } else {
-                                    bat 'gradlew.bat :common:test :fabric:test :api:test --stacktrace'
+            steps {
+                script {
+                    def crossOsBranches = [:]
+
+                    ['windows', 'macos'].each { targetOs ->
+                        def osLabel = targetOs
+                        crossOsBranches[osLabel] = {
+                            try {
+                                timeout(time: 1, unit: 'MINUTES') {
+                                    node(osLabel) {
+                                        checkout scm
+                                        try {
+                                            if (isUnix()) {
+                                                sh 'chmod +x ./gradlew && ./gradlew :common:test :fabric:test :api:test --stacktrace'
+                                            } else {
+                                                bat 'gradlew.bat :common:test :fabric:test :api:test --stacktrace'
+                                            }
+                                        } finally {
+                                            junit allowEmptyResults: true, testResults: '*/build/test-results/test/*.xml'
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        post {
-                            always {
-                                junit allowEmptyResults: true, testResults: '*/build/test-results/test/*.xml'
+                            } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException e) {
+                                def timedOut = e.causes.size() > 0 && e.causes.every { cause ->
+                                    cause.getClass().getName().contains('ExceededTimeout')
+                                }
+                                if (!timedOut) {
+                                    throw e
+                                }
+                                echo "Skipping ${osLabel} cross-OS tests: no matching Jenkins agent became available within 1 minute."
                             }
                         }
                     }
+
+                    parallel crossOsBranches
                 }
             }
         }
