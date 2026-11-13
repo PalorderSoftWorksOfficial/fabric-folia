@@ -118,11 +118,17 @@ pipeline {
                         exit 1
                     fi
 
+                    PUBLISH_SCRIPT="/home/administrator/palorder-fill/jenkins-publish.sh"
+                    if [ ! -r "$PUBLISH_SCRIPT" ]; then
+                        echo "Publish script is missing or not readable by Jenkins: $PUBLISH_SCRIPT"
+                        exit 1
+                    fi
+
                     ARTIFACT_COUNT=0
 
                     for ARTIFACT in fabric/build/libs/*.jar; do
                         [ -f "$ARTIFACT" ] || continue
-                        /home/administrator/palorder-fill/jenkins-publish.sh fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT"
+                        bash "$PUBLISH_SCRIPT" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT"
                         ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
                     done
 
