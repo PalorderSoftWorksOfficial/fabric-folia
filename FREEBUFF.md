@@ -1432,3 +1432,10 @@ Named jar for inspection (project loom cache):
   saved, ports free, no own processes). Push initially rejected (remote
   had `f60fccb` Jenkinsfile-only publish step); rebased our 1 commit
   onto it (no overlap, no force) and pushed clean. Tree clean after push.
+
+
+### 2026-11-13 — Jenkins cross-OS queue fix (committed to main)
+- Root cause: enabling `CROSS_OS` launched a declarative matrix with `agent { label "windows" }` and `agent { label "macos" }`. The Jenkins controller has no matching agents, so both matrix branches stayed queued and prevented the build from reaching Build/Archive/Publish. The regular Gradle test stage had already passed.
+- Jenkinsfile now creates the Windows and macOS checks as parallel scripted branches. Each branch has a one-minute timeout around agent allocation. If no matching agent becomes available, the branch emits an explicit skip message and the pipeline continues. If an agent is available, it checks out the source, runs the platform-appropriate Gradle wrapper, and publishes JUnit results even when tests fail. Actual test failures still fail the branch; non-timeout interruptions are rethrown.
+- `CROSS_OS` remains opt-in and defaults to false. Main checkout, Linux tests, build, artifact archive, and Fill publishing are unchanged.
+- Commit: `57565a7b1e2bb7649dd0b5f673d4b3a8bd644861` (`ci: skip cross-os matrix agents that are unavailable`). Jenkins has not yet run the updated pipeline, so runtime behavior still needs confirmation on the next build; this change only modifies the Jenkinsfile.
