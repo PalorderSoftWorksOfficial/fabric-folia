@@ -104,42 +104,45 @@ pipeline {
         }
 
         stage('Publish to Fill') {
-            when {
-                branch 'main'
-            }
-            steps {
-                sh '''
-                    set -eu
-                    set +x
-
-                    VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
-                    if [ -z "$VERSION" ]; then
-                        echo "mod_version was not found in gradle.properties"
-                        exit 1
-                    fi
-
-                    PUBLISH_SCRIPT="/home/administrator/palorder-fill/jenkins-publish.sh"
-                    if [ ! -r "$PUBLISH_SCRIPT" ]; then
-                        echo "Publish script is missing or not readable by Jenkins: $PUBLISH_SCRIPT"
-                        exit 1
-                    fi
-
-                    ARTIFACT_COUNT=0
-
-                    for ARTIFACT in fabric/build/libs/*.jar; do
-                        [ -f "$ARTIFACT" ] || continue
-                        bash "$PUBLISH_SCRIPT" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT"
-                        ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
-                    done
-
-                    if [ "$ARTIFACT_COUNT" -eq 0 ]; then
-                        echo "No publishable Fabric-Folia artifacts found"
-                        exit 1
-                    fi
-                '''
-            }
-        }
+    when {
+        branch 'main'
     }
+    steps {
+        sh '''
+            set -eu
+            set +x
+
+            VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
+            if [ -z "$VERSION" ]; then
+                echo "mod_version was not found in gradle.properties"
+                exit 1
+            fi
+
+            PUBLISH_HELPER="/usr/local/sbin/fill-publish-fabric-folia"
+            if [ ! -x "$PUBLISH_HELPER" ]; then
+                echo "Fill publishing helper is missing or not executable"
+                exit 1
+            fi
+
+            ARTIFACT_COUNT=0
+
+            for ARTIFACT in fabric/build/libs/*.jar; do
+                [ -f "$ARTIFACT" ] || continue
+                chmod 0644 "$ARTIFACT"
+                ARTIFACT_PATH="$(realpath -e "$ARTIFACT")"
+
+                sudo -n -u administrator -- "$PUBLISH_HELPER" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT_PATH"
+
+                ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+            done
+
+            if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+                echo "No publishable Fabric-Folia artifacts found"
+                exit 1
+            fi
+        '''
+    }
+}
 
     post {
         success {
