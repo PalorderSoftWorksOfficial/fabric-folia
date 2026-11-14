@@ -15,7 +15,6 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -26,9 +25,7 @@ pipeline {
             steps {
                 sh '''
                     set -e
-
                     chmod +x ./gradlew
-
                     ./gradlew :common:test :fabric:test :api:test --stacktrace
                 '''
             }
@@ -86,9 +83,7 @@ pipeline {
             steps {
                 sh '''
                     set -e
-
                     chmod +x ./gradlew
-
                     ./gradlew build --stacktrace
                 '''
             }
@@ -104,45 +99,46 @@ pipeline {
         }
 
         stage('Publish to Fill') {
-    when {
-        branch 'main'
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    set -eu
+                    set +x
+
+                    VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
+                    if [ -z "$VERSION" ]; then
+                        echo "mod_version was not found in gradle.properties"
+                        exit 1
+                    fi
+
+                    PUBLISH_HELPER="/usr/local/sbin/fill-publish-fabric-folia"
+                    if [ ! -x "$PUBLISH_HELPER" ]; then
+                        echo "Fill publishing helper is missing or not executable: $PUBLISH_HELPER"
+                        exit 1
+                    fi
+
+                    ARTIFACT_COUNT=0
+
+                    for ARTIFACT in fabric/build/libs/*.jar; do
+                        [ -f "$ARTIFACT" ] || continue
+                        chmod 0644 "$ARTIFACT"
+                        ARTIFACT_PATH="$(realpath -e "$ARTIFACT")"
+
+                        sudo -n -u administrator -- "$PUBLISH_HELPER" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT_PATH"
+
+                        ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
+                    done
+
+                    if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+                        echo "No publishable Fabric-Folia artifacts found"
+                        exit 1
+                    fi
+                '''
+            }
+        }
     }
-    steps {
-        sh '''
-            set -eu
-            set +x
-
-            VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
-            if [ -z "$VERSION" ]; then
-                echo "mod_version was not found in gradle.properties"
-                exit 1
-            fi
-
-            PUBLISH_HELPER="/usr/local/sbin/fill-publish-fabric-folia"
-            if [ ! -x "$PUBLISH_HELPER" ]; then
-                echo "Fill publishing helper is missing or not executable"
-                exit 1
-            fi
-
-            ARTIFACT_COUNT=0
-
-            for ARTIFACT in fabric/build/libs/*.jar; do
-                [ -f "$ARTIFACT" ] || continue
-                chmod 0644 "$ARTIFACT"
-                ARTIFACT_PATH="$(realpath -e "$ARTIFACT")"
-
-                sudo -n -u administrator -- "$PUBLISH_HELPER" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT_PATH"
-
-                ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
-            done
-
-            if [ "$ARTIFACT_COUNT" -eq 0 ]; then
-                echo "No publishable Fabric-Folia artifacts found"
-                exit 1
-            fi
-        '''
-    }
-}
 
     post {
         success {
