@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -199,6 +200,8 @@ class WorkerPoolGateTest {
 		}
 		pool.shutdown(5_000);
 		assertFalse(ran.get(), "abandoned queued tasks must never execute after shutdown");
+		assertEquals(10, pool.abandonedTaskCount());
+		assertThrows(java.util.concurrent.RejectedExecutionException.class, () -> pool.submit(() -> { }));
 	}
 
 	@Test

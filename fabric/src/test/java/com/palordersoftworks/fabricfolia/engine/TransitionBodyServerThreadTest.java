@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,31 +53,32 @@ class TransitionBodyServerThreadTest {
 			engine.attachWorld("minecraft:overworld", 10, null);
 			WorldRegionizer regionizer = engine.regionizerFor("minecraft:overworld");
 			regionizer.addChunk(0, 0); // source region exists…
-			// …but (5000,5000) is unowned: the destination must be the global
-			// scheduler (its dedicated dispatch thread), whose context kind is
-			// NOT REGION, and not the server thread — vanilla-state mutations
-			// here defer to the server thread through ServerThreadDeferral.
+			// The destination has no region owner, so the body runs during the
+			// server tick in GLOBAL context before vanilla world mutation.
 
 			ThreadOwnership.enterRegion(regionizer.ownerOfChunk(0, 0));
 
-			AtomicReference<String> bodyThreadName = new AtomicReference<>();
+			AtomicReference<Thread> bodyThread = new AtomicReference<>();
 			AtomicBoolean bodyContextWasRegion = new AtomicBoolean(true);
+			AtomicReference<com.palordersoftworks.fabricfolia.api.ThreadContext.Kind> bodyContext =
+					new AtomicReference<>();
 			CountDownLatch ran = new CountDownLatch(1);
 			boolean dispatched = RegionTransitions.dispatchKeyed(engine,
 					"minecraft:overworld", 5000, 5000, null, () -> {
-						bodyThreadName.set(Thread.currentThread().getName());
+						bodyThread.set(Thread.currentThread());
+						bodyContext.set(ThreadOwnership.current().kind());
 						bodyContextWasRegion.set(ThreadOwnership.current().kind()
-								== com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION);
+							== com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION);
 						ran.countDown();
 					});
 			assertTrue(dispatched);
+			engine.beginTickPhase();
 			assertTrue(ran.await(10, TimeUnit.SECONDS));
 			assertFalse(bodyContextWasRegion.get(),
-					"unowned-destination bodies must never run in a REGION context "
-							+ "(region ticks may not mutate ticket state)");
-			assertTrue(bodyThreadName.get().contains("FabricFolia-Global"),
-					"the unowned hop runs on the global dispatch thread, observed: "
-							+ bodyThreadName.get());
+					"unowned-destination bodies must never run in a REGION context");
+			assertEquals(Thread.currentThread(), bodyThread.get());
+			assertEquals(com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.GLOBAL,
+					 bodyContext.get());
 		} finally {
 			engine.shutdown(5000);
 		}

@@ -5,13 +5,19 @@ pipeline {
         booleanParam(
             name: 'CROSS_OS',
             defaultValue: false,
-            description: 'Also run tests on windows/macos labelled agents; unavailable agents are skipped after a 1-minute queue timeout'
+            description: 'Run tests on Windows and macOS agents when available; unavailable agents are skipped after a one-minute allocation timeout.'
+        )
+        booleanParam(
+            name: 'PRODUCTION_RELEASE',
+            defaultValue: false,
+            description: 'Publish only when checked-in runtime, compatibility and independent-review evidence approves this exact commit.'
         )
     }
 
     options {
         timestamps()
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
     }
 
     stages {
@@ -21,45 +27,40 @@ pipeline {
             }
         }
 
-        stage('Test') {
+        stage('Tests') {
             steps {
                 sh '''
-                    set -e
-                    chmod +x ./gradlew
-                    ./gradlew :common:test :fabric:test :api:test --stacktrace
+                    set -euo pipefail
+                    bash ./gradlew --no-daemon clean :common:test :api:test :fabric:test --stacktrace
                 '''
             }
             post {
                 always {
-                    junit allowEmptyResults: true, testResults: '*/build/test-results/test/*.xml'
+                    junit allowEmptyResults: false, testResults: '*/build/test-results/test/TEST-*.xml'
                 }
             }
         }
 
-        stage('Cross-OS Test') {
+        stage('Cross-OS Tests') {
             when {
                 expression { params.CROSS_OS == true }
             }
             steps {
                 script {
-                    def crossOsBranches = [:]
-
-                    ['windows', 'macos'].each { targetOs ->
-                        def osLabel = targetOs
-                        crossOsBranches[osLabel] = {
+                    def branches = [:]
+                    ['windows', 'macos'].each { target ->
+                        def labelName = target
+                        branches[labelName] = {
                             try {
                                 timeout(time: 1, unit: 'MINUTES') {
-                                    node(osLabel) {
+                                    node(labelName) {
                                         checkout scm
-                                        try {
-                                            if (isUnix()) {
-                                                sh 'chmod +x ./gradlew && ./gradlew :common:test :fabric:test :api:test --stacktrace'
-                                            } else {
-                                                bat 'gradlew.bat :common:test :fabric:test :api:test --stacktrace'
-                                            }
-                                        } finally {
-                                            junit allowEmptyResults: true, testResults: '*/build/test-results/test/*.xml'
+                                        if (isUnix()) {
+                                            sh 'bash ./gradlew --no-daemon :common:test :api:test :fabric:test --stacktrace'
+                                        } else {
+                                            bat 'gradlew.bat --no-daemon :common:test :api:test :fabric:test --stacktrace'
                                         }
+                                        junit allowEmptyResults: false, testResults: '*/build/test-results/test/TEST-*.xml'
                                     }
                                 }
                             } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException e) {
@@ -69,12 +70,11 @@ pipeline {
                                 if (!timedOut) {
                                     throw e
                                 }
-                                echo "Skipping ${osLabel} cross-OS tests: no matching Jenkins agent became available within 1 minute."
+                                echo 'Skipping optional cross-OS tests because the requested agent was unavailable.'
                             }
                         }
                     }
-
-                    parallel crossOsBranches
+                    parallel branches
                 }
             }
         }
@@ -82,59 +82,67 @@ pipeline {
         stage('Build') {
             steps {
                 sh '''
-                    set -e
-                    chmod +x ./gradlew
-                    ./gradlew build --stacktrace
+                    set -euo pipefail
+                    bash ./gradlew --no-daemon build :api:javadocJar :api:sourcesJar --stacktrace
                 '''
             }
         }
 
-        stage('Archive Build') {
+        stage('Verify Candidate') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    python3 scripts/verify_release.py --build-number "$BUILD_NUMBER"
+                '''
+            }
+        }
+
+        stage('Archive Candidate') {
             steps {
                 archiveArtifacts(
-                    artifacts: 'fabric/build/libs/*.jar',
-                    fingerprint: true
+                    artifacts: 'build/release-candidate/**',
+                    fingerprint: true,
+                    allowEmptyArchive: false
                 )
             }
         }
 
-        stage('Publish to Fill') {
+        stage('Production Approval') {
             when {
-                branch 'main'
+                expression { params.PRODUCTION_RELEASE == true }
             }
             steps {
                 sh '''
-                    set -eu
+                    set -euo pipefail
+                    python3 scripts/verify_release.py --build-number "$BUILD_NUMBER" --production-release
+                '''
+            }
+        }
+
+        stage('Publish Stable') {
+            when {
+                allOf {
+                    branch 'main'
+                    expression { params.PRODUCTION_RELEASE == true }
+                }
+            }
+            steps {
+                sh '''
+                    set -euo pipefail
                     set +x
 
                     VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -n 1)"
-                    if [ -z "$VERSION" ]; then
-                        echo "mod_version was not found in gradle.properties"
-                        exit 1
-                    fi
-
+                    ARTIFACT="fabric/build/libs/fabric-folia-${VERSION}.jar"
                     PUBLISH_HELPER="/usr/local/sbin/fill-publish-fabric-folia"
-                    if [ ! -x "$PUBLISH_HELPER" ]; then
-                        echo "Fill publishing helper is missing or not executable: $PUBLISH_HELPER"
-                        exit 1
-                    fi
 
-                    ARTIFACT_COUNT=0
+                    test -n "$VERSION"
+                    test -s "$ARTIFACT"
+                    test -x "$PUBLISH_HELPER"
 
-                    for ARTIFACT in fabric/build/libs/*.jar; do
-                        [ -f "$ARTIFACT" ] || continue
-                        chmod 0644 "$ARTIFACT"
-                        ARTIFACT_PATH="$(realpath -e "$ARTIFACT")"
+                    chmod 0644 "$ARTIFACT"
+                    ARTIFACT_PATH="$(realpath -e "$ARTIFACT")"
 
-                        sudo -n -u administrator -- "$PUBLISH_HELPER" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT_PATH"
-
-                        ARTIFACT_COUNT=$((ARTIFACT_COUNT + 1))
-                    done
-
-                    if [ "$ARTIFACT_COUNT" -eq 0 ]; then
-                        echo "No publishable Fabric-Folia artifacts found"
-                        exit 1
-                    fi
+                    sudo -n -u administrator -- "$PUBLISH_HELPER" fabric-folia "$VERSION" "$BUILD_NUMBER" stable "$ARTIFACT_PATH"
                 '''
             }
         }
@@ -142,15 +150,13 @@ pipeline {
 
     post {
         success {
-            echo 'Fabric-Folia build completed successfully.'
+            echo 'Automated candidate validation passed. Candidate validation is not production approval.'
         }
-
         failure {
-            echo 'Fabric-Folia build failed.'
+            echo 'Fabric-Folia validation or release failed.'
         }
-
         always {
-            echo "Build finished: ${currentBuild.currentResult}"
+            echo 'Build finished.'
         }
     }
 }

@@ -371,7 +371,15 @@ public final class RegionPlayerRouting {
 		}
 		ChunkPos pos = player.chunkPosition();
 		Region owner = regionizer.ownerOfChunk(pos.x(), pos.z());
-		return owner != null && owner.regionId() == current.regionId();
+		return isWorldQualifiedOwner(worldKey, owner, current);
+	}
+
+
+	static boolean isWorldQualifiedOwner(String worldKey, Region owner,
+			com.palordersoftworks.fabricfolia.api.RegionInfo current) {
+		return worldKey != null && owner != null && current != null
+				&& worldKey.equals(current.world())
+				&& owner.regionId() == current.regionId();
 	}
 
 	/** Counts a packet that vanilla re-homed to the shared server queue. */

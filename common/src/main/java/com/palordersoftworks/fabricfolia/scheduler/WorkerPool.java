@@ -55,6 +55,7 @@ public final class WorkerPool {
 	private final Condition wake = lock.newCondition();
 	private final java.util.ArrayDeque<Task> handoff = new java.util.ArrayDeque<>();
 	private final AtomicBoolean running = new AtomicBoolean(true);
+	private final java.util.concurrent.atomic.AtomicLong abandonedTaskCount = new java.util.concurrent.atomic.AtomicLong();
 	private final CountDownLatch terminated;
 	/** Workers currently executing a task (diagnostics: busy vs. waiting). */
 	private final java.util.concurrent.atomic.AtomicInteger busyCount = new java.util.concurrent.atomic.AtomicInteger();
@@ -107,8 +108,12 @@ public final class WorkerPool {
 	 * the task waits in the handoff queue and the next free worker takes it.
 	 */
 	public void submit(Task task) {
+		java.util.Objects.requireNonNull(task, "task");
 		lock.lock();
 		try {
+			if (!running.get()) {
+				throw new java.util.concurrent.RejectedExecutionException("Worker pool is shut down");
+			}
 			handoff.add(task);
 			// Exactly one worker per task: a woken worker that finds more
 			// queued work loops straight back into takeTask without parking,
@@ -136,6 +141,10 @@ public final class WorkerPool {
 	/** @return how many workers are executing a task right now (diagnostics). */
 	public int busyCount() {
 		return busyCount.get();
+	}
+
+	public long abandonedTaskCount() {
+		return abandonedTaskCount.get();
 	}
 
 	/** @return false while the server thread's tick phase owns gameplay state. */
@@ -230,10 +239,15 @@ public final class WorkerPool {
 	 * {@link #closeExecutionAndAwait(long, Runnable)}.
 	 */
 	public void shutdown(long timeoutMillis, Runnable pump) throws InterruptedException {
-		running.set(false);
-		setExecutionOpen(true); // parked phase-A workers must wake to exit
 		lock.lock();
 		try {
+			running.set(false);
+			executionOpen = true;
+			int abandoned = handoff.size();
+			handoff.clear();
+			if (abandoned > 0) {
+				abandonedTaskCount.addAndGet(abandoned);
+			}
 			wake.signalAll();
 		} finally {
 			lock.unlock();
@@ -275,6 +289,23 @@ public final class WorkerPool {
 		});
 	}
 
+	private boolean beginTask(Task task) {
+		lock.lock();
+		try {
+			if (!running.get()) {
+				abandonedTaskCount.incrementAndGet();
+				return false;
+			}
+			if (!executionOpen) {
+				handoff.addFirst(task);
+				return false;
+			}
+			return true;
+		} finally {
+			lock.unlock();
+		}
+	}
+
 	private void workerLoop(int workerIndex) {
 		ThreadOwnership.clear();
 		try {
@@ -296,11 +327,7 @@ public final class WorkerPool {
 				// read — so a task that passes the check below is waited for.
 				busyCount.incrementAndGet();
 				try {
-					if (!executionOpen) {
-						// Gate closed between the top check and here: return the
-						// task unstarted (it stays queued; the gate-open scan
-						// dispatches it) and let the barrier observe our busy--.
-						requeueFront(task);
+					if (!beginTask(task)) {
 						continue;
 					}
 					task.run();

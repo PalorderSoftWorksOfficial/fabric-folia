@@ -11,11 +11,11 @@ plugins {
 	alias(libs.plugins.fabricLoom)
 }
 
-// Distributable jar name: folia-<version>.jar (version from mod_version).
+// Distributable jar name: fabric-folia-<version>.jar (version from mod_version).
 // Everything downstream discovers the jar dynamically (compat harness scans
 // fabric/build/libs), so the name is free to carry the brand.
 base {
-	archivesName = "folia"
+	archivesName = "fabric-folia"
 }
 
 dependencies {

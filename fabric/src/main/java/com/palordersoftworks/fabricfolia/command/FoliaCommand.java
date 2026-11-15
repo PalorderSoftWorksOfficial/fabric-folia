@@ -367,7 +367,7 @@ public final class FoliaCommand {
 						return 0;
 					}
 					send(context.getSource(), FoliaMessages.info(
-							"Stopping the server: region work will drain and worlds will be saved."));
+							"Requesting a server halt. Use Minecraft /stop for routine saved shutdown."));
 					context.getSource().getServer().halt(false);
 					return 1;
 				}));
@@ -385,6 +385,8 @@ public final class FoliaCommand {
 					List<MutableComponent> lines = new ArrayList<>();
 					lines.add(FoliaMessages.header("Fabric Folia status"));
 					lines.add(FoliaMessages.row("Engine", "ACTIVE"));
+					lines.add(FoliaMessages.row("Regionized gameplay", config.regionizedGameplay()
+							? "staged (experimental)" : "vanilla server thread"));
 					lines.add(FoliaMessages.row("Random ticks", randomTickLine(engine)));
 					lines.add(FoliaMessages.row("Player path", FabricFoliaMod.playerPathStaging()
 							? "staged (owning region)" : "vanilla server thread"));

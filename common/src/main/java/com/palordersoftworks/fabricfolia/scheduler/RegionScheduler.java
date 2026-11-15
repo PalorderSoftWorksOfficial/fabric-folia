@@ -465,6 +465,10 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	}
 
 	public int enqueueBatch(Region region, java.util.List<Runnable> tasks) {
+		return enqueueBatch(region, tasks, null);
+	}
+
+	public int enqueueBatch(Region region, java.util.List<Runnable> tasks, Long targetChunkPos) {
 		Objects.requireNonNull(tasks, "tasks");
 		if (tasks.isEmpty()) {
 			return 0;
@@ -478,7 +482,11 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		}
 		for (Runnable task : tasks) {
 			Objects.requireNonNull(task, "task");
-			queue.add(task);
+			if (targetChunkPos == null) {
+				queue.add(task);
+			} else {
+				queue.add(task, targetChunkPos);
+			}
 		}
 		boolean dead = regionizer.underStructureLock(region::isDead);
 		if (dead) {

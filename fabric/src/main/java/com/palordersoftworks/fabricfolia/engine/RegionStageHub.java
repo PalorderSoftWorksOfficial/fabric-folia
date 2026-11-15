@@ -9,6 +9,7 @@ import com.palordersoftworks.fabricfolia.metrics.RegionMetrics;
 import com.palordersoftworks.fabricfolia.region.Region;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.scheduler.RegionScheduler;
+import com.palordersoftworks.fabricfolia.scheduler.RegionTaskQueue;
 import com.palordersoftworks.fabricfolia.scheduler.StageRetry;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import net.minecraft.server.level.ServerLevel;
@@ -170,21 +171,6 @@ public final class RegionStageHub {
 	 */
 	static volatile int BODIES_PER_TASK = 32;
 
-	/**
-	 * Explicit region slow-motion (Folia contract): at flush, a region whose
-	 * queue still holds more than this many tasks from prior rounds does not
-	 * receive the new round — the overloaded region ticks at its own pace
-	 * while the server thread stays at 20 TPS. The skipped round is counted
-	 * in {@code REGION_BEHIND_SKIPPED} and visible in `/folia metrics`
-	 * (never silent). PLAYER slices and retry replays are exempt (a retry
-	 * that skipped would be lost). Benchmark-proven 2026-11-09 on the
-	 * single-region O(n^2) clump world: the no-skip alternative enqueued
-	 * every round, latched the backlog gate into suspend/resume flapping,
-	 * and forced whole-clump vanilla-inline batches until drift crossed the
-	 * 60 s watchdog (3.75 TPS, dead in ~75 s); with this gate the same world
-	 * sustains 20+ TPS with zero errors. Non-final for tests.
-	 */
-	static volatile int REGION_SKIP_THRESHOLD = 3;
 
 	/** The gameplay slices, each with its vanilla capture site. */
 	public enum Slice {
@@ -354,7 +340,7 @@ public final class RegionStageHub {
 		return DISPATCH_RUN_HITS.get();
 	}
 
-	/** @return bodies skipped at flush because their region's queue was backed up (slow-motion intake gate). */
+	/** @return legacy skipped-body counter, retained for diagnostics compatibility. */
 	public static long regionBehindSkipped() {
 		return REGION_BEHIND_SKIPPED.get();
 	}
@@ -606,28 +592,17 @@ public final class RegionStageHub {
 	 *        execute even into a backed-up region.
 	 */
 	private void dispatch(Slice slice, List<Runnable> batch, boolean allowRegionSkip) {
-		Map<Region, List<Runnable>> byRegion = new java.util.IdentityHashMap<>();
+		Map<Region, Map<Long, List<Runnable>>> byRegion = new java.util.IdentityHashMap<>();
+		Map<Region, Integer> regionBodyCounts = new java.util.IdentityHashMap<>();
 		Counters inline = null;
-		// Run-length fast path: vanilla iterates entity sections in order, so
-		// bodies from the same chunk arrive consecutively (a 3k-stand patch is
-		// ~330 same-chunk bodies in a row). Same packed chunk key as the
-		// previous body means the same cached region AND the same group list —
-		// skip both the ownership-cache probe and the grouping-map lookup.
-		// Measured 2026-11-11 (JFR, 61k-stand world): dispatch grouping was
-		// ~30% of server-thread runnable CPU; ~99% of bodies hit this path.
 		long lastChunkKey = 0;
+		Region lastRegion = null;
 		List<Runnable> lastGroup = null;
 		boolean haveRun = false;
 		for (Runnable body : batch) {
 			ChunkPos pos = body instanceof Positioned positioned ? positioned.fabricfolia$position() : null;
-			if (haveRun && pos != null && packChunk(pos.x(), pos.z()) == lastChunkKey) {
-				DISPATCH_RUN_HITS.incrementAndGet();
-				lastGroup.add(body);
-				continue;
-			}
 			Region region = regionFor(body);
 			if (region == null) {
-				// Unowned position: run inline on the server thread (rare).
 				if (inline == null) {
 					inline = new Counters();
 				}
@@ -635,79 +610,74 @@ public final class RegionStageHub {
 				haveRun = false;
 				continue;
 			}
-			List<Runnable> group = byRegion.computeIfAbsent(region, r -> new java.util.ArrayList<>());
-			group.add(body);
-			if (pos != null) {
-				lastChunkKey = packChunk(pos.x(), pos.z());
-				lastGroup = group;
-				haveRun = true;
-			} else {
-				haveRun = false;
+			long chunkKey = pos == null
+					? RegionTaskQueue.Entry.NO_POSITION
+					: RegionScheduler.packChunkPos(pos.x(), pos.z());
+			if (haveRun && region == lastRegion && chunkKey == lastChunkKey) {
+				DISPATCH_RUN_HITS.incrementAndGet();
+				lastGroup.add(body);
+				regionBodyCounts.merge(region, 1, Integer::sum);
+				continue;
 			}
+			Map<Long, List<Runnable>> byChunk = byRegion.computeIfAbsent(region,
+					ignored -> new java.util.LinkedHashMap<>());
+			List<Runnable> group = byChunk.computeIfAbsent(chunkKey,
+					ignored -> new java.util.ArrayList<>());
+			group.add(body);
+			regionBodyCounts.merge(region, 1, Integer::sum);
+			lastChunkKey = chunkKey;
+			lastRegion = region;
+			lastGroup = group;
+			haveRun = true;
 		}
 		if (inline != null) {
 			inline.flush(this, slice);
 		}
-		// Region slow-motion intake gate (see REGION_SKIP_THRESHOLD): the
-		// backed-up region's round is counted and not queued — neither
-		// backlog inflation nor a server-tick inline stall.
-		if (allowRegionSkip && slice != Slice.PLAYER && !byRegion.isEmpty()) {
-			java.util.Iterator<Map.Entry<Region, List<Runnable>>> slowMotion = byRegion.entrySet().iterator();
-			while (slowMotion.hasNext()) {
-				Map.Entry<Region, List<Runnable>> entry = slowMotion.next();
-				var queue = scheduler.queueOf(entry.getKey());
-				if (queue != null && queue.size() > REGION_SKIP_THRESHOLD) {
-					REGION_BEHIND_SKIPPED.addAndGet(entry.getValue().size());
-					slowMotion.remove();
-				}
-			}
-		}
-		// Parallel-headroom gate: dispatch only what cross-region concurrency can
-		// pay for (see MIN_PARALLEL_BODIES). The flush runs on the server thread
-		// with the execution gate still closed, so inline execution here is the
-		// single-writer-safe equivalent of staged execution — minus the queue,
-		// worker hop, and next-tick quiesce tail.
 		int total = 0;
 		int largest = 0;
-		for (List<Runnable> group : byRegion.values()) {
-			total += group.size();
-			if (group.size() > largest) {
-				largest = group.size();
+		for (int count : regionBodyCounts.values()) {
+			total += count;
+			if (count > largest) {
+				largest = count;
 			}
 		}
 		if (total - largest < MIN_PARALLEL_BODIES && total < MIN_DISPATCH_TOTAL) {
 			if (total > 0) {
 				INLINE_NO_PARALLEL.addAndGet(total);
 				Counters counters = new Counters();
-				for (Map.Entry<Region, List<Runnable>> entry : byRegion.entrySet()) {
-					for (Runnable body : entry.getValue()) {
-						runBody(slice, body, entry.getKey(), counters);
+				for (Map.Entry<Region, Map<Long, List<Runnable>>> regionEntry : byRegion.entrySet()) {
+					for (List<Runnable> bodies : regionEntry.getValue().values()) {
+						for (Runnable body : bodies) {
+							runBody(slice, body, regionEntry.getKey(), counters);
+						}
 					}
 				}
 				counters.flush(this, slice);
 			}
 			return;
 		}
-		// ONE queue entry per CHUNK per region per slice: bounded task size
-		// keeps the tick-start quiesce to one small in-flight task and lets a
-		// hot region's round drain across many inter-tick windows. The whole
-		// chunk list goes in a single enqueueBatch call, whose dead-region
-		// drop is all-or-nothing — pending accounting stays exact.
-		for (Map.Entry<Region, List<Runnable>> entry : byRegion.entrySet()) {
-			List<Runnable> bodies = entry.getValue();
-			List<Runnable> tasks = new java.util.ArrayList<>((bodies.size() + BODIES_PER_TASK - 1) / BODIES_PER_TASK);
-			for (int start = 0; start < bodies.size(); start += BODIES_PER_TASK) {
-				int end = Math.min(start + BODIES_PER_TASK, bodies.size());
-				Runnable[] chunk = bodies.subList(start, end).toArray(Runnable[]::new);
-				tasks.add(new StagedBatch(slice, chunk, entry.getKey()));
-			}
-			pendingBodies.addAndGet(bodies.size());
-			int dropped = scheduler.enqueueBatch(entry.getKey(), tasks);
-			if (dropped > 0) {
-				pendingBodies.addAndGet(-bodies.size());
-				DROPPED_DEAD_REGION.addAndGet(bodies.size());
+		for (Map.Entry<Region, Map<Long, List<Runnable>>> regionEntry : byRegion.entrySet()) {
+			Region region = regionEntry.getKey();
+			for (Map.Entry<Long, List<Runnable>> chunkEntry : regionEntry.getValue().entrySet()) {
+				long targetChunkPos = chunkEntry.getKey();
+				List<Runnable> bodies = chunkEntry.getValue();
+				List<Runnable> tasks = new java.util.ArrayList<>((bodies.size() + BODIES_PER_TASK - 1) / BODIES_PER_TASK);
+				for (int start = 0; start < bodies.size(); start += BODIES_PER_TASK) {
+					int end = Math.min(start + BODIES_PER_TASK, bodies.size());
+					Runnable[] chunk = bodies.subList(start, end).toArray(Runnable[]::new);
+					tasks.add(new StagedBatch(slice, chunk, region, targetChunkPos));
+				}
+				pendingBodies.addAndGet(bodies.size());
+				int dropped = targetChunkPos == RegionTaskQueue.Entry.NO_POSITION
+						? scheduler.enqueueBatch(region, tasks)
+						: scheduler.enqueueBatch(region, tasks, targetChunkPos);
+				if (dropped > 0) {
+					pendingBodies.addAndGet(-bodies.size());
+					DROPPED_DEAD_REGION.addAndGet(bodies.size());
+				}
 			}
 		}
+
 	}
 
 	/** Resolves the owning region for a staged body (its chunk position). */
@@ -882,19 +852,30 @@ public final class RegionStageHub {
 		private final Slice slice;
 		private final Runnable[] bodies;
 		private final Region target;
+		private final long targetChunkPos;
 
-		private StagedBatch(Slice slice, Runnable[] bodies, Region target) {
+		private StagedBatch(Slice slice, Runnable[] bodies, Region target, long targetChunkPos) {
 			this.slice = slice;
 			this.bodies = bodies;
 			this.target = target;
+			this.targetChunkPos = targetChunkPos;
 		}
 
 		@Override
 		public void run() {
 			Counters counters = new Counters();
+			Region executionOwner = target;
+			if (targetChunkPos != RegionTaskQueue.Entry.NO_POSITION) {
+				int chunkX = RegionScheduler.chunkPosX(targetChunkPos);
+				int chunkZ = RegionScheduler.chunkPosZ(targetChunkPos);
+				Region currentOwner = regionizer.ownerOfChunk(chunkX, chunkZ);
+				if (currentOwner != null) {
+					executionOwner = currentOwner;
+				}
+			}
 			try {
 				for (int i = 0; i < bodies.length; i++) {
-					runBody(slice, bodies[i], target, counters);
+					runBody(slice, bodies[i], executionOwner, counters);
 				}
 			} finally {
 				counters.flush(RegionStageHub.this, slice);

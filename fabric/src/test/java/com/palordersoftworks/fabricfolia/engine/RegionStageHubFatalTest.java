@@ -24,7 +24,6 @@ class RegionStageHubFatalTest {
 		ThreadOwnership.clear();
 		RegionStageHub.MIN_PARALLEL_BODIES = 32;
 		RegionStageHub.MIN_DISPATCH_TOTAL = 64;
-		RegionStageHub.REGION_SKIP_THRESHOLD = 3;
 		RegionStageHub.BODIES_PER_TASK = 32;
 		ServerThreadDeferral.clearAll();
 		ChunkResidency.clearAll();

@@ -33,7 +33,7 @@ import java.util.function.Function;
 public final class ConfigSchema {
 
 	/** The current config-version. Bump on schema change; migrations map older versions. */
-	public static final int CURRENT_VERSION = 1;
+	public static final int CURRENT_VERSION = 2;
 
 	// Key name constants — used by schema definition, loader, migration, and save.
 	public static final String KEY_ENABLED = "general.enabled";
@@ -54,7 +54,7 @@ public final class ConfigSchema {
 	public static final String KEY_PATCH_RANDOM_TICK = "patches.minecraft.random-tick-optimization";
 	public static final String KEY_PATCH_PACKET_DISPATCH = "patches.network.packet-dispatch";
 	public static final String KEY_PATCH_ALLOCATION_REDUCTION = "patches.network.allocation-reduction";
-	public static final String KEY_PATCH_EVENT_DISPATCH = "patches.fabric.event-dispatch";
+	public static final String KEY_PATCH_CHUNK_REGIONIZATION = "patches.fabricfolia.chunk-regionization";
 	public static final String KEY_PATCH_REGION_LOOKUP = "patches.fabricfolia.region-lookup";
 	public static final String KEY_PATCH_SCHEDULER_DISPATCH = "patches.fabricfolia.scheduler-dispatch";
 	public static final String KEY_PATCH_TASK_QUEUE = "patches.fabricfolia.task-queue";
@@ -131,33 +131,23 @@ public final class ConfigSchema {
 
 	private void define() {
 		add(opt(KEY_ENABLED, Boolean.class, Boolean.TRUE, v -> v, new String[] {
-				"Master switch for regionized execution.",
+				"Master switch for loading the Fabric-Folia engine and runtime integration.",
 				"",
-				"What it does:",
-				"  When true, the server's gameplay tick is partitioned into",
-				"  independently-ticking regions executed on a bounded worker pool.",
-				"  When false, the mod stays out of the way: vanilla single-threaded",
-				"  execution is used for everything.",
+				"When false, the engine does not attach worlds, run region schedulers,",
+				"or install its gameplay interception runtime; vanilla execution remains.",
+				"When true, the engine and its region-ownership services are initialized.",
+				"This does NOT enable staged entity or block-entity gameplay by itself.",
 				"",
-				"Changing this at runtime via /folia config enabled <true|false> does",
-				"NOT flip a boolean: disabling triggers a safe quiescence transition",
-				"(stop accepting work -> drain in-flight region work -> quiesce every",
-				"region -> verify no worker is mutating region state -> return the",
-				"tick loop to vanilla). It is deliberately not an instant shutdown.",
-				"",
-				"Re-enabling at runtime is refused with a clear message unless the",
-				"re-enable path has been positively demonstrated safe (see",
-				"THREADING.md). Until then: restart to re-enable.",
+				"Feature-specific execution gates remain independent:",
+				"  general.regionized-gameplay (default false)",
+				"  general.regionized-random-ticks (default false)",
+				"  gameplay.stage-player-path (default false)",
 				"",
 				"Default: true",
 				"Valid values: true, false",
-				"Performance: true enables the regionized execution model.",
-				"Compatibility: third-party mods that assume a single server thread",
-				"  may misbehave under regionized execution; see COMPATIBILITY.md.",
-				"Safety: disabling returns to 100% vanilla behavior.",
-				"Restart required: no for false (live quiescence); re-enable may",
-				"  require a restart (see above)."
+				"Restart required: yes."
 		}));
+
 		add(opt(KEY_SERVER_BRAND, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"Controls whether Fabric-Folia overrides the Minecraft server brand.",
 				"",
@@ -187,7 +177,7 @@ public final class ConfigSchema {
 				"Valid values: any non-empty string up to 64 characters.",
 				"Restart required: no."
 		}));
-		add(opt(KEY_GAMEPLAY, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+		add(opt(KEY_GAMEPLAY, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Regionized gameplay execution (mandates 15/21/27/37).",
 				"",
 				"What it does:",
@@ -201,15 +191,14 @@ public final class ConfigSchema {
 				"  server-thread execution is the correct owner-confined choice",
 				"  (the drain itself is already O(due), not O(world)).",
 				"",
-				"  ServerPlayer bodies are never staged (packet processing is",
-				"  server-thread; a player body driven from two contexts would",
-				"  corrupt movement and connection state).",
+				"  Player connection staging is a separate opt-in gate. Keep it",
+				"  disabled until player entity ticks, connection packets,",
+				"  teleport, respawn, and migration have been validated together.",
 				"",
-				"Default: true",
+				"Default: false (opt in after validating installed mods).",
 				"Valid values: true, false",
-				"Restart required: no (takes effect next server start; runtime",
-				"  toggle follows the engine quiescence rules).",
-				"Experimental: no"}));
+				"Restart required: yes.",
+				"Experimental: yes. Not production-certified."}));
 		add(opt(KEY_RANDOM_TICKS, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Regionized random-tick execution (the first vanilla interception).",
 				"",
@@ -224,14 +213,16 @@ public final class ConfigSchema {
 				"  When false (default), 100% vanilla execution: this interception",
 				"  is deliberately OFF until an administrator opts in.",
 				"",
+				"This flag controls random ticks only. Entity/block-entity staging",
+				"and player connection staging use their own independent settings.",
+				"",
 				"Known limitation (see THREADING.md): while enabled, random ticks",
 				"  mutate blocks on region workers while scheduled ticks (block and",
 				"  fluid, e.g. falling sand, water flow scheduling) still execute on",
 				"  the server thread. These two categories do not yet share the",
 				"  region boundary, so a mod or datapack touching both in the same",
-				"  area can observe interleaved execution. Entities, block entities,",
-				"  and redstone remain entirely on the server thread regardless of",
-				"  this flag.",
+				"  area can observe interleaved execution. Test datapacks and mods",
+				"  that combine scheduled ticks with random tick mutations.",
 				"",
 				"Default: false",
 				"Valid values: true, false",
@@ -401,7 +392,7 @@ public final class ConfigSchema {
 				"Restart required: no - applies at next engine start."
 		}));
 
-		add(opt(KEY_PLAYER_PATH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+		add(opt(KEY_PLAYER_PATH, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Regionize the player path: stage each player's connection tick",
 				"(packet drain, connection state, physics chain) onto the region",
 				"owning the player's chunk, and route re-homed packet handlers",
@@ -413,10 +404,10 @@ public final class ConfigSchema {
 				"server-thread couplings inside the staged body (chunk-view move,",
 				"game-mode tick) are bounced to the server thread automatically.",
 				"",
-				"Default: true",
+				"Default: false (opt in only after player-path compatibility testing).",
 				"Valid values: true, false",
 				"Performance: one region-queue enqueue per player per tick.",
-				"Restart required: no - applies at next engine start."
+				"Experimental: yes. Restart required: yes."
 		}));
 
 		add(opt(KEY_PATCHES_ENABLED, Boolean.class, Boolean.TRUE, v -> v, new String[] {
@@ -474,15 +465,12 @@ public final class ConfigSchema {
 				"Restart required: yes. When disabled, the original drain-path",
 				"allocation behavior is used."
 		}));
-		add(opt(KEY_PATCH_EVENT_DISPATCH, Boolean.class, Boolean.TRUE, v -> v, new String[] {
-				"Fabric layer: gameplay staging (entity, block-entity, scheduled",
-				"and player ticks) dispatches through the owning region instead of",
-				"the server thread.",
+		add(opt(KEY_PATCH_CHUNK_REGIONIZATION, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"FabricFolia layer: register loaded chunks with their world's regionizer.",
+				"This is the prerequisite for region ownership and staged gameplay.",
 				"",
 				"Default: true",
-				"Restart required: yes. When disabled, all staging falls back to",
-				"vanilla server-thread execution; Fabric API event behavior is",
-				"never altered by this patch."
+				"Restart required: yes. Disabling it disables region-owned staging."
 		}));
 		add(opt(KEY_PATCH_REGION_LOOKUP, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"FabricFolia layer: an O(1) section-to-region ownership index",

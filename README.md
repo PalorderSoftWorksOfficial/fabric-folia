@@ -1,204 +1,72 @@
-[![Build Status](https://jenkins.palorderhosting.net/buildStatus/icon?job=fabric-folia%2Fmain)](https://jenkins.palorderhosting.net/job/fabric-folia/job/main/)
+![Fabric-Folia logo](fabric/src/main/resources/logo.png)
 
+# Fabric-Folia
 
-Fabric-Folia
+**A Fabric-native, experimental staged-region execution project by Palorder Softworks.**
 
-Regionized multithreaded server execution for vanilla Minecraft under Fabric Loader.
+| Project status | Compatibility target | License |
+|---|---|---|
+| Experimental — not production-ready | Minecraft 26.2 · Fabric Loader 0.19.5+ · Java 25+ | Apache-2.0 |
 
-Fabric-Folia partitions the server's world into dynamically-sized, independently-ticking
-regions executed in parallel on a bounded worker pool — the execution model Folia
-pioneered, rebuilt clean-room as a normal Fabric mod. No custom server distribution: it
-loads as a mod jar on a standard Fabric server.
+Fabric-Folia explores running selected vanilla tick bodies in region-owned worker contexts while keeping vanilla's server-thread selection and ordering logic. It is a clean-room implementation; it is not Paper, Folia, or a drop-in replacement for either.
 
-Status: first interception milestone — proven end-to-end on live servers.
-The engine primitives (dynamic regionizer with all four Folia invariants,
-EDF-dispatched worker pool, thread-ownership diagnostics, comment-preserving
-config engine) are implemented and stress-tested, and the first genuine vanilla
-interception is live: the per-chunk random-tick pass executes on region worker
-threads, with proven world mutation, worker-thread attribution, dispatch
-cessation on unpin, and a measured compatibility matrix against the Fabric
-optimization ecosystem. All other vanilla passes still run on the server
-thread; the remaining tick pipeline is the next milestone (see
-ARCHITECTURE.md).
+> **Production warning:** this project is not currently certified for production servers. Automated compilation and unit tests do not replace a live server boot, mixin verification, gameplay soak, world-save/restart validation, and third-party mod compatibility testing. Regionized gameplay is off by default. Do not enable it on a production world until your exact modpack has been tested and the release status says otherwise.
 
-CI / Automated Builds
+## What it does
 
-Fabric-Folia is continuously built using a self-hosted Jenkins instance.
+Vanilla still decides which chunks, entities, and block entities are selected for ticking. For code paths that are enabled and intercepted, Fabric-Folia captures selected bodies, groups them by owning region and chunk, and schedules bounded work on a worker pool. Workers execute under a region ownership context. At the next server tick, the server thread closes the worker gate and waits for those bodies to quiesce before vanilla mutates world state again.
 
-Every push to the repository is automatically detected by Jenkins and triggers a
-fresh build on the project's dedicated build machine. Builds run the complete
-Gradle test suite and archive the resulting Fabric mod JAR.
+The global scheduler is deliberately different from an independent Folia global region: global callbacks run on the Minecraft server thread after region workers quiesce and before vanilla world mutation.
 
-Build Status
-Jenkins: https://jenkins.palorderhosting.net/
+## What it is not
 
-The CI pipeline currently performs:
+Fabric-Folia does not currently implement a fully independent Folia world-tick loop. Vanilla still performs tick selection, and the staged design has a server-thread coordination barrier. Not every vanilla subsystem is regionized. World generation, spawning, some scheduled-tick paths, and code paths without a verified interception remain on vanilla execution. The player path is separately gated and off by default.
 
-GitHub push
-    │
-    ▼
-GitHub Webhook
-    │
-    ▼
-Jenkins
-    │
-    ▼
-Checkout repository
-    │
-    ▼
-./gradlew build
-    │
-    ├── Compile all modules
-    ├── Run test suite
-    └── Verify build
-    │
-    ▼
-Archive Fabric mod JAR
+This distinction is important for performance expectations: a body moved to a region worker is not proof that an entire world subsystem is independently ticking or that every mod is thread-safe.
 
+## First run
 
-The Jenkins pipeline is defined in Jenkinsfile, so the build
-configuration is version-controlled alongside the source code.
+Install the built fabric-folia JAR on a dedicated Fabric server matching the pinned environment. The normal configuration is generated at config/fabric-folia.yml.
 
-Cross-OS test matrix (opt-in)
+The safe defaults leave regionized gameplay, player connection staging, and regionized random ticks disabled. This keeps normal startup on vanilla gameplay execution while the engine, API facade, diagnostics, and region ownership services are initialized.
 
-Default builds run on the primary agent (Linux, `sh`). Triggering a build
-with the `CROSS_OS` parameter additionally runs the full test protocol on
-every OS via a declarative matrix, using agents labelled `windows` and
-`macos` (Jenkins picks the right shell automatically — `gradlew.bat` on
-Windows). If no agent carries a given label, only the parameterised run
-waits in queue; ordinary pushes are unaffected. This validates the
-cross-platform claims (file paths, FFM/OpenCL loading, YAML config IO)
-on real Windows and macOS agents — the GPU test layer additionally
-skips itself cleanly on agents without an OpenCL device.
+After testing in a disposable world, an operator can opt into the experimental paths in config/fabric-folia.yml:
 
-What CI Verifies
+| Setting | Default | Effect |
+|---|---:|---|
+| general.enabled | true | Loads the Fabric-Folia engine and its integration layer |
+| general.regionized-gameplay | false | Stages supported entity and block-entity tick bodies |
+| gameplay.stage-player-path | false | Stages the player connection path; experimental |
+| general.regionized-random-ticks | false | Enables the separate random-tick interception |
 
-Every automated build currently runs:
+Restart the server after changing these settings. There is no /folia config or /folia reload command.
 
-Full Gradle build
+## Operator commands
 
-Common-module concurrency and configuration tests
+/folia and /folia version are open. Diagnostic and administration commands default to the server owner/OP permission and can also be granted through folia.command, folia.command.<subcommand>, or the legacy fabricfolia.command.folia.<subcommand> permission nodes.
 
-Fabric module compilation
+Start with /folia health, /folia status, /folia workers, /folia scheduler, and /folia metrics. See the [command reference](docs/command-reference.md).
 
-Fabric mod packaging
+## Developer API
 
-Build artifact archival
+The public Java API is built as a standalone fabric-folia-api artifact. The current build publishes it to Maven Local with ./gradlew :api:publishToMavenLocal; there is no public Maven repository yet. Fabric-Folia supplies the runtime classes and the fabricfolia entrypoint. See the [developer API guide](docs/developer/api.md).
 
-The distributable JAR produced by CI is:
+## Architecture and release status
 
-fabric/build/libs/fabric-0.1.0.jar
+- [Project status and release gates](docs/status.md)
+- [Architecture](ARCHITECTURE.md)
+- [Configuration reference](docs/configuration.md)
+- [Threading model](THREADING.md)
+- [Testing and validation](TESTING.md)
+- [Compatibility notes](COMPATIBILITY.md)
+- [All documentation](docs/index.md)
 
+The Jenkins pipeline produces a hashed release candidate. Stable publication requires a separate approval record tied to the exact commit and backed by a live runtime soak, compatibility evidence, and independent review. Automated tests alone do not satisfy that gate.
 
-Note: CI builds are currently used for continuous verification and development.
-They should not be considered stable releases unless explicitly marked as such.
+## Contributing
 
-Requirements
-Component	Version
-Minecraft	26.2 (dedicated server)
-Fabric Loader	≥ 0.19.5
-Fabric API	0.160.0+26.2 (or newer for 26.2)
-Java	25
-Building
-./gradlew build              # builds all modules, runs the test suite
-./gradlew test               # common-module concurrency/config test suite
-./gradlew :fabric:runServer  # boots a dev server with the mod loaded
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security-sensitive defects through [GitHub Security Advisories](https://github.com/PalorderSoftWorksOfficial/fabric-folia/security/advisories/new).
 
+## Attribution and non-affiliation
 
-The distributable mod jar is fabric/build/libs/fabric-0.1.0.jar (self-contained: the
-api/common modules and SnakeYAML Engine are nested inside it).
-
-Modules
-api/      Public, Fabric-native API (Region/RegionScheduler/EntityScheduler/
-          GlobalScheduler/ThreadContext, threading annotations). ZERO Minecraft
-          or loader types — other mods compile against this alone.
-
-common/   Loader-agnostic engine: regionizer, regions/sections, worker-pool
-          scheduler, thread-context core, task queues, YAML config engine.
-          Pure Java; the whole test suite runs without Minecraft on the classpath.
-
-fabric/   The mod: entrypoints, Fabric API wiring, (future) Mixins, commands,
-          diagnostics sink. Produces the distributable jar.
-
-
-Why the common/fabric split is real, not artificial (spec section 12 asks for
-the justification): the regionizer and scheduler are the concurrency-safety core of
-the entire project. They must be provable in isolation — tested under stress WITHOUT
-a Minecraft server running, iterated on without Loom's build cycle, and reusable if
-the loader-facing layer changes. Everything that genuinely requires Minecraft types
-(entrypoints, Mixins, commands, the diagnostics logger) lives in fabric. The boundary
-follows the dependency direction fabric → common → api; api depends on neither.
-
-Configuration
-
-config/fabric-folia.yml, generated on first run as a complete self-documenting
-template. Every option documents purpose, default, valid values, performance,
-compatibility and safety implications, and restart-vs-live behavior. Administrator
-comments survive saves (round-trip tested); unknown keys are preserved and flagged,
-never silently dropped; missing keys are backfilled from the schema automatically
-(partial configs self-repair), and a duplicated key is collapsed to one on load —
-the last value wins and the duplicate never round-trips through a save. config-version
-carries an explicit migration contract — future versions fail closed rather than guessing.
-
-Commands
-
-/folia — overview
-
-/folia status — engine state, worker count, thread-check mode, intercept state
-
-/folia shutdown — graceful server stop (admin): region work drains, worlds save,
-then the process exits — the vanilla /stop lifecycle triggered from chat/console
-
-/folia regions — live per-region detail (state, ticks executed, chunks)
-
-/folia threads — Fabric Folia's worker threads
-
-/folia compat — the startup compatibility scan, on demand (measured results in
-COMPATIBILITY.md)
-
-Console
-
-Fabric Folia logs with a [FabricFolia] prefix and text severity words (INFO,
-SUCCESS, WARNING, ERROR) that remain readable without ANSI colors; startup walks
-through configuration, schedulers, compatibility detection (once per mod, with a
-count summary — never a per-mod warning storm), and a ready line that states which
-mode the server is in. diagnostics.debug-logging enables per-pass and worker
-execution evidence; normal operation stays quiet. See TROUBLESHOOTING.md for
-every administrator-facing message explained.
-
-Documentation
-
-docs/folia-parity.md — the Folia parity checklist: every architectural
-subsystem with its measured status (NOT_IMPLEMENTED → VALIDATED) and the
-concrete criteria for each step up
-
-ARCHITECTURE.md — module design, state classification, Folia derivation and
-attribution, feasibility constraints, deviation rationale
-
-REGIONS.md — the dynamic region model (and why "8×8" is a section size, not a grid)
-
-THREADING.md — ownership model, thread context, disable/quiescence contract
-
-SCHEDULING.md — worker pool, EDF dispatch, tick pipeline partitioning
-
-MIXINS.md — the mixin register, the mandatory 7-question analysis, and the
-optimization-mod overlap policy
-
-COMPATIBILITY.md — the measured matrix (Lithium, C2ME, FerriteCore, Krypton,
-VMP, ScalableLux), failure-isolation protocol, and the C2ME interaction detail
-
-docs/compatibility/ — per-mod measured pages; how mods declare support; what
-legacy compatibility handling means for undeclared mods
-
-TROUBLESHOOTING.md — symptom-first fixes for administrators, with the real
-console strings
-
-TESTING.md — test coverage, the world-mutation proof, and how to reproduce it
-
-docs/folia-parity.md — the parity ledger: Folia behavior vs. what is
-implemented and live-verified here
-
-License
-
-Apache-2.0. Folia's server patches are GPL-3.0: no Folia source is used or copied;
-Folia's public documentation is the architectural reference (see ARCHITECTURE.md).
+Fabric-Folia is maintained by Palorder Softworks and distributed under Apache-2.0. It is an independent clean-room project informed by publicly documented region-threading concepts. It is not affiliated with, endorsed by, or maintained by FabricMC, PaperMC, the Folia project, Mojang Studios, or Microsoft. Minecraft is a trademark of Microsoft/Mojang; Fabric and Folia names and trademarks belong to their respective owners.

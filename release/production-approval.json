@@ -1,0 +1,11 @@
+{
+  "status": "BLOCKED",
+  "version": "0.1.0",
+  "commit": "NOT_APPROVED",
+  "reason": "Production publication is blocked until an isolated live-server runtime soak, a verified compatibility matrix and an independent release review are checked into this repository.",
+  "evidence": {
+    "runtime_soak": null,
+    "compatibility_matrix": null,
+    "independent_review": null
+  }
+}

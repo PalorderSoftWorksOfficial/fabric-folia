@@ -69,7 +69,6 @@ public final class FabricFoliaEngine {
 	private final AsyncSchedulerImpl async;
 	private final ThreadContextImpl threadContext;
 	private final ViolationReporter reporter;
-	private final Thread globalDispatchThread;
 	private final java.util.function.Consumer<String> info;
 	private final java.util.function.Consumer<String> error;
 	private RegionTickInterceptor interceptor;
@@ -124,7 +123,6 @@ public final class FabricFoliaEngine {
 	                          AsyncSchedulerImpl async,
 	                          ThreadContextImpl threadContext,
 	                          ViolationReporter reporter,
-	                          Thread globalDispatchThread,
 	                          java.util.function.Consumer<String> info,
 	                          java.util.function.Consumer<String> error) {
 		this.config = config;
@@ -136,7 +134,6 @@ public final class FabricFoliaEngine {
 		this.async = async;
 		this.threadContext = threadContext;
 		this.reporter = reporter;
-		this.globalDispatchThread = globalDispatchThread;
 		this.info = info;
 		this.error = error;
 	}
@@ -183,25 +180,9 @@ public final class FabricFoliaEngine {
 		// WorkerRandoms); deactivation restores vanilla's single-instance
 		// behavior exactly at shutdown. Inert whenever the engine is disabled.
 		com.palordersoftworks.fabricfolia.thread.WorkerRandoms.activate();
-		// Global context cadence: one tick() per 50ms on a dedicated daemon
-		// thread (the single consumer of the global queue — see
-		// GlobalSchedulerImpl's contract). Folding this into the pool's
-		// dispatch is a later optimization with benchmark evidence (spec 24/20).
-		Thread globalDispatch = new Thread(() -> {
-			while (!Thread.currentThread().isInterrupted()) {
-				try {
-					Thread.sleep(50);
-					global.tick();
-				} catch (InterruptedException e) {
-					return;
-				}
-			}
-		}, "FabricFolia-Global");
-		globalDispatch.setDaemon(true);
-		globalDispatch.start();
 
 		FabricFoliaEngine bootstrapped = new FabricFoliaEngine(config, workerPool, workerThreads,
-				global, async, threadContext, reporter, globalDispatch, info, error);
+				global, async, threadContext, reporter, info, error);
 		bootstrapped.adoptLegacyDispatchPolicy(
 				com.palordersoftworks.fabricfolia.FabricFoliaMod.pendingDispatchPolicy());
 		// Region-aware stall detection (mandate §26): watches all attached
@@ -225,12 +206,12 @@ public final class FabricFoliaEngine {
 		// Global-state ownership registration (mandate §11): the global
 		// dispatch context owns the server-wide domains; regions own the rest.
 		GlobalStateRegistry.reset();
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.DAYLIGHT_TIME, "FabricFolia-Global");
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WEATHER, "FabricFolia-Global");
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WORLD_BORDER, "FabricFolia-Global");
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.GAME_RULES, "FabricFolia-Global");
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.PLAYER_LIST, "FabricFolia-Global");
-		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.SCOREBOARD, "FabricFolia-Global");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.DAYLIGHT_TIME, "MinecraftServer tick thread (GLOBAL context)");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WEATHER, "MinecraftServer tick thread (GLOBAL context)");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.WORLD_BORDER, "MinecraftServer tick thread (GLOBAL context)");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.GAME_RULES, "MinecraftServer tick thread (GLOBAL context)");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.PLAYER_LIST, "MinecraftServer tick thread (GLOBAL context)");
+		GlobalStateRegistry.activate(GlobalStateRegistry.Domain.SCOREBOARD, "MinecraftServer tick thread (GLOBAL context)");
 		return bootstrapped;
 	}
 
@@ -273,6 +254,10 @@ public final class FabricFoliaEngine {
 					interceptActive ? interceptor.regionTickBody(worldName) : region -> { },
 					message -> info.accept(message));
 			shared.setMetrics(metrics);
+			shared.setSchedulerDispatchPatch(
+					com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("scheduler-dispatch"));
+			shared.setOwnerLookupIndex(
+					com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("region-lookup"));
 			shared.start();
 			return shared;
 		});
@@ -616,6 +601,7 @@ public final class FabricFoliaEngine {
 		tickWorkRecorded = false;
 		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
 		if (pool == null) {
+			global.tick();
 			return;
 		}
 		long start = System.nanoTime();
@@ -668,6 +654,7 @@ public final class FabricFoliaEngine {
 			waited = java.lang.System.nanoTime() - start;
 			thisTickQuiesceNanos = waited;
 		}
+		global.tick();
 	}
 
 	/** Reopens worker execution after the end-of-tick flush dispatched staged bodies. */
@@ -1156,11 +1143,8 @@ public final class FabricFoliaEngine {
 		// from this point any still-running region task sees the original
 		// (vanilla) source — same semantics as the intercept-detach window.
 		com.palordersoftworks.fabricfolia.thread.WorkerRandoms.deactivate();
-		globalDispatchThread.interrupt();
-		globalDispatchThread.join(1000);
-		// Quiescence (spec 16): the cadence is stopped, so drain whatever the
-		// last ticks queued once on this thread instead of dropping it.
 		global.dispatchPending();
+		global.close();
 		if (watchdog != null) {
 			watchdog.close();
 		}

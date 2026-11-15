@@ -1,136 +1,112 @@
-/*
- * Fabric-Folia — regionized multithreaded execution for vanilla Minecraft.
- * Copyright 2026 Palorder Softworks. Apache-2.0 — see LICENSE.
- */
-
 package com.palordersoftworks.fabricfolia.command;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * The self-contained in-game documentation (spec 34): every command and
- * concept explained in-game — no external markdown hunting. Topics are
- * concise, operator-focused, and rendered through the shared MiniMessage
- * layer.
- */
 public final class FoliaHelp {
+    private FoliaHelp() {
+    }
 
-	private FoliaHelp() {
-	}
+    public static List<String> overview() {
+        return List.of(
+                "<gold><bold>Fabric-Folia Commands</bold></gold>",
+                FoliaMessages.RULE,
+                "<aqua>/folia</aqua> <dark_gray>—</dark_gray> <gray>engine overview</gray>",
+                "<aqua>/folia version</aqua> <dark_gray>—</dark_gray> <gray>version and build information</gray>",
+                "<aqua>/folia help [topic]</aqua> <dark_gray>—</dark_gray> <gray>operator help</gray>",
+                "<aqua>/folia status</aqua> <dark_gray>—</dark_gray> <gray>feature gates and engine state</gray>",
+                "<aqua>/folia health</aqua> <dark_gray>—</dark_gray> <gray>invariant checks and health reasons</gray>",
+                "<aqua>/folia regions [verbose]</aqua> <dark_gray>—</dark_gray> <gray>region and owner detail</gray>",
+                "<aqua>/folia workers</aqua> <dark_gray>—</dark_gray> <gray>worker-pool utilization</gray>",
+                "<aqua>/folia scheduler</aqua> <dark_gray>—</dark_gray> <gray>deadlines and queue diagnostics</gray>",
+                "<aqua>/folia threads</aqua> <dark_gray>—</dark_gray> <gray>thread ownership diagnostics</gray>",
+                "<aqua>/folia patches</aqua> <dark_gray>—</dark_gray> <gray>registered patch state</gray>",
+                "<aqua>/folia entities</aqua> <dark_gray>—</dark_gray> <gray>entity tracking diagnostics</gray>",
+                "<aqua>/folia metrics</aqua> <dark_gray>—</dark_gray> <gray>runtime counters and timings</gray>",
+                "<aqua>/folia gpu [bench [boxes]]</aqua> <dark_gray>—</dark_gray> <gray>experimental OpenCL status and benchmark</gray>",
+                "<aqua>/folia compat</aqua> <dark_gray>—</dark_gray> <gray>detected mod compatibility scan</gray>",
+                "<aqua>/folia pin/unpin</aqua> <dark_gray>—</dark_gray> <gray>pin or unpin chunk coordinates</gray>",
+                "<aqua>/folia shutdown</aqua> <dark_gray>—</dark_gray> <gray>request server halt; use /stop for routine shutdown</gray>",
+                FoliaMessages.RULE,
+                "<gray>Diagnostics need OP or the </gray><aqua>folia.command</aqua><gray> permission node.</gray>",
+                "<gray>There is no /folia config or reload command; edit config/fabric-folia.yml and restart.</gray>");
+    }
 
-	/** @return the command overview lines (/folia help). */
-	public static List<String> overview() {
-		return List.of(
-				"<gold><bold>FabricFolia Commands</bold></gold>",
-				FoliaMessages.RULE,
-				"<aqua>/folia</aqua> <dark_gray>—</dark_gray> <gray>server information overview</gray>",
-				"<aqua>/folia version</aqua> <dark_gray>—</dark_gray> <gray>version and build information</gray>",
-				"<aqua>/folia regions [verbose]</aqua> <dark_gray>—</dark_gray> <gray>region statistics and per-region detail</gray>",
-				"<aqua>/folia workers</aqua> <dark_gray>—</dark_gray> <gray>worker-pool state and utilization</gray>",
-				"<aqua>/folia scheduler</aqua> <dark_gray>—</dark_gray> <gray>scheduler health and queue diagnostics</gray>",
-				"<aqua>/folia patches</aqua> <dark_gray>—</dark_gray> <gray>active optimization patches and their state</gray>",
-				"<aqua>/folia gpu [bench [n]]</aqua> <dark_gray>—</dark_gray> <gray>experimental GPU acceleration status and benchmark</gray>",
-				"<aqua>/folia health</aqua> <dark_gray>—</dark_gray> <gray>overall system health with reasons</gray>",
-				"<aqua>/folia threads</aqua> <dark_gray>—</dark_gray> <gray>thread and region-ownership diagnostics</gray>",
-				"<aqua>/folia help [topic]</aqua> <dark_gray>—</dark_gray> <gray>this documentation</gray>",
-				FoliaMessages.RULE,
-				"<gray>Diagnostics need OP or the </gray><aqua>folia.command</aqua><gray> node (LuckPerms);</gray>",
-			"<gray>/folia and /folia version are open. Use </gray><aqua>/folia help <topic></aqua><gray> for details.</gray>");
-	}
+    public static java.util.Set<String> topics() {
+        return TOPICS.keySet();
+    }
 
-	/** @return the topic names accepted by /folia help <topic>. */
-	public static java.util.Set<String> topics() {
-		return TOPICS.keySet();
-	}
+    public static List<String> topic(String name) {
+        return TOPICS.get(name.toLowerCase(java.util.Locale.ROOT));
+    }
 
-	/** @return one topic's lines, or null when the topic is unknown. */
-	public static List<String> topic(String name) {
-		return TOPICS.get(name.toLowerCase(java.util.Locale.ROOT));
-	}
+    private static final Map<String, List<String>> TOPICS = new LinkedHashMap<>();
 
-	private static final Map<String, List<String>> TOPICS = new LinkedHashMap<>();
-
-	static {
-		TOPICS.put("regions", List.of(
-				"<gold><bold>Help: regions</bold></gold>",
-				"<gray>Regions group nearby loaded chunks into independently",
-				"<gray>ticking execution units. Each chunk belongs to exactly one",
-				"<gray>region; regions can merge when they become connected and",
-				"<gray>split when they become independent again.</gray>",
-				"<gray>Use </gray><aqua>/folia regions</aqua><gray> for counts, and</gray>",
-				"<gray></gray><aqua>/folia regions verbose</aqua><gray> for per-region detail.</gray>"));
-		TOPICS.put("workers", List.of(
-				"<gold><bold>Help: workers</bold></gold>",
-				"<gray>Workers are a bounded pool of threads that execute region",
-				"<gray>ticks. Regions are not pinned to workers; a region may run",
-				"<gray>on a different worker each tick. Waiting workers are healthy",
-				"<gray>when no region is due; the scheduler wakes them when work",
-				"<gray>arrives. Use </gray><aqua>/folia workers</aqua><gray> to see busy vs. waiting.",
-				"<gray>Workers waiting while regions are overdue indicates a",
-				"<gray>scheduling problem — see </gray><aqua>/folia scheduler</aqua><gray>.</gray>"));
-		TOPICS.put("scheduler", List.of(
-				"<gold><bold>Help: scheduler</bold></gold>",
-				"<gray>The scheduler scans every millisecond for regions whose next",
-				"<gray>tick deadline is due and dispatches them onto the worker pool.",
-				"<gray>Each executed region tick re-arms its own deadline (20 TPS).",
-				"<gray>Use </gray><aqua>/folia scheduler</aqua><gray> to see due regions, queue depth",
-				"<gray>and reschedule failures; a clear diagnosis is shown when the",
-				"<gray>pipeline stalls (for example chunks loaded but no regions)."));
-		TOPICS.put("patches", List.of(
-				"<gold><bold>Help: patches</bold></gold>",
-				"<gray>FabricFolia optimizations are individually toggleable patches.",
-				"<gray>Each patch takes an optimized execution path when enabled and",
-				"<gray>falls back to the original vanilla/Fabric path when disabled;",
-				"<gray>regionization and thread checks are never affected. Patches",
-				"<gray>resolve once at server start (config changes need a restart).",
-				"<gray>Use </gray><aqua>/folia patches</aqua><gray> to see every patch and its status."));
-		TOPICS.put("gpu", List.of(
-				"<gold><bold>Help: gpu</bold></gold>",
-				"<gray>EXPERIMENTAL: opt-in OpenCL acceleration of bulk AABB overlap",
-				"<gray>filtering (entity broadphase math). Enable with </gray><aqua>gpu.enabled=true</aqua><gray> in",
-				"<gray>config/fabric-folia.yml; the CPU reference path is always present.",
-				"<gray>At boot the kernel is compiled and must pass a CPU-vs-GPU parity",
-				"<gray>bit-exactness battery before it may serve anything; any failure -",
-				"<gray>missing runtime, no device, verification mismatch, or a mid-flight",
-				"<gray>error - degrades to CPU with the reason in </gray><aqua>/folia metrics</aqua><gray>.</gray>",
-				"<gray>Measure before assuming a win: </gray><aqua>/folia gpu bench [n]</aqua><gray> reports CPU vs GPU</gray>",
-				"<gray>throughput and re-checks parity on your hardware."));
-		TOPICS.put("health", List.of(
-				"<gold><bold>Help: health</bold></gold>",
-				"<gray>Runs the built-in invariants: region creation, region",
-				"<gray>ticking, worker pool, scheduler, ownership, patch layer.",
-				"<gray>Each check reports OK, WARNING or ERROR with a reason. Use",
-				"<gray></gray><aqua>/folia health</aqua><gray> as the first stop when the server feels off."));
-		TOPICS.put("threads", List.of(
-				"<gold><bold>Help: threads</bold></gold>",
-				"<gray>Shows the FabricFolia threads: the global scheduler thread,",
-				"<gray>worker threads and per-thread region ownership. States shown:",
-				"<gray>RUNNABLE, WAITING, TIMED_WAITING (efficient idle), BLOCKED.",
-				"<gray>Workers are not pinned to regions; ownership changes per tick."));
-		TOPICS.put("configuration", List.of(
-				"<gold><bold>Help: configuration</bold></gold>",
-				"<gray>config/fabric-folia.yml — general.enabled master switch,",
-				"<gray>regionized-gameplay and regionized-random-ticks execution",
-				"<gray>slices, threads.worker-threads, diagnostics toggles, and the",
-				"<gray>patches section (each optimization's toggle). Patches and",
-				"<gray>scheduler behavior resolve at startup: restart to apply."));
-		TOPICS.put("thread checks", List.of(
-				"<gold><bold>Help: thread checks</bold></gold>",
-				"<gray>Regionized execution forbids cross-region state access. The",
-				"<gray>thread-check mode (threads.thread-check-mode) controls what",
-				"<gray>happens on violations: STRICT throws with a full report,",
-				"<gray>WARN logs and continues, OFF disables checking. WARN is the",
-				"<gray>default; keep the checks on — they are the proof the region",
-				"<gray>model is functioning, not noise to disable."));
-		TOPICS.put("regionization", List.of(
-				"<gold><bold>Help: regionization</bold></gold>",
-				"<gray>When chunks load they join the world's regionizer and form",
-				"<gray>regions (with a buffer halo between them). Region state",
-				"<gray>cycles READY → TICKING → READY; a ticking region never grows",
-				"<gray>(new nearby activity waits in a transient region and merges",
-				"<gray>at the tick's end). Dead sections purge and independent",
-				"<gray>areas split off during the tick-end protocol."));
-	}
+    static {
+        TOPICS.put("regions", List.of(
+                "<gold><bold>Help: regions</bold></gold>",
+                "<gray>Chunks are grouped into region ownership areas. Region identities can change when areas split or merge.</gray>",
+                "<gray>/folia regions shows totals; /folia regions verbose shows individual regions and ownership detail.</gray>"));
+        TOPICS.put("workers", List.of(
+                "<gold><bold>Help: workers</bold></gold>",
+                "<gray>Workers are a bounded pool. A region is not pinned to one physical worker.</gray>",
+                "<gray>Use /folia workers to inspect busy, waiting and queued work.</gray>",
+                "<gray>Workers waiting while regions are overdue indicates a scheduling or coordination issue.</gray>"));
+        TOPICS.put("scheduler", List.of(
+                "<gold><bold>Help: scheduler</bold></gold>",
+                "<gray>The scheduler tracks region deadlines and dispatches ready work to the bounded pool.</gray>",
+                "<gray>Inspect queue depth, due regions, worker utilization and quiesce wait together.</gray>",
+                "<gray>Staged work is retained under backlog; a growing queue means the current load is not keeping up.</gray>"));
+        TOPICS.put("patches", List.of(
+                "<gold><bold>Help: patches</bold></gold>",
+                "<gray>Patch toggles select individual optimization and interception paths.</gray>",
+                "<gray>patches.enabled is the master switch. The chunk-regionization patch is a prerequisite for chunk ownership.</gray>",
+                "<gray>Do not disable chunk-regionization while relying on region-owned execution.</gray>",
+                "<gray>Patch changes require a server restart.</gray>"));
+        TOPICS.put("health", List.of(
+                "<gold><bold>Help: health</bold></gold>",
+                "<gray>Reports the built-in invariants and available engine health checks.</gray>",
+                "<gray>Use /folia health first, then /folia workers, scheduler, regions verbose and metrics.</gray>"));
+        TOPICS.put("status", List.of(
+                "<gold><bold>Help: status</bold></gold>",
+                "<gray>Shows whether the engine is loaded and the configured feature gates.</gray>",
+                "<gray>Regionized gameplay, player staging and random ticks are separate settings.</gray>",
+                "<gray>Experimental execution is disabled by default and must be validated against your modpack.</gray>"));
+        TOPICS.put("threads", List.of(
+                "<gold><bold>Help: threads</bold></gold>",
+                "<gray>Shows worker threads and their current logical ownership context.</gray>",
+                "<gray>GLOBAL work runs on the Minecraft server thread after region workers quiesce.</gray>",
+                "<gray>REGION is a logical context; worker threads may execute different regions over time.</gray>"));
+        TOPICS.put("metrics", List.of(
+                "<gold><bold>Help: metrics</bold></gold>",
+                "<gray>Displays counters and timing measurements collected by the engine and dispatch layers.</gray>",
+                "<gray>Compare queue depth, region duration and quiesce wait across repeated samples.</gray>",
+                "<gray>Metrics do not replace a thread dump or a reproducible test case.</gray>"));
+        TOPICS.put("gpu", List.of(
+                "<gold><bold>Help: gpu</bold></gold>",
+                "<gray>EXPERIMENTAL: optional OpenCL acceleration for bulk AABB overlap filtering.</gray>",
+                "<gray>Enable gpu.enabled only after verifying the runtime and parity checks on the target hardware.</gray>",
+                "<gray>The CPU path remains available. Use /folia gpu bench to measure the local workload.</gray>"));
+        TOPICS.put("compatibility", List.of(
+                "<gold><bold>Help: compatibility</bold></gold>",
+                "<gray>/folia compat lists detected mods and the project's compatibility scan state.</gray>",
+                "<gray>A scan result is not a guarantee that a mod is thread-safe.</gray>",
+                "<gray>Test the exact production modpack with regionized features disabled first, then opt in on a disposable world.</gray>"));
+        TOPICS.put("regionization", List.of(
+                "<gold><bold>Help: regionization</bold></gold>",
+                "<gray>Vanilla selects the tick work on the server thread. Fabric-Folia captures selected bodies and dispatches supported bodies to region-owned workers.</gray>",
+                "<gray>Chunk ownership is updated as regions split and merge. Regions are execution contexts, not pinned worker threads.</gray>",
+                "<gray>This is experimental staged-region execution, not a full independently ticking Folia world loop.</gray>"));
+        TOPICS.put("configuration", List.of(
+                "<gold><bold>Help: configuration</bold></gold>",
+                "<gray>The file is config/fabric-folia.yml. Missing keys are repaired from the current schema.</gray>",
+                "<gray>Regionized gameplay, player connection staging and random ticks are separate feature gates and are disabled by default.</gray>",
+                "<gray>Edit the file on disk and restart. There is no /folia config or reload command.</gray>"));
+        TOPICS.put("thread checks", List.of(
+                "<gold><bold>Help: thread checks</bold></gold>",
+                "<gray>threads.thread-check-mode accepts STRICT, WARN or OFF.</gray>",
+                "<gray>STRICT throws on detected ownership violations. WARN reports and continues. OFF disables checks.</gray>",
+                "<gray>Run STRICT on a disposable test server; these checks cannot prove every mod safe.</gray>"));
+    }
 }

@@ -17,7 +17,9 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -80,12 +82,20 @@ class NetworkDispatchTest {
 
 			ThreadOwnership.enterSide(com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.NETWORK);
 
-			// No region owns (5000,5000): the dispatch must fall back to the
-			// global scheduler, which executes on its dispatch thread.
 			CountDownLatch ran = new CountDownLatch(1);
-			NetworkDispatch.runOnOwner(engine, "minecraft:overworld", 5000, 5000, () -> ran.countDown());
+			AtomicReference<Thread> executedThread = new AtomicReference<>();
+			AtomicReference<ThreadOwnership.Context> executedContext = new AtomicReference<>();
+			NetworkDispatch.runOnOwner(engine, "minecraft:overworld", 5000, 5000, () -> {
+				executedThread.set(Thread.currentThread());
+				executedContext.set(ThreadOwnership.current());
+				ran.countDown();
+			});
+			engine.beginTickPhase();
 			assertTrue(ran.await(10, TimeUnit.SECONDS),
-					"unowned-position network work must hop to the global context");
+					"unowned-position network work must run at the next server tick");
+			assertEquals(Thread.currentThread(), executedThread.get());
+			assertEquals(com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.GLOBAL,
+					 executedContext.get().kind());
 		} finally {
 			engine.shutdown(5000);
 		}

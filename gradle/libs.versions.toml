@@ -9,7 +9,7 @@ jsr305 = "3.0.2"
 adventure = "4.23.0"
 # Pinned here (not gradle.properties) so the root plugins block can alias() it;
 # 1.17.x is the Loom line required for MC 26.2 (verified 2026-09-14).
-fabricLoom = "1.17-SNAPSHOT"
+fabricLoom = "1.17.21"
 
 [plugins]
 fabricLoom = { id = "net.fabricmc.fabric-loom", version.ref = "fabricLoom" }

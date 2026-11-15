@@ -65,6 +65,11 @@ subprojects {
 		options.release = 25
 	}
 
+	tasks.withType<Jar>().configureEach {
+		isPreserveFileTimestamps = false
+		isReproducibleFileOrder = true
+	}
+
 	tasks.withType<Test>().configureEach {
 		useJUnitPlatform()
 		// Concurrency tests can be long-running; give them headroom but never let

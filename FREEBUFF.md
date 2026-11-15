@@ -20,10 +20,12 @@
 ## 1. Project identity
 
 - **Repo:** `fabric-folia` at `D:\fabric-folia` (MSYS path `/d/fabric-folia`).
-- **What it is:** a real Fabric mod implementing Folia-style regionized
-  multithreaded execution for vanilla Minecraft **26.2** (Mojang names ARE the
-  runtime names — no mappings layer). Must stay Fabric-native: mixins, Fabric API,
-  Loom. NEVER a Paper/Folia fork or patch-based distribution.
+- **What it is:** an experimental Fabric-native staged-region execution mod for
+  vanilla Minecraft **26.2**. Vanilla still selects tick work on the server thread;
+  supported captured bodies run in region-owned worker contexts behind server-thread
+  quiescence barriers. This is NOT a complete independently ticking Folia world loop
+  and is NOT production-ready. Must stay Fabric-native: mixins, Fabric API, Loom.
+  NEVER a Paper/Folia fork or patch-based distribution.
 - **License:** Apache-2.0, Palorder Softworks, 2026.
 - **Git:** `main` branch — **the owner directive (2026-09-25) is to stay on
   main and push there**; remote `origin` =
@@ -32,29 +34,27 @@
 - **Modules:** `api` (public contract, ~968 LOC) → `common` (engine core: regionizer,
   schedulers, config, metrics, threading) → `fabric` (mixins, engine bootstrap,
   entrypoints, the only module touching Minecraft classes).
-- **Mixin count:** 24 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
-  (`ChunkTicketMixin` added in the 2026-09-25 ticket-deferral turn; a faulty
-  `ReportTypeMixin` was removed in commit `c36f8c3`).
-- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 133/133 green
-  (2026-09-25 ticket-deferral turn; no Mockito). Fabric tests boot the REAL engine
-  (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
-  see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
+- **Mixin inventory:** 26 mixins are registered in fabric/src/main/resources/fabricfolia.mixins.json; source intent and release validation are documented in MIXINS.md.
+- **Tests:** latest 2026-11-15 full validation: 227 tests green (common 142,
+  api 4, fabric 81), zero failures/errors/skips. This is automated unit/integration
+  coverage only; the candidate has NOT received a new dedicated-server boot or soak.
 - **CI: JENKINS IS THE CI (owner directive, 2026-10-06) — GitHub Actions is
-  NOT used.** `.github/workflows/build.yml` was DELETED this turn (it could
-  never run: account-level Actions disabled, confirmed 422 three times).
-  `Jenkinsfile` = the only pipeline: stage 1 `./gradlew :common:test
-  :fabric:test :api:test --stacktrace` with `junit` publishing of
-  `*/build/test-results/test/*.xml`, stage 2 `./gradlew build --stacktrace`,
-  then archives `fabric/build/libs/*.jar`. README already documents the
-  self-hosted instance (jenkins.palorderhosting.net) as primary.
+  NOT used.** `.github/workflows/build.yml` remains deleted. `Jenkinsfile` is the
+  only pipeline. Current pipeline requires non-empty module-specific JUnit XML,
+  verifies exact branded mod/API artifacts and metadata, creates SHA-256 checksums
+  and a release manifest, archives only validated candidates, and has an explicit
+  PRODUCTION_RELEASE gate. Stable Fill publication is disabled unless a clean-tree,
+  exact-commit approval record contains runtime soak, compatibility, and independent
+  review evidence. Current approval record is BLOCKED.
 
 ## 2. Architecture in one page
 
 - **Staging model (the load-bearing idea):** vanilla's own server-thread tick passes
   decide WHAT to tick; capture mixins stage the *bodies* into `RegionStageHub`
   (`fabric/.../engine/RegionStageHub.java`); at end of server tick the engine flushes
-  each staged batch, grouped by owning region, onto that region's task queue
-  (`RegionScheduler`, shared worker pool). Slices: ENTITY, BLOCK_ENTITY,
+  staged bodies grouped by owning region AND target chunk, into position-aware task
+  batches on each region queue (`RegionScheduler`, shared worker pool). Each staged
+  batch is tied to one chunk so split migration can move it to the post-split owner. Slices: ENTITY, BLOCK_ENTITY,
   SCHEDULED_TICK, PLAYER (declared LAST to preserve vanilla intra-tick order:
   entity pass before connection tick, per region).
 - **Player path (gated by config `gameplay.stage-player-path`, default off):**
@@ -72,19 +72,18 @@
   global state.
 - **Transitions:** `RegionTransitions` (`fabric/.../engine/RegionTransitions.java`)
   routes worker-context teleports to the destination context (region queue, or the
-  global scheduler for unowned chunks), with a CAS idempotence window
-  (entity id → stamp, 50 ms tick window). `EntityTeleportMixin` captures
+  GLOBAL scheduler for unowned chunks), with a CAS idempotence window keyed by
+  (source world, entity id). EntityTeleportMixin captures
   `Entity.teleport(TeleportTransition)` HEAD, cancellable.
 - **Entity ownership:** `EntityRegionTracker` + `EntityMixin` (add/remove/move hooks,
   per-entity cached tracker + packed chunk); `RegionEntityRegistry` does atomic
   stripe-locked register/migrate/unregister.
 - **Threading classification:** `ThreadOwnership` — one context slot per thread;
-  kinds UNKNOWN/NETWORK/GLOBAL/REGION/...; region workers run inside REGION context
-  (set by `RegionScheduler` line ~501 `enterRegion`). Check facade: `RegionChecks`,
+  kinds UNKNOWN/NETWORK/GLOBAL/REGION/...; region workers run inside REGION context.
+  GLOBAL callbacks run on the Minecraft server thread after region workers quiesce;
+  there is no dedicated global scheduler daemon thread. Check facade: `RegionChecks`,
   violations: `ViolationReporter`. Mandates §8/§11/§15/§32 live in docs/mandates.
-- **Metrics:** `RegionMetrics` (`common/.../metrics/RegionMetrics.java`) — enum
-  `Counter` + `snapshotLines()`. `/folia` command: status|shutdown|regions|entities|
-  threads|metrics|global|watchdog|compat|pin|unpin.
+- **Metrics:** RegionMetrics (common/.../metrics/RegionMetrics.java) provides counters and timing snapshots. /folia commands include status, shutdown, regions, workers, scheduler, patches, health, threads, metrics, entities, gpu, compat, pin, unpin, version and help. Exact tree and permissions are in docs/command-reference.md.
 - **Config:** `common/.../config/` — `CommentedYaml` (has `collapseDuplicates` for
   last-wins duplicate keys), `ConfigWriter` (groups sections by name),
   `FoliaConfig`. Runtime file `fabric/run/config/fabric-folia.yml` is gitignored.
@@ -1447,10 +1446,25 @@ Named jar for inspection (project loom cache):
 - Jenkinsfile now checks that the publisher script is readable by the Jenkins user, then invokes it explicitly with bash "$PUBLISH_SCRIPT" instead of requiring the script's executable bit. Publisher arguments, artifact selection, version/build/channel values, and failure propagation are unchanged. If the script is not readable or the parent path cannot be traversed, the pipeline emits an explicit diagnostic.
 - Commit: 988b58744feaf44a400fa6e0319c21375160b57d (ci: invoke fill publisher through bash). The next Jenkins run must confirm that the Jenkins account can read the file and that the publisher itself succeeds; no live publisher invocation was performed during this change.
 
-### 2026-11-14 — Jenkins Fill publisher privilege boundary and pipeline repair
-- Jenkins build output confirmed that the Linux tests, full Gradle build, and artifact archive all passed. The remaining failure was inside the Fill publishing stage, which returned exit code 1 without useful output because the publisher script intentionally suppresses tracing.
-- Inspection on FAC established the permission boundary: `fill.env` and `storage/admin/credentials.sqlite` are administrator-owned mode 0600, and `storage/admin/` is mode 0700. Jenkins must not be granted direct access to these secrets or the encrypted credential database.
-- The existing `/usr/local/sbin/fill-publish-fabric-folia` helper was inspected. It validates the project, version, build number, channel, and canonical artifact path, restricts artifacts to `/var/lib/jenkins/workspace/fabric-folia_main/fabric/build/libs/*.jar`, then executes the existing publisher as the administrator account. Its file metadata reports mode 0755. The sudoers file `/etc/sudoers.d/jenkins-fill-publish` is present with mode 0440; its contents and sudoers parse status still need host-side validation.
-- Repaired the `Publish to Fill` stage in `Jenkinsfile`. It now checks that the helper is executable, makes the built artifact readable, resolves its canonical path, and invokes `sudo -n -u administrator -- /usr/local/sbin/fill-publish-fabric-folia ...`. The Linux test, optional cross-OS, build, archive, and post stages were retained.
-- Commit: `9958297999c8b35a57eefa291c0e140ff0d0708c` (`ci: fix Fill publishing stage to use restricted helper`). The next Jenkins run must verify that the sudoers rule authorizes the command and that the upload succeeds. Do not loosen permissions on `fill.env`, `storage/admin/`, or `credentials.sqlite`.
-- Operator clarification: the Jenkins `sh ''' ... '''` block is Groovy Pipeline syntax and must be edited in the repository's `Jenkinsfile`; it is not a shell command to paste into an SSH terminal.
+
+### 2026-11-15 — staged-region correctness, API and release-candidate recovery
+
+- **Multi-role Freebuff audit completed (read-only):** planner/architecture, runtime/performance, public API, QA/security/release, and OSS branding roles produced `TEAM_REPORT_PLANNER.md`, `TEAM_REPORT_RUNTIME.md`, `TEAM_REPORT_API.md`, `TEAM_REPORT_QA.md`, and `TEAM_REPORT_BRANDING.md`. The five inspection sessions completed. A second five-session coding-agent wave could not be started because the Freebuff concurrent-session limit was reached. No coding-agent completion is claimed; bounded edits were performed by the primary manager after the audit.
+- **Global scheduler safety:** removed the dedicated `FabricFolia-Global` 50ms thread. `GlobalSchedulerImpl.tick()` is invoked in `beginTickPhase()` after worker quiescence on the Minecraft server thread, inside GLOBAL context. Delay and repeat cadence is server ticks. Submissions after close are rejected.
+- **Worker shutdown:** task-start is serialized against shutdown under the pool lock. Shutdown clears and counts abandoned queued tasks; post-close submissions reject instead of silently entering a queue that cannot drain.
+- **Region split safety:** stage flush groups bodies by `(Region, packed chunk)`, creates bounded one-chunk StagedBatch tasks, and carries chunk positions into RegionTaskQueue entries. Added a split regression that checks batches move to post-split owners. Removed the old overload branch that discarded whole staged gameplay rounds; queued rounds are retained under bounded queue backpressure. This trades intentional simulation loss for possible queue growth under sustained overload; live stress/throughput verification is still required.
+- **World-qualified identity:** packet owner checks now compare the current RegionInfo world key before accepting a matching region id. Teleport de-duplication keys are `(source world, entity id)` rather than entity id only.
+- **Configuration:** config schema version 2; added distinct `patches.fabricfolia.chunk-regionization` key (was incorrectly tied to the owner-lookup switch), and binds scheduler-dispatch/region-lookup choices at world scheduler creation. Experimental regionized gameplay and player connection staging now default false. Random ticks remain separately gated.
+- **Developer API:** `api` publishes a standalone `fabric-folia-api` Maven artifact to Maven Local, includes sources/Javadoc artifacts, and has four contract tests. A scratch external consumer compiled against the published 0.1.0 API jar. No public Maven repository exists.
+- **Brand/docs:** README, architecture, scheduler/threading, compatibility, troubleshooting, testing, mixin inventory, command/configuration/status docs, contribution/security/conduct/changelog and API guide now describe the staged model and actual release status. `/folia help` now enumerates current commands and retains all existing help topic keys. `/folia shutdown` no longer claims that worlds are saved; use `/stop` for routine saved shutdown.
+- **Jenkins/release:** replaced unconditional main-to-stable glob publishing with strict module report checks, exact mod/API JAR paths, JAR/Fabric metadata/mixin class validation, nested dependency checks, SHA-256 hashes and candidate manifest. Stable publication requires explicit PRODUCTION_RELEASE and a clean-tree exact-commit approval file with runtime soak, compatibility and independent review evidence. `release/production-approval.json` remains BLOCKED and Fill stable was not called.
+- **Validation:** full clean Gradle test/build and Maven Local API publication passed. Reports: common 142, api 4, fabric 81 = 227 total, no failures, errors or skips. `scripts/verify_release.py` validated mod jar `fabric-folia-0.1.0.jar` (1,241,011 bytes, SHA-256 `e8c82cc8694594b1bffea7bfb9be53cd7c95e5c518919c3e5892eb7d3905fe19`) and API jar `fabric-folia-api-0.1.0.jar` (12,926 bytes, SHA-256 `93343ce1c98a285eb43063218f06f197718f8f35551ef2959190170edb0e5d38`). External API consumer compile passed. Production verifier was also exercised with the BLOCKED approval and correctly failed closed.
+- **NOT VERIFIED:** no new dedicated-server boot, gameplay run, long runtime soak, persistence/restart validation, or production modpack matrix was performed. The current work must remain a release candidate, not a production release. Known unresolved items include the server-thread quiesce timeout's indefinite safety wait if a worker never settles, player entity/connection atomicity, third-party mod safety, and live performance under overload. Do not publish this candidate to the stable Fill channel.
+
+
+### Upstream Jenkins Fill publisher privilege boundary (origin/main, 2026-11-14)
+
+- Jenkins build output confirmed Linux tests, the full Gradle build, and artifact archive had passed; the remaining failure was inside Fill publishing.
+- The host permission boundary is intentional: `fill.env` and `storage/admin/credentials.sqlite` are administrator-owned mode 0600, and `storage/admin/` is mode 0700. Jenkins must not receive direct access to those secrets or the encrypted credential database.
+- The restricted helper `/usr/local/sbin/fill-publish-fabric-folia` validates project/version/build/channel/canonical artifact path, restricts the artifact to the Jenkins Fabric-Folia workspace's `fabric/build/libs/` JARs, and runs the publisher as the administrator account. The sudoers file `/etc/sudoers.d/jenkins-fill-publish` exists with mode 0440; its contents and parse status were not independently verified during this pass.
+- Jenkins must call the restricted helper via `sudo -n -u administrator --`, never the underlying publisher script. Preserve the helper's path restrictions and do not loosen permissions on `fill.env`, `storage/admin/`, or `credentials.sqlite`. A later Jenkins run must confirm that the configured sudoers rule authorizes the exact helper invocation.

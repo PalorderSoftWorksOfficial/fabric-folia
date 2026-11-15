@@ -169,9 +169,7 @@ public final class FoliaConfig {
 					+ "). Update Fabric-Folia, or restore a matching config.");
 		}
 		if (version < ConfigSchema.CURRENT_VERSION) {
-			// Future migrations chain here, e.g. migrateV1toV2(parsed).
-			// After this build there are no older versions; the branch exists so
-			// the migration point is explicit, not implicit.
+			// Missing schema options are backfilled by mergePreservingComments.
 		}
 	}
 
@@ -204,7 +202,7 @@ public final class FoliaConfig {
 
 	/**
 	 * @return whether regionized gameplay staging is enabled
-	 * ({@code general.regionized-gameplay}; default true). Entity tick bodies
+	 * ({@code general.regionized-gameplay}; default false). Entity tick bodies
 	 * and block-entity tick bodies execute on the owning region's worker;
 	 * false keeps those bodies on the vanilla server thread.
 	 */

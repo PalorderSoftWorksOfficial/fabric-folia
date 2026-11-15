@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -30,7 +31,6 @@ class RegionStageHubParallelGateTest {
 
 	private static final int MIN_PARALLEL_DEFAULT = 32;
 	private static final int MIN_DISPATCH_DEFAULT = 64;
-	private static final int SKIP_THRESHOLD_DEFAULT = 3;
 	private static final int BODIES_PER_TASK_DEFAULT = 32;
 
 	@AfterEach
@@ -38,7 +38,6 @@ class RegionStageHubParallelGateTest {
 		ThreadOwnership.clear();
 		RegionStageHub.MIN_PARALLEL_BODIES = MIN_PARALLEL_DEFAULT;
 		RegionStageHub.MIN_DISPATCH_TOTAL = MIN_DISPATCH_DEFAULT;
-		RegionStageHub.REGION_SKIP_THRESHOLD = SKIP_THRESHOLD_DEFAULT;
 		RegionStageHub.BODIES_PER_TASK = BODIES_PER_TASK_DEFAULT;
 		ServerThreadDeferral.clearAll();
 		ChunkResidency.clearAll();
@@ -161,8 +160,8 @@ class RegionStageHubParallelGateTest {
 		}
 		hub.flushStaged();
 
-		// total ≥ MIN_DISPATCH_TOTAL: a hot single region must be ISOLATED
-		// onto its own worker (slow-motion capable), not paid inline.
+		// total >= MIN_DISPATCH_TOTAL: a hot single region is isolated
+		// onto its own worker rather than paid inline.
 		assertEquals(100, hub.pendingBodies(),
 				"a large single-region batch must dispatch for isolation");
 		assertEquals(0, runs.get(), "dispatched bodies must not also run at flush");
@@ -193,8 +192,58 @@ class RegionStageHubParallelGateTest {
 		scheduler.close();
 	}
 
+
 	@Test
-	void backedUpRegionSkipsARoundExplicitlyAndResumes() throws Exception {
+	void queuedBatchesArePartitionedByChunkOnRegionSplit() throws Exception {
+		WorldRegionizer rz = new WorldRegionizer("test:world",
+				new RegionizerConfig(2, 1, 2, 4, 40),
+				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
+		for (int x = 0; x <= 19; x++) {
+			rz.addChunk(x, 0);
+		}
+		Region parent = rz.ownerOfChunk(0, 0);
+		assertEquals(parent, rz.ownerOfChunk(19, 0));
+		RegionScheduler scheduler = new RegionScheduler(rz, 1, ValidationMode.OFF,
+				r -> { }, message -> { });
+		RegionStageHub hub = new RegionStageHub("test:world", rz, scheduler,
+				new RegionMetrics(1), message -> { });
+		RegionStageHub.MIN_PARALLEL_BODIES = 0;
+		RegionStageHub.MIN_DISPATCH_TOTAL = 0;
+		ChunkPos left = new ChunkPos(0, 0);
+		ChunkPos right = new ChunkPos(19, 0);
+		AtomicInteger runs = new AtomicInteger();
+		for (int i = 0; i < 32; i++) {
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(left, runs)));
+			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(right, runs)));
+		}
+		hub.flushStaged();
+		assertEquals(64, hub.pendingBodies());
+		assertEquals(2, scheduler.queueOf(parent).size(),
+				"one bounded queue entry must be created per target chunk");
+
+		for (int x = 2; x <= 17; x++) {
+			rz.removeChunk(x, 0);
+		}
+		assertTrue(rz.tryBeginTick(parent));
+		rz.completeTick(parent, 1);
+
+		Region leftOwner = rz.ownerOfChunk(0, 0);
+		Region rightOwner = rz.ownerOfChunk(19, 0);
+		assertNotEquals(leftOwner, rightOwner);
+		assertEquals(1, scheduler.queueOf(leftOwner).size(),
+				"the left chunk's queued batch must move to its split child");
+		assertEquals(1, scheduler.queueOf(rightOwner).size(),
+				"the right chunk's queued batch must move to its split child");
+		assertEquals(2, scheduler.queueOf(leftOwner).size() + scheduler.queueOf(rightOwner).size(),
+				"both position-targeted batches must be owned by the post-split regions");
+		assertEquals(leftOwner == parent || rightOwner == parent ? 1 : 0, scheduler.queueOf(parent).size(),
+				"the original region object may survive as the owner of the largest component");
+
+		scheduler.close();
+	}
+
+	@Test
+	void backedUpRegionRetainsEveryStagedRound() throws Exception {
 		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
 				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
 		Region region = rz.addChunk(0, 0);
@@ -205,37 +254,35 @@ class RegionStageHubParallelGateTest {
 
 		ChunkPos chunk = new ChunkPos(0, 0);
 		AtomicInteger runs = new AtomicInteger();
-		long skippedBefore = RegionStageHub.regionBehindSkipped();
-		RegionStageHub.REGION_SKIP_THRESHOLD = 0;
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
 		hub.flushStaged();
-		assertEquals(80, hub.pendingBodies(), "round 1 must dispatch");
+		assertEquals(80, hub.pendingBodies());
+		int queuedAfterFirst = scheduler.queueOf(region).size();
 
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
 		hub.flushStaged();
-		assertEquals(80, hub.pendingBodies(),
-				"a backed-up region must not grow the queue - the round is skipped, not piled on");
-		assertEquals(skippedBefore + 80, RegionStageHub.regionBehindSkipped(),
-				"every skipped body must be counted - slow-motion is never silent");
-		assertEquals(0, runs.get(), "skipped bodies must not run inline either");
+		assertEquals(160, hub.pendingBodies(),
+				"an overloaded region must retain the next round rather than discard it");
+		assertTrue(scheduler.queueOf(region).size() > queuedAfterFirst);
+		assertEquals(0, runs.get(), "queued work must not also run inline");
 
 		scheduler.queueOf(region).dropAll();
+		hub.flushStaged();
+		assertEquals(0, hub.pendingBodies());
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
 		hub.flushStaged();
-		assertEquals(160, hub.pendingBodies(), "staging must resume once the region drains");
-		assertEquals(skippedBefore + 80, RegionStageHub.regionBehindSkipped(),
-				"no new skips once the region catches up");
+		assertEquals(80, hub.pendingBodies());
 		scheduler.close();
 	}
 
 	@Test
-	void playerSliceIsExemptFromSlowMotion() throws Exception {
+	void playerSliceAlsoRetainsItsQueuedRound() throws Exception {
 		WorldRegionizer rz = new WorldRegionizer("test:world", RegionizerConfig.forTests(),
 				new AtomicInteger(1)::getAndIncrement, System::nanoTime);
 		rz.addChunk(0, 0);
@@ -246,7 +293,6 @@ class RegionStageHubParallelGateTest {
 
 		ChunkPos chunk = new ChunkPos(0, 0);
 		AtomicInteger runs = new AtomicInteger();
-		RegionStageHub.REGION_SKIP_THRESHOLD = 0;
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.ENTITY, new CountingBody(chunk, runs)));
 		}
@@ -256,11 +302,8 @@ class RegionStageHubParallelGateTest {
 		for (int i = 0; i < 80; i++) {
 			assertTrue(hub.stageIfRoom(RegionStageHub.Slice.PLAYER, new CountingBody(chunk, runs)));
 		}
-		long skippedBefore = RegionStageHub.regionBehindSkipped();
 		hub.flushStaged();
-		assertEquals(160, hub.pendingBodies(), "PLAYER bodies must always dispatch, even into a backed-up region");
-		assertEquals(skippedBefore, RegionStageHub.regionBehindSkipped(),
-				"PLAYER bodies must never count as slow-motion skips");
+		assertEquals(160, hub.pendingBodies(), "PLAYER bodies must be queued without discarding the ENTITY or PLAYER round");
 		scheduler.close();
 	}
 }

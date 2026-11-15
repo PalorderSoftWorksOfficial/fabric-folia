@@ -8,18 +8,11 @@
 package com.palordersoftworks.fabricfolia.api;
 
 import com.palordersoftworks.fabricfolia.api.annotations.AnyThread;
-import com.palordersoftworks.fabricfolia.api.annotations.GlobalThread;
 
 /**
- * Schedules work on the global execution context: the context that owns genuinely
- * server-wide state — game rules, world border definition, the regionizer
- * itself, cross-world teleport bookkeeping (spec section 4).
- *
- * <p>The architectural reference is Folia's global region task queue (documented
- * design, clean-room implementation): one always-running 20 TPS context that owns
- * what no region can own. Global work is scheduled here rather than executed
- * inline on callers' threads so global state has exactly one owning context at
- * any moment.</p>
+ * Schedules work on the server-thread global execution context. Tasks are drained
+ * during the server tick after region workers have quiesced and before vanilla
+ * world mutation begins. This is not an independently ticking Folia global region.
  *
  * <p><strong>Anti-bottleneck rule (spec 4):</strong> the global context exists for
  * state that is actually global — it must never become the catch-all route for
@@ -31,10 +24,8 @@ public interface GlobalScheduler {
 	 * Executes the task on the global context as soon as it can after scheduling.
 	 *
 	 * <p><strong>Thread contract:</strong> callable from any thread; runs on the
-	 * global context's worker; executes before the global context's next tick pass
-	 * completes; the task may access global-owned state directly, must not block,
-	 * and must not touch region-owned state (route region work through
-	 * {@link RegionScheduler}).</p>
+	 * Minecraft server thread in GLOBAL context before the next vanilla tick
+	 * mutation phase; must not block or access region-owned state.</p>
 	 */
 	void run(Runnable task);
 
@@ -42,7 +33,7 @@ public interface GlobalScheduler {
 	 * Executes the task on the global context after {@code delay} global ticks.
 	 *
 	 * <p><strong>Thread contract:</strong> as {@link #run(Runnable)}, but executes
-	 * when the global tick counter reaches {@code currentTick + delay}.</p>
+	 * after the requested number of server ticks.</p>
 	 */
 	void runDelayed(int delay, Runnable task);
 
@@ -60,10 +51,8 @@ public interface GlobalScheduler {
 	 * otherwise schedules it. Used by console command handling and other global
 	 * entry points that may be invoked from arbitrary threads.
 	 *
-	 * <p><strong>Thread contract:</strong> callable from any thread; when run
-	 * inline the exception behavior of {@code task} propagates to the caller;
-	 * otherwise as {@link #run(Runnable)}.</p>
+	 * <p><strong>Thread contract:</strong> callable from any thread; when already
+	 * in GLOBAL context the task runs inline, otherwise it is queued.</p>
 	 */
-	@GlobalThread
 	void runOrSchedule(Runnable task);
 }

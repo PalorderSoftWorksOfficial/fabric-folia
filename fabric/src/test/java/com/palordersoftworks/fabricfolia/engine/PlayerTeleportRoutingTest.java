@@ -18,6 +18,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,9 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * teleport resolves to the destination region's queue (region hop), falls
  * back to the global context for unowned destinations, refuses to run when
  * the engine is down, and completes every accepted dispatch exactly once.
- * The idempotence window itself is keyed by live entity ids (unconstructible
- * in unit tests — {@code Entity} needs a full level) and is shared code with
- * the live-proven {@code dispatch} path.
+ * The idempotence window uses source-world-qualified entity identity so
+ * equal numeric entity ids in different dimensions cannot collide.
  */
 class PlayerTeleportRoutingTest {
 
@@ -81,18 +81,21 @@ class PlayerTeleportRoutingTest {
 
 			ThreadOwnership.enterRegion(regionizer.ownerOfChunk(0, 0));
 
-			AtomicBoolean onGlobalDispatch = new AtomicBoolean();
+			AtomicReference<Thread> executedThread = new AtomicReference<>();
+			AtomicReference<ThreadOwnership.Context> executedContext = new AtomicReference<>();
 			CountDownLatch ran = new CountDownLatch(1);
 			boolean dispatched = RegionTransitions.dispatchKeyed(engine,
 					"minecraft:overworld", 5000, 5000, null, () -> {
-						onGlobalDispatch.set(Thread.currentThread().getName()
-								.contains("FabricFolia-Global"));
-						ran.countDown();
-					});
+					executedThread.set(Thread.currentThread());
+					executedContext.set(ThreadOwnership.current());
+					ran.countDown();
+				});
 			assertTrue(dispatched);
+			engine.beginTickPhase();
 			assertTrue(ran.await(10, TimeUnit.SECONDS));
-			assertTrue(onGlobalDispatch.get(),
-					"unowned destination must execute on the global dispatch thread");
+			assertEquals(Thread.currentThread(), executedThread.get());
+			assertEquals(com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.GLOBAL,
+					 executedContext.get().kind());
 		} finally {
 			engine.shutdown(5000);
 		}

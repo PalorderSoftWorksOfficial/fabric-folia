@@ -28,7 +28,7 @@ import java.lang.annotation.Target;
 /**
  * Marks a method or type whose calls (or executions) are confined to a thread
  * that is currently executing on behalf of exactly one owning
- * {@link com.palordersoftworks.fabricfolia.api.Region region}.
+ * {@link com.palordersoftworks.fabricfolia.api.RegionInfo region}.
  *
  * <p><strong>What this guarantees when present:</strong> the annotated code runs
  * inside a region tick or a task dispatched into a region's task queue; region-local

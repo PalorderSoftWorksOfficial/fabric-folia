@@ -11,50 +11,38 @@ import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * The global execution context: one task queue, dispatched once per global
- * tick (50ms cadence, Folia's "global region" concept, clean-room). Owns what
- * no region can own: game rules, world border, the regionizer itself,
- * cross-world bookkeeping (spec 4).
+ * Server-thread queue for state that is owned globally rather than by a
+ * particular world region.
  *
- * <p><strong>Threading:</strong> the queue is multi-producer (any thread may
- * schedule) and single-consumer (only the global dispatch drains it — the
- * engine must call {@link #dispatchPending()} from exactly one dispatch
- * context). The lock protects only the queue's internal deque; it is not a
- * gameplay-safety mechanism (spec 18 review note). The dispatcher thread lives
- * in the fabric module's engine bootstrap — keeping it out of this class keeps
- * the queue testable without real time passing.</p>
+ * <p>The queue accepts submissions from any thread and is drained by the
+ * server thread after region workers have quiesced.</p>
  *
- * <p><strong>Delayed/repeating semantics:</strong> delays are measured in
- * global ticks ({@link #tickCount()}); a delayed task's wrapper re-queues
- * itself until its deadline tick, mirroring the region mechanism so both time
- * bases behave identically through the engine's lifecycle.</p>
+ * <p>Delays and repeating periods are measured in server ticks.</p>
  */
 public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable {
 
 	private final ReentrantLock lock = new ReentrantLock();
 	private final ArrayDeque<Runnable> tasks = new ArrayDeque<>();
-	private final Condition hasWork = lock.newCondition();
 
 	/**
-	 * The global tick counter (the global context's time base). Written once
-	 * per {@link #tick()}, read by delayed-task wrappers (same thread) and
-	 * diagnostics.
+	 * The server tick counter used by global delayed tasks.
 	 */
-	private long tickCount;
+	private volatile long tickCount;
+	private boolean closed;
 
 	public GlobalSchedulerImpl() {
 	}
 
 	@Override
 	public void run(Runnable task) {
+		java.util.Objects.requireNonNull(task, "task");
 		lock.lock();
 		try {
+			ensureOpen();
 			tasks.add(task);
-			hasWork.signalAll();
 		} finally {
 			lock.unlock();
 		}
@@ -62,18 +50,23 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 
 	@Override
 	public void runDelayed(int delay, Runnable task) {
-		if (delay <= 0) {
-			run(task);
-			return;
+		java.util.Objects.requireNonNull(task, "task");
+		lock.lock();
+		try {
+			ensureOpen();
+			if (delay <= 0) {
+				tasks.add(task);
+			} else {
+				tasks.add(new DelayedGlobalTask(tickCount + delay, task));
+			}
+		} finally {
+			lock.unlock();
 		}
-		// Expressed against the global tick counter like the region variant —
-		// the wrapper re-queues until due, so it survives being enqueued early.
-		long target = tickCount + delay;
-		run(new DelayedGlobalTask(target, task));
 	}
 
 	@Override
 	public com.palordersoftworks.fabricfolia.api.RegionScheduler.CancelHandle runAtFixedRate(int initialDelayTicks, int periodTicks, Runnable task) {
+		java.util.Objects.requireNonNull(task, "task");
 		if (periodTicks <= 0) {
 			throw new IllegalArgumentException("periodTicks must be positive");
 		}
@@ -100,7 +93,14 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 
 	@Override
 	public void runOrSchedule(Runnable task) {
+		java.util.Objects.requireNonNull(task, "task");
 		if (ThreadOwnership.current().kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.GLOBAL) {
+			lock.lock();
+			try {
+				ensureOpen();
+			} finally {
+				lock.unlock();
+			}
 			task.run();
 			return;
 		}
@@ -110,15 +110,15 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 	/**
 	 * Advances the global tick counter by one and drains all due pending tasks
 	 * in the global context. Called exactly once per global tick by the
-	 * engine's global dispatch; MUST be called from only one thread at a time
-	 * (single-consumer contract — see class docs).
+	 * server tick after region workers have quiesced. MUST be called from only
+	 * the server thread.
 	 */
 	public void tick() {
-		tickCount++;
 		List<Runnable> due = new ArrayList<>();
 		List<Runnable> requeue = new ArrayList<>();
 		lock.lock();
 		try {
+			tickCount++;
 			Runnable task;
 			while ((task = tasks.poll()) != null) {
 				if (task instanceof DelayedGlobalTask delayed
@@ -151,10 +151,8 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 	}
 
 	/**
-	 * Drains and runs ALL pending tasks immediately in the global context,
-	 * ignoring delays. Quiescence path (spec 16): called once by the engine at
-	 * shutdown after the tick cadence has stopped, where "drop everything" is
-	 * worse than "finish everything once".
+	 * Drains and runs all pending tasks immediately in the global context,
+	 * ignoring delays. Called by the engine on the server thread during shutdown.
 	 */
 	public void dispatchPending() {
 		List<Runnable> pending;
@@ -190,8 +188,18 @@ public final class GlobalSchedulerImpl implements GlobalScheduler, AutoCloseable
 
 	@Override
 	public void close() {
-		// Queue is drained by the engine during quiescence (spec 16); nothing
-		// to release here beyond documenting the policy.
+		lock.lock();
+		try {
+			closed = true;
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	private void ensureOpen() {
+		if (closed) {
+			throw new java.util.concurrent.RejectedExecutionException("Global scheduler is closed");
+		}
 	}
 
 	/** Global-context task deferred to a future global tick. */

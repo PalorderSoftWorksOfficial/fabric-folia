@@ -45,7 +45,7 @@ public interface EntityScheduler {
 	 *   <li>May it block? No.</li>
 	 *   <li>May it cross region boundaries? Not directly; schedule follow-up work
 	 *       through the schedulers.</li>
-	 * </ul></p>
+	 * </ul>
 	 *
 	 * @param entityHandle opaque handle the implementation maps to a live entity
 	 * @param task         the work to run in the owner's context

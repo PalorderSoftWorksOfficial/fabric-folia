@@ -77,12 +77,25 @@ public final class RegionTransitions {
 	private static final AtomicLong PLAYER_TRANSITIONS = new AtomicLong();
 
 	/** In-flight transition guard: entity id -> stamp of the enqueued one. */
-	private static final ConcurrentHashMap<Integer, Long> IN_FLIGHT = new ConcurrentHashMap<>();
+	private static final ConcurrentHashMap<EntityTransitionKey, Long> IN_FLIGHT = new ConcurrentHashMap<>();
 
 	/** Transitions enqueued within the same engine tick collapse to one. */
 	private static final long TICK_WINDOW_NANOS = 50_000_000L; // one 50ms tick
 
 	private RegionTransitions() {
+	}
+
+	static record EntityTransitionKey(String sourceWorld, int entityId) {
+		EntityTransitionKey {
+			if (sourceWorld == null || sourceWorld.isBlank()) {
+				throw new IllegalArgumentException("sourceWorld must not be blank");
+			}
+		}
+	}
+
+	static EntityTransitionKey transitionKey(Entity entity) {
+		return new EntityTransitionKey(
+				entity.level().dimension().identifier().toString(), entity.getId());
 	}
 
 	/**
@@ -109,7 +122,7 @@ public final class RegionTransitions {
 		// Idempotence window: collapse duplicate triggers for the same
 		// entity within one tick.
 		long now = System.nanoTime();
-		Long prior = IN_FLIGHT.put(entity.getId(), now);
+		Long prior = IN_FLIGHT.put(transitionKey(entity), now);
 		if (prior != null && now - prior < TICK_WINDOW_NANOS) {
 			return true; // duplicate of a just-dispatched transition
 		}
@@ -165,7 +178,7 @@ public final class RegionTransitions {
 		}
 		if (entity != null) {
 			long now = System.nanoTime();
-			Long prior = IN_FLIGHT.put(entity.getId(), now);
+			Long prior = IN_FLIGHT.put(transitionKey(entity), now);
 			if (prior != null && now - prior < TICK_WINDOW_NANOS) {
 				return true; // duplicate of a just-dispatched transition
 			}

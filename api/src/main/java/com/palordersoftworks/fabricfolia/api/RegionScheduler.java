@@ -80,7 +80,7 @@ public interface RegionScheduler {
 	 *   <li>May it cross region boundaries? Not directly: touching another region
 	 *       from inside the task re-introduces the violation this API exists to
 	 *       prevent; schedule further work through this scheduler instead.</li>
-	 * </ul></p>
+	 * </ul>
 	 *
 	 * @param position world + chunk coordinates whose owner should run the task
 	 * @param task     the work to run; exceptions are handled by the region

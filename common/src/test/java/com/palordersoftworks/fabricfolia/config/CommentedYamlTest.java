@@ -110,8 +110,8 @@ class CommentedYamlTest {
 
 		assertTrue(text.contains("enabled: false"));
 		assertTrue(text.contains("region-section-size: 4"));
-		assertTrue(text.contains("config-version: 1"));
-		assertFalse(text.contains("config-version: 2"));
+		assertTrue(text.contains("config-version: 2"));
+		assertFalse(text.contains("config-version: 1"));
 	}
 
 	@Test

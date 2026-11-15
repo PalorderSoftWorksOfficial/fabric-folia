@@ -148,6 +148,8 @@ public class FabricFoliaMod implements ModInitializer {
 		Console.config("  Region workers: " + workers + (config.workerThreads() < 0
 				? " (auto: derived from available CPUs; set threads.worker-threads to override)" : " (configured)"));
 		Console.config("  Global scheduler: enabled");
+		Console.config("  Regionized gameplay bodies: " + (config.regionizedGameplay() ? "ENABLED (experimental; mod compatibility not certified)" : "disabled by default (set general.regionized-gameplay=true after validation)"));
+		Console.config("  Player connection staging: " + (config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH) instanceof Boolean b && b ? "ENABLED (experimental)" : "disabled by default"));
 		Console.config("  Thread-ownership checks: " + config.threadCheckMode()
 				+ ("STRICT".equals(config.threadCheckMode())
 						? " (development setting: real per-access cost - see THREADING.md)" : ""));
@@ -314,7 +316,7 @@ public class FabricFoliaMod implements ModInitializer {
 	 * and resolves their state from the config. Runs once at mod init; the
 	 * state is stable for the server's lifetime (see PatchRegistry).
 	 */
-	private static void declarePatches() {
+	static void declarePatches() {
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry
 				.register("regionize-chunk-load", "Chunk Load Regionization",
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.REGION,
@@ -408,14 +410,13 @@ public class FabricFoliaMod implements ModInitializer {
 	 * random-tick patch follows general.regionized-random-ticks. When the
 	 * global patches.enabled is false every layer is switched off.
 	 */
-	private static void resolvePatchStates(FoliaConfig config) {
-		var patches = com.palordersoftworks.fabricfolia.patches.PatchRegistry.class;
+	static void resolvePatchStates(FoliaConfig config) {
 		boolean global = config.patchesEnabled();
 		for (var layer : com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.values()) {
 			com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(layer, global);
 		}
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("regionize-chunk-load",
-				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_REGION_LOOKUP, true));
+				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_CHUNK_REGIONIZATION, true));
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-entity-ticks",
 				config.regionizedGameplay() && config.patchEnabled(
 						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_TICK, true));
@@ -426,7 +427,7 @@ public class FabricFoliaMod implements ModInitializer {
 				config.regionizedGameplay() && config.patchEnabled(
 						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_CHUNK_TICK, true));
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-player-path",
-				config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH) instanceof Boolean b ? b : true);
+				config.valueOrNull(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PLAYER_PATH) instanceof Boolean b ? b : false);
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("regionized-random-ticks",
 				config.regionizedRandomTicks() && config.patchEnabled(
 						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_RANDOM_TICK, true));
@@ -462,18 +463,8 @@ public class FabricFoliaMod implements ModInitializer {
 				+ com.palordersoftworks.fabricfolia.patches.PatchRegistry.patches().size()
 				+ " registered" + (blocked.isEmpty() ? "" : " (" + blocked.size() + " blocked)"));
 
-		boolean lookupActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.isEnabled("region-lookup");
-		boolean schedulerActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.isEnabled("scheduler-dispatch");
 		boolean taskQueueActive = com.palordersoftworks.fabricfolia.patches.PatchRegistry
 				.isEnabled("task-queue");
-		if (engine != null) {
-			for (var scheduler : engine.schedulers().values()) {
-				scheduler.setSchedulerDispatchPatch(schedulerActive);
-				scheduler.setOwnerLookupIndex(lookupActive);
-			}
-		}
 		com.palordersoftworks.fabricfolia.scheduler.RegionTaskQueue.setGlobalTaskQueuePatch(taskQueueActive);
 	}
 
