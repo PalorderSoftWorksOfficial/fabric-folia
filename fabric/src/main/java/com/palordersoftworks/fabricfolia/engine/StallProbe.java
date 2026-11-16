@@ -2,6 +2,7 @@ package com.palordersoftworks.fabricfolia.engine;
 
 import com.palordersoftworks.fabricfolia.console.Console;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntitySection;
@@ -39,6 +40,10 @@ public final class StallProbe {
 	private static final long POLL_MILLIS = 500;
 	private static final long STALL_MILLIS = 5000;
 	private static final long DUMP_GAP_MILLIS = 8000;
+	private static final int MAX_DUMP_FILES = 10;
+	private static final long MAX_DUMP_BYTES = 10L * 1024 * 1024;
+	private static final long MAX_DUMP_AGE_MILLIS = 7L * 24 * 60 * 60 * 1000;
+	private static final int MAX_DUMP_CHARS = 250_000;
 	/**
 	 * Watchdog-kill trajectory (26.2 bytecode: kill iff now−nextTickTime > 60s;
 	 * nextTickTime re-bases only every 100 ticks): at TPS below ~1.67 the
@@ -81,6 +86,11 @@ public final class StallProbe {
 	}
 
 	private static void run(MinecraftServer server) {
+		try {
+			pruneDumps(Path.of("stall-probes"), System.currentTimeMillis());
+		} catch (IOException e) {
+			Console.error("StallProbe: unable to prune old dump files: " + e);
+		}
 		Access access;
 		try {
 			access = new Access();
@@ -106,6 +116,16 @@ public final class StallProbe {
 			try {
 				int tick = server.getTickCount();
 				long now = System.nanoTime();
+				if (access != null && isIntentionallyPaused(server, access)) {
+					lastTick = tick;
+					lastProgress = now;
+					lastDump = now;
+					reported = false;
+					crawlTickBase = tick;
+					crawlWindowStart = now;
+					crawlReported = false;
+					continue;
+				}
 				if (crawlTickBase < 0) {
 					crawlTickBase = tick;
 					crawlWindowStart = now;
@@ -140,11 +160,72 @@ public final class StallProbe {
 					lastDump = now;
 					reported = true;
 					Path file = dump(server, access, tick, stalled);
-					Console.error("StallProbe: tick stalled " + stalled + "ms without progress; evidence -> "
-							+ file);
+					if (file == null) {
+						Console.error("StallProbe: tick stalled " + stalled + "ms without progress; evidence could not be written");
+					} else {
+						Console.error("StallProbe: tick stalled " + stalled + "ms without progress; evidence -> " + file);
+					}
 				}
 			} catch (Throwable t) {
 				Console.error("StallProbe: probe iteration failed: " + t);
+			}
+		}
+	}
+
+	static boolean shouldSuppressEmptyPause(boolean dedicatedServer, int pauseSeconds, int onlinePlayers, int emptyTicks) {
+		if (!dedicatedServer || pauseSeconds <= 0 || onlinePlayers != 0 || emptyTicks < 0) {
+			return false;
+		}
+		return emptyTicks >= pauseSeconds * 20L;
+	}
+
+	private static boolean isIntentionallyPaused(MinecraftServer server, Access access) {
+		if (!(server instanceof DedicatedServer dedicatedServer)) {
+			return false;
+		}
+		try {
+			return shouldSuppressEmptyPause(true, dedicatedServer.pauseWhenEmptySeconds(),
+					dedicatedServer.getPlayerList().getPlayerCount(), access.emptyTicks.getInt(server));
+		} catch (IllegalAccessException e) {
+			Console.error("StallProbe: unable to read empty-server pause state: " + e);
+			return false;
+		}
+	}
+
+	private static long lastModified(Path file) {
+		try {
+			return Files.getLastModifiedTime(file).toMillis();
+		} catch (IOException e) {
+			return Long.MIN_VALUE;
+		}
+	}
+
+	static void pruneDumps(Path dir, long nowMillis) throws IOException {
+		if (!Files.isDirectory(dir)) {
+			return;
+		}
+		List<Path> files;
+		try (var stream = Files.list(dir)) {
+			files = stream.filter(Files::isRegularFile)
+					.filter(path -> path.getFileName().toString().startsWith("stall-"))
+					.filter(path -> path.getFileName().toString().endsWith(".log"))
+					.toList();
+		}
+		files = new ArrayList<>(files);
+		files.sort((left, right) -> Long.compare(lastModified(right), lastModified(left)));
+		long retainedBytes = 0;
+		int retainedFiles = 0;
+		for (Path file : files) {
+			long modified = Files.getLastModifiedTime(file).toMillis();
+			long size = Files.size(file);
+			boolean expired = nowMillis - modified > MAX_DUMP_AGE_MILLIS;
+			boolean countExceeded = retainedFiles >= MAX_DUMP_FILES;
+			boolean bytesExceeded = size > MAX_DUMP_BYTES - retainedBytes;
+			if (expired || countExceeded || bytesExceeded) {
+				Files.deleteIfExists(file);
+			} else {
+				retainedFiles++;
+				retainedBytes += size;
 			}
 		}
 	}
@@ -187,17 +268,15 @@ public final class StallProbe {
 			Files.createDirectories(dir);
 			Path file = dir.resolve("stall-" + LocalDateTime.now()
 					.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS")) + ".log");
-			Files.writeString(file, sb, StandardCharsets.UTF_8);
+			String output = sb.length() > MAX_DUMP_CHARS
+					? sb.substring(0, MAX_DUMP_CHARS) + "\n[diagnostic output truncated]\n"
+					: sb.toString();
+			Files.writeString(file, output, StandardCharsets.UTF_8);
+			pruneDumps(dir, System.currentTimeMillis());
 			return file;
 		} catch (IOException e) {
-			Path tmp = Path.of(System.getProperty("java.io.tmpdir", "."))
-					.resolve("fabric-folia-stall-" + System.nanoTime() + ".log");
-			try {
-				Files.writeString(tmp, sb, StandardCharsets.UTF_8);
-				return tmp;
-			} catch (IOException e2) {
-				return tmp;
-			}
+			Console.error("StallProbe: unable to write or prune diagnostic dump: " + e);
+			return null;
 		}
 	}
 
@@ -306,6 +385,7 @@ public final class StallProbe {
 		final Field sectionStorage;
 		final Field sections;
 		final Field entityTickList;
+		final Field emptyTicks;
 		final Field sectionStorageField;
 		final Field sectionInstances;
 		final Field tickActive;
@@ -318,6 +398,7 @@ public final class StallProbe {
 			sectionStorage = field(PersistentEntitySectionManager.class, "sectionStorage");
 			sections = field(EntitySectionStorage.class, "sections");
 			entityTickList = field(ServerLevel.class, "entityTickList");
+			emptyTicks = field(MinecraftServer.class, "emptyTicks");
 			sectionStorageField = field(EntitySection.class, "storage");
 			Class<?> multiMap = Class.forName("net.minecraft.util.ClassInstanceMultiMap");
 			sectionInstances = field(multiMap, "allInstances");

@@ -99,9 +99,6 @@ public class FabricFoliaMod implements ModInitializer {
 	}
 
 	private static void startEngine(MinecraftServer server) {
-		// Started before any early return: vanilla mode (general.enabled=false)
-		// needs stall evidence too — the watchdog dump alone cannot attribute.
-		com.palordersoftworks.fabricfolia.engine.StallProbe.start(server);
 		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.noteServerThread(Thread.currentThread());
 		com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.installDiagnostics(Console::error);
 		Path configPath = Path.of("config", "fabric-folia.yml");
@@ -216,6 +213,7 @@ public class FabricFoliaMod implements ModInitializer {
 	 * is too early for level iteration). Runs on the server thread.
 	 */
 	private static void attachWorlds(MinecraftServer server) {
+		com.palordersoftworks.fabricfolia.engine.StallProbe.start(server);
 		FabricFoliaEngine current = engine;
 		RegionTickInterceptor currentInterceptor = interceptor;
 		if (current == null) {
