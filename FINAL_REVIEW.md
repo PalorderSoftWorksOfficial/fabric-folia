@@ -81,3 +81,33 @@ The local release verifier generated build/release-candidate/release-manifest.js
 ## Final decision
 
 The 0.1.0 output is a **validated automated release candidate**, not a verified production JAR. The Jenkins pipeline now archives only exact candidate JARs and refuses stable publication unless a separate approval file matches the exact source commit and contains runtime-soak, compatibility and independent-review evidence. That approval remains blocked. No Fill stable publication or production-server deployment was performed.
+
+
+## 2026-11-16 follow-up — API hardening and live candidate smoke boot
+
+The follow-up commit `d3b3e164dbc15a6f69fb9a4c2161c56f017a1fd2` is pushed to `origin/main`. It aligns the minimum Fabric Loader version with the actual target runtime (0.19.3), updates the compile target to Fabric API 0.161.0, adds standalone API metadata and public-surface tests, strengthens the release verifier for standalone and nested API metadata, and makes position-targeted API scheduling retry transient region ownership changes rather than silently losing work. Void scheduling calls reject after shutdown; `send` retains its boolean enqueue result.
+
+Final automated verification: common 144, API 10, Fabric 81; 235 tests total, 0 failures, 0 errors, 0 skipped. The clean-checkout release verifier passed and produced:
+
+| Artifact | Size | SHA-256 |
+|---|---:|---|
+| fabric-folia-0.1.0.jar | 1,241,623 bytes | 41789d71cc6753fe6fc000a615ad5b24568b4e7a12c40e71120e9c384633e0fe |
+| fabric-folia-api-0.1.0.jar | 13,378 bytes | 0047f6ba0a7f3de8c30d91028acef63123d7e29529b30d79eaac36d60f15903e |
+
+### Pelican target smoke deployment
+
+At the user's explicit request, `fabric-folia-0.1.0.jar` was uploaded to `thebrokenstarsmp-fabric:/mods/` and the Pelican restart action was accepted (HTTP 202). The restart log shows a graceful stop with players and all four dimensions saved, followed by a successful Fabric-Folia initialization. The panel reports the server running and the allocated Minecraft port is listening on the FAC LAN address.
+
+The target runtime was Minecraft 26.2, Fabric Loader 0.19.3, Java 25.0.5, with Fabric API 0.161.0 installed. The JAR metadata and build were aligned to Loader 0.19.3 before deployment.
+
+The live startup report showed 10 active patches of 12 registered (2 blocked), eight region workers, and eight async workers. The existing server config explicitly has regionized gameplay and player connection staging enabled. Its compatibility scan reports 248 mods undeclared, zero declaring support, and zero classified incompatible. Undeclared is not proof of incompatibility, but it is also not compatibility certification. The config was left unchanged.
+
+The server's empty-server pause activated after 60 seconds. StallProbe then emitted repeated stall errors while the server thread was waiting in `MinecraftServer.waitUntilNextTick`; the tick counter was stationary because the server was paused while empty. The local allocated port remained open and the panel state remained running. This is evidence of a StallProbe false positive for the idle-pause state, not evidence of a live gameplay stall. The probe should be updated to distinguish intentional empty-server pause from a stuck tick.
+
+Startup also logged a datapack function parse error for `orbital_strike_cannon:get_zombie_shulker` (`Expected literal` while parsing a command). Its relationship to this mod deployment has not been established and it remains a separate observed startup issue.
+
+No new full Pelican backup could be created through the available panel shell because its SQLite database connection rejected writes as read-only. Existing successful full backups are dated 2026-09-28 and 2026-09-30. The restart itself saved players and all dimensions successfully before launching the candidate.
+
+### Remaining release blockers
+
+The smoke boot proves that the candidate loads on this exact runtime and that the server reaches its idle-paused running state. It does not prove gameplay correctness, player movement/teleport/respawn safety, persistence after a longer run, mod compatibility, or performance under active player load. The server's explicit experimental settings and 248 undeclared mods make those checks especially important. The StallProbe idle-pause false positive and the datapack function parse error also need follow-up. `release/production-approval.json` remains BLOCKED; this deployment is a user-requested live candidate smoke test, not a production-readiness approval or stable Fill publication.
