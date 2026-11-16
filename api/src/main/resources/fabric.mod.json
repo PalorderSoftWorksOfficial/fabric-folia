@@ -1,0 +1,17 @@
+{
+	"schemaVersion": 1,
+	"id": "fabric-folia-api",
+	"version": "${version}",
+	"name": "Fabric-Folia API",
+	"description": "Compile-time API for Fabric-Folia region-aware mods. Bundled inside the Fabric-Folia mod jar; do not install or bundle a second copy.",
+	"authors": [
+		"Palorder Softworks"
+	],
+	"contact": {
+		"homepage": "https://github.com/palordersoftworks/fabric-folia",
+		"sources": "https://github.com/palordersoftworks/fabric-folia",
+		"issues": "https://github.com/palordersoftworks/fabric-folia/issues"
+	},
+	"license": "Apache-2.0",
+	"environment": "*"
+}

@@ -5,8 +5,8 @@
 | Component | Build constraint |
 |---|---|
 | Minecraft | 26.2 |
-| Fabric Loader | 0.19.5 or newer |
-| Fabric API | 0.160.0+26.2 |
+| Fabric Loader | 0.19.3 or newer |
+| Fabric API | 0.161.0+26.2 compile target; metadata minimum `>=0.160.0+26.2` |
 | Java | 25 or newer |
 
 These are build metadata constraints, not a claim that every listed combination or modpack has passed a production soak.

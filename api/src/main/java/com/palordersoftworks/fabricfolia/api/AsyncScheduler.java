@@ -23,13 +23,15 @@ import com.palordersoftworks.fabricfolia.api.annotations.AnyThread;
  * the global dispatch thread and NOT on region workers.</p>
  *
  * <p><strong>Thread contract:</strong> callable from any thread. Tasks run on
- * async pool threads with NO region context and NO global context attached —
- * they must not touch region-owned or global-owned state directly; route such
- * work through {@link RegionScheduler}, {@link GlobalScheduler}, or
- * {@link EntityScheduler}. Blocking is permitted (bounded by pool capacity:
- * {@code threads + queue limit}); unbounded queue growth is rejected with
+ * async pool threads with {@link ThreadContext.Kind#ASYNC} as their context and
+ * NO region or global ownership — they must not touch region-owned or
+ * global-owned state directly; route such work through {@link RegionScheduler},
+ * {@link GlobalScheduler}, or {@link EntityScheduler}. Blocking is permitted
+ * (bounded by pool capacity: configured worker threads plus a bounded queue);
+ * when every worker and queue slot is busy, {@code run} rejects with
  * {@link java.util.concurrent.RejectedExecutionException} rather than
- * silently accumulating.</p>
+ * silently accumulating. Faulted tasks are reported to server diagnostics and
+ * do not stop the pool.</p>
  */
 @AnyThread
 public interface AsyncScheduler {

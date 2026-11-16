@@ -17,10 +17,12 @@ import com.palordersoftworks.fabricfolia.api.annotations.AnyThread;
  * migrate between regions as they move, and tasks aimed at an entity must follow
  * it — or notice that it vanished — rather than aiming at a fixed position.</p>
  *
- * <p><strong>Why a handle, not an entity reference:</strong> the API module has no
- * Minecraft types. Implementations receive a caller-supplied opaque handle that
- * the implementation can map back to the live entity. This keeps the API surface
- * clean while allowing the fabric module to pass strong references internally.</p>
+ * <p><strong>About the handle:</strong> the API module has no Minecraft types, so
+ * the handle parameter is declared {@code Object}. At runtime Fabric-Folia
+ * requires it to be the live {@code net.minecraft.world.entity.Entity} instance
+ * and rejects any other value with {@link IllegalArgumentException}; it is not an
+ * opaque token a consumer can create. The implementation resolves the handle and
+ * its world when the method is called, so the entity must be valid at that moment.</p>
  */
 @AnyThread
 public interface EntityScheduler {
@@ -35,11 +37,14 @@ public interface EntityScheduler {
 	 *   <li>When: next tick of the owning region (or after {@code delay} ticks of
 	 *       that region's counter for the delayed variant).</li>
 	 *   <li>If the entity is gone (removed, dead, or unloaded) by execution time:
-	 *       {@code retired} runs instead with no guarantees about context state —
-	 *       it may not touch any region-owned state. If {@code retired} is null
-	 *       the task is silently dropped. If the entity migrated regions between
-	 *       scheduling and execution, the task runs in the NEW owner's context —
-	 *       following the entity is the whole point.</li>
+	 *       {@code retired} runs instead. It makes no guarantee that region-owned
+	 *       state is safe to touch. If {@code retired} is null the task is silently
+	 *       dropped. When the handle cannot be resolved at schedule time,
+	 *       {@code retired} runs synchronously on the calling thread; when the
+	 *       entity disappears later, {@code retired} runs on the region worker
+	 *       that was about to execute the task. If the entity migrated regions
+	 *       between scheduling and execution, the task runs in the NEW owner's
+	 *       context — following the entity is the whole point.</li>
 	 *   <li>May it access region-owned state directly? Yes — the owner region's
 	 *       state, including the entity itself.</li>
 	 *   <li>May it block? No.</li>
@@ -47,7 +52,9 @@ public interface EntityScheduler {
 	 *       through the schedulers.</li>
 	 * </ul>
 	 *
-	 * @param entityHandle opaque handle the implementation maps to a live entity
+	 * @param entityHandle the live Minecraft entity instance (declared Object because
+	 *                     this module carries no Minecraft types); any other value is
+	 *                     rejected with IllegalArgumentException
 	 * @param task         the work to run in the owner's context
 	 * @param retired      fallback run if the entity no longer exists, or null
 	 */
@@ -59,7 +66,7 @@ public interface EntityScheduler {
 	 * re-validated against the entity's owner at execution time. Migration
 	 * between schedule and execution follows the entity, per {@link #run}.
 	 *
-	 * @param entityHandle opaque entity handle
+	 * @param entityHandle the live Minecraft entity instance
 	 * @param delay        non-negative delay in ticks of the owning region
 	 * @param task         the work to run
 	 * @param retired      fallback run if the entity no longer exists, or null
@@ -78,7 +85,7 @@ public interface EntityScheduler {
 	 * re-homes with the queue); cancellation stops future firings; retired
 	 * callback contract as in {@link #run}.</p>
 	 *
-	 * @param entityHandle opaque entity handle
+	 * @param entityHandle the live Minecraft entity instance
 	 * @param initialDelayTicks delay before first execution, in owner ticks
 	 * @param periodTicks  period between executions, in owner ticks
 	 * @param task         the work to run

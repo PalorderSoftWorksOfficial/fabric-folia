@@ -514,18 +514,21 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	 * deadline intact — see {@link Region#tickCount}) and dies with the region
 	 * (DROP policy). Any thread.
 	 */
-	public void enqueueDelayed(Region region, int delayTicks, Runnable task) {
-		enqueueDelayed(region, delayTicks, task, null);
+	public boolean enqueueDelayed(Region region, int delayTicks, Runnable task) {
+		return enqueueDelayed(region, delayTicks, task, null);
 	}
 
 	/** Position-aware delayed variant (see {@link #enqueue(Region, Runnable, Long)}). */
-	public void enqueueDelayed(Region region, int delayTicks, Runnable task, Long targetChunkPos) {
+	public boolean enqueueDelayed(Region region, int delayTicks, Runnable task, Long targetChunkPos) {
 		if (delayTicks <= 0) {
-			enqueue(region, task, targetChunkPos);
-			return;
+			return enqueue(region, task, targetChunkPos);
 		}
 		long target = region.tickCount() + delayTicks;
-		enqueue(region, new DelayedRegionTask(target, task), targetChunkPos);
+		return enqueue(region, new DelayedRegionTask(target, task), targetChunkPos);
+	}
+
+	public boolean isClosed() {
+		return closed;
 	}
 
 	/** @return the queue registered for a region (engine/diagnostics use). */

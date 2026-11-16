@@ -1,4 +1,5 @@
 import argparse
+import io
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-MINIMUM_TESTS = {"common": 140, "api": 4, "fabric": 80}
+MINIMUM_TESTS = {"common": 144, "api": 10, "fabric": 81}
 
 
 def fail(message):
@@ -75,9 +76,9 @@ def inspect_mod_jar(path, version):
             dependencies = metadata.get("depends", {})
             for key, value in {
                 "minecraft": "~26.2",
-                "fabricloader": ">=0.19.5",
+                "fabricloader": ">=0.19.3",
                 "java": ">=25",
-                "fabric-api": "0.160.0+26.2"
+                "fabric-api": ">=0.160.0+26.2"
             }.items():
                 if dependencies.get(key) != value:
                     fail(f"fabric.mod.json dependency {key} expected {value!r}, got {dependencies.get(key)!r}")
@@ -98,15 +99,20 @@ def inspect_mod_jar(path, version):
                         if relative + ".class" not in entries:
                             fail(f"{mixin_path}: declared class missing: {relative}.class")
             nested = [name for name in entries if name.startswith("META-INF/jars/") and name.endswith(".jar")]
-            if not any(f"fabric-folia-api-{version}.jar" in name for name in nested):
-                fail("mod artifact does not include the matching nested fabric-folia-api jar")
+            nested_api = [name for name in nested if f"fabric-folia-api-{version}.jar" in name]
+            if len(nested_api) != 1:
+                fail("mod artifact must include exactly one matching nested fabric-folia-api jar")
+            with zipfile.ZipFile(io.BytesIO(archive.read(nested_api[0]))) as api_archive:
+                api_metadata = json.loads(api_archive.read("fabric.mod.json"))
+                if api_metadata.get("id") != "fabric-folia-api" or api_metadata.get("version") != version:
+                    fail("nested API metadata does not match the release id and version")
             if not any("common-" in name for name in nested):
                 fail("mod artifact does not include the common engine jar")
     except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError) as error:
         fail(f"cannot inspect mod artifact {path}: {error}")
 
 
-def inspect_api_jar(path):
+def inspect_api_jar(path, version):
     if not path.is_file() or path.stat().st_size < 1024:
         fail(f"missing or invalid standalone API artifact: {path}")
     try:
@@ -116,6 +122,12 @@ def inspect_api_jar(path):
             entries = set(archive.namelist())
             if not any(name.endswith(".class") for name in entries):
                 fail("API artifact contains no compiled classes")
+            metadata = json.loads(archive.read("fabric.mod.json"))
+            if metadata.get("id") != "fabric-folia-api" or metadata.get("version") != version:
+                fail("standalone API metadata does not match the release id and version")
+            manifest = archive.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+            if "Automatic-Module-Name: com.palordersoftworks.fabricfolia.api" not in manifest:
+                fail("standalone API artifact is missing its stable automatic module name")
             if any(name.startswith("net/minecraft/") or name.startswith("net/fabricmc/") for name in entries):
                 fail("standalone API artifact contains Minecraft or Fabric Loader classes")
     except (OSError, zipfile.BadZipFile) as error:
@@ -177,7 +189,7 @@ def main():
     if api_jars != [api_jar]:
         fail("api/build/libs must contain exactly one standalone API binary JAR")
     inspect_mod_jar(mod_jar, version)
-    inspect_api_jar(api_jar)
+    inspect_api_jar(api_jar, version)
     if args.production_release:
         check_production_approval(version, commit)
 

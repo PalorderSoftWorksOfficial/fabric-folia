@@ -13,6 +13,7 @@ import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 
 import java.util.Optional;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Adapts the public {@link com.palordersoftworks.fabricfolia.api.RegionScheduler}
@@ -55,12 +56,15 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 
 	@Override
 	public void runDelayed(Position position, int delay, Runnable task) {
-		Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
-		if (region == null) {
-			applyMissingPolicy(task);
-			return;
+		if (engine.isClosed()) {
+			throw new RejectedExecutionException("Fabric-Folia region scheduler is shut down");
 		}
-		engine.enqueueDelayed(region, delay, task);
+		if (!enqueueAtPosition(position, task, delay)) {
+			if (engine.isClosed()) {
+				throw new RejectedExecutionException("Fabric-Folia region scheduler is shut down");
+			}
+			applyMissingPolicy(task);
+		}
 	}
 
 	@Override
@@ -94,6 +98,9 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 
 	@Override
 	public void runOrSchedule(Position position, Runnable task) {
+		if (engine.isClosed()) {
+			throw new RejectedExecutionException("Fabric-Folia region scheduler is shut down");
+		}
 		Region owner = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
 		ThreadOwnership.Context current = ThreadOwnership.current();
 		if (current.kind() == com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.REGION
@@ -107,21 +114,42 @@ public final class ApiRegionScheduler implements com.palordersoftworks.fabricfol
 
 	@Override
 	public boolean send(Position position, Runnable task) {
-		Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
-		if (region == null) {
-			return false;
-		}
-		return engine.enqueue(region, task,
-				RegionScheduler.packChunkPos(position.chunkX(), position.chunkZ()));
+		return enqueueAtPosition(position, task, null);
 	}
 
 	private void sendOrPolicy(Position position, Runnable task) {
-		Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
-		if (region == null) {
-			applyMissingPolicy(task);
-			return;
+		if (engine.isClosed()) {
+			throw new RejectedExecutionException("Fabric-Folia region scheduler is shut down");
 		}
-		engine.enqueue(region, task);
+		if (!enqueueAtPosition(position, task, null)) {
+			if (engine.isClosed()) {
+				throw new RejectedExecutionException("Fabric-Folia region scheduler is shut down");
+			}
+			applyMissingPolicy(task);
+		}
+	}
+
+	private boolean enqueueAtPosition(Position position, Runnable task, Integer delay) {
+		if (engine.isClosed()) {
+			return false;
+		}
+		Long targetChunk = RegionScheduler.packChunkPos(position.chunkX(), position.chunkZ());
+		for (int attempt = 0; attempt < 8; attempt++) {
+			Region region = regionizer.ownerOfChunk(position.chunkX(), position.chunkZ());
+			if (region == null) {
+				return false;
+			}
+			boolean accepted = delay == null
+					? engine.enqueue(region, task, targetChunk)
+					: engine.enqueueDelayed(region, delay, task, targetChunk);
+			if (accepted) {
+				return true;
+			}
+			if (engine.isClosed()) {
+				return false;
+			}
+		}
+		throw new RejectedExecutionException("Target region changed repeatedly while scheduling the task");
 	}
 
 	/**

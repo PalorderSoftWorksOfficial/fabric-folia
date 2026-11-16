@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
  * block entities) from any other context — including from another region, the
  * network thread, or an unrelated mod executor. It replaces direct access the
  * same way Folia's RegionScheduler does, with Fabric-native shapes: positions are
- * given as world-name + packed chunk/block coordinates, not Bukkit Locations.</p>
+ * given as a world identifier and chunk coordinates, not block coordinates or Bukkit Locations.</p>
  *
  * <p><strong>Why positions, not region handles:</strong> region boundaries move as
  * regions merge and split. The scheduler resolves the <em>current</em> owner at

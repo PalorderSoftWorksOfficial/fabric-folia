@@ -55,7 +55,10 @@ public interface ThreadContext {
 		GLOBAL,
 		/** Executing on a Netty network event loop thread. */
 		NETWORK,
-		/** Executing chunk/entity save-load work on an IO worker. */
+		/**
+		 * Reserved for chunk/entity save-load work on an IO worker. No production
+		 * path currently enters this kind.
+		 */
 		IO,
 		/** Executing on the async scheduler's dedicated pool (Folia's async context). */
 		ASYNC,
@@ -91,7 +94,7 @@ public interface ThreadContext {
 
 	/**
 	 * Throws {@link ThreadContextViolationException} if the current context may
-	 * not directly access state owned by {@code targetRegion}. Respect's the
+	 * not directly access state owned by {@code targetRegion}. Respects the
 	 * configured validation mode: in OFF mode this is a no-op, in WARN mode a
 	 * violation is logged with full diagnostics instead of thrown.
 	 *
