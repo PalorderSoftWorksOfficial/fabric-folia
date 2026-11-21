@@ -49,6 +49,7 @@ public final class ConfigSchema {
 	public static final String KEY_WATCHDOG = "diagnostics.watchdog";
 	public static final String KEY_PLAYER_PATH = "gameplay.stage-player-path";
 	public static final String KEY_PATCHES_ENABLED = "patches.enabled";
+	public static final String KEY_OVERRIDE_VANILLA = "patches.override-vanilla";
 	public static final String KEY_PATCH_ENTITY_TICK = "patches.minecraft.entity-tick-optimization";
 	public static final String KEY_PATCH_CHUNK_TICK = "patches.minecraft.chunk-tick-optimization";
 	public static final String KEY_PATCH_RANDOM_TICK = "patches.minecraft.random-tick-optimization";
@@ -59,6 +60,7 @@ public final class ConfigSchema {
 	public static final String KEY_PATCH_SCHEDULER_DISPATCH = "patches.fabricfolia.scheduler-dispatch";
 	public static final String KEY_PATCH_TASK_QUEUE = "patches.fabricfolia.task-queue";
 	public static final String KEY_PATCH_ENTITY_COLLISION_OPT = "patches.minecraft.entity-collision-optimization";
+	public static final String KEY_PATCH_HARD_HITBOX_COLLISION = "patches.minecraft.hard-hitbox-entity-collision";
 	public static final String KEY_GPU_ENABLED = "gpu.enabled";
 	public static final String KEY_GPU_DEVICE = "gpu.device";
 	public static final String KEY_GPU_VERIFY = "gpu.verify-on-boot";
@@ -413,16 +415,23 @@ public final class ConfigSchema {
 		add(opt(KEY_PATCHES_ENABLED, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"FabricFolia performance patches (the toggleable optimization layer).",
 				"",
-				"What it does: when true, every registered optimization patch takes",
-				"its optimized path where the patch's own conditions hold; when",
-				"false, ALL patches fall back to the original vanilla / Fabric /",
-				"FabricFolia code path. Disabling patches never disables",
-				"regionization, ownership checks, or the compatibility layer.",
+				"When false, every registered optimization patch falls back to its",
+				"original path. Regionization, ownership checks and thread safety",
+				"remain active.",
 				"",
 				"Default: true",
-				"Valid values: true, false",
-				"Restart required: yes - patches resolve once at startup.",
-				"See also: /folia patches (which patches exist and their state)."
+				"Restart required: yes."
+		}));
+		add(opt(KEY_OVERRIDE_VANILLA, Boolean.class, Boolean.FALSE, v -> v, new String[] {
+				"Enables opt-in performance overrides of vanilla Minecraft code.",
+				"",
+				"When false, vanilla collision and entity-query implementations are",
+				"used. When true, compatible vanilla overrides are enabled, subject",
+				"to their individual safety and compatibility checks.",
+				"",
+				"Default: false",
+				"Restart required: yes.",
+				"Emergency switch: /folia vanilla kill disables this layer until restart."
 		}));
 		add(opt(KEY_PATCH_ENTITY_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
 				"Minecraft layer: entity tick staging executes on the owning",
@@ -497,22 +506,28 @@ public final class ConfigSchema {
 				"Restart required: yes. When disabled, the original O(n) size",
 				"scan and fixed-size drain buffers are used."
 		}));
-		add(opt(KEY_PATCH_ENTITY_COLLISION_OPT, Boolean.class, Boolean.FALSE, v -> v, new String[] {
-				"Minecraft layer: axis-only entity collision (lithium-style OFEM).",
-				"Vanilla collects block colliders for the full 3D-expanded box, then",
-				"resolves movement axis by axis. A shape can only limit movement along",
-				"an axis if it intersects the box swept along that axis — so for",
-				"sub-block movement (squared length < 1.0: idle, walking, falling",
-				"entities) this patch queries a thin per-axis slab instead. The",
-				"collision result is identical to vanilla; only the shape-set size",
-				"changes. Entity-vs-entity colliders and the world border are never",
-				"affected.",
+		add(opt(KEY_PATCH_ENTITY_COLLISION_OPT, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Minecraft layer: directional fast-movement collision query.",
+				"It targets fast diagonal movement where the swept 3D box is much",
+				"larger than the union of the three per-axis swept slabs. Each slab",
+				"is inflated for oversized block shapes and clipped to vanilla's",
+				"original search bounds. Vanilla's Shapes.collide calculation is",
+				"unchanged; only the block-shape candidate count is reduced.",
 				"",
-				"Default: false (operator opt-in — test in your world first).",
-				"Restart required: yes. When disabled, vanilla collision runs unchanged.",
-				"Compatibility: force-disabled when Lithium is installed — Lithium's",
-				"own entity-movement optimization owns this path, and double-",
-				"optimizing the same methods is an unverified combination."
+				"Default: true when patches.override-vanilla is enabled.",
+				"Restart required: yes.",
+				"Compatibility: disabled when Lithium is installed."
+		}));
+		add(opt(KEY_PATCH_HARD_HITBOX_COLLISION, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+				"Minecraft layer: index entities with hard hitboxes per entity section.",
+				"Entity collision queries can skip entities that cannot supply a",
+				"hard collision hitbox. Boat and minecart queries keep the full list.",
+				"The section index uses a concurrent set for worker-side reads.",
+				"",
+				"Default: true when patches.override-vanilla is enabled.",
+				"Restart required: yes; sections must be created with the index.",
+				"Compatibility: disabled with Lithium, C2ME or Async. Modded entity",
+				"hitbox implementations may require adding their entity type."
 		}));
 
 		add(opt(KEY_GPU_ENABLED, Boolean.class, Boolean.FALSE, v -> v, new String[] {

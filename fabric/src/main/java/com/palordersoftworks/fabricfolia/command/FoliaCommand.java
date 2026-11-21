@@ -240,12 +240,15 @@ public final class FoliaCommand {
 							lines.add(FoliaMessages.toMinecraft(
 									"<yellow><bold>" + layer + "</bold></yellow>"));
 						}
-						String statusTag = switch (patch.status()) {
-							case ACTIVE -> "<green>ENABLED</green>";
-							case DISABLED -> "<gray>DISABLED</gray>";
-							case BLOCKED_DEPENDENCY, BLOCKED_CONFLICT -> "<yellow>BLOCKED</yellow>";
-							case FAILED -> "<red>FAILED</red>";
-						};
+						String statusTag = patch.layer() == PatchRegistry.Layer.VANILLA_OVERRIDE
+								&& PatchRegistry.vanillaOverrideKillSwitchEngaged()
+								? "<gray>KILLED</gray>"
+								: switch (patch.status()) {
+									case ACTIVE -> "<green>ENABLED</green>";
+									case DISABLED -> "<gray>DISABLED</gray>";
+									case BLOCKED_DEPENDENCY, BLOCKED_CONFLICT -> "<yellow>BLOCKED</yellow>";
+									case FAILED -> "<red>FAILED</red>";
+								};
 						lines.add(FoliaMessages.toMinecraft("  <aqua>" + patch.name()
 								+ "</aqua> " + statusTag
 								+ " <dark_gray>[" + patch.lifecycle().name().toLowerCase(Locale.ROOT) + "]</dark_gray>"));
@@ -258,7 +261,10 @@ public final class FoliaCommand {
 						lines.add(FoliaMessages.info("(no patches registered)"));
 					}
 					lines.add(FoliaMessages.rule());
-					lines.add(FoliaMessages.info("Global switch: patches.enabled. Fallback = original path."));
+					lines.add(FoliaMessages.info("Global switch: patches.enabled. Vanilla overrides: patches.override-vanilla."));
+					if (PatchRegistry.vanillaOverrideKillSwitchEngaged()) {
+						lines.add(FoliaMessages.warn("Vanilla override kill switch is engaged until restart."));
+					}
 					send(context.getSource(), lines);
 					return 1;
 				}));
@@ -318,6 +324,30 @@ public final class FoliaCommand {
 					send(context.getSource(), lines);
 					return 1;
 				}));
+
+		root.then(Commands.literal("vanilla")
+				.requires(source -> allowed(source, "admin"))
+				.then(Commands.literal("status")
+						.executes(context -> {
+							var lines = new ArrayList<MutableComponent>();
+							lines.add(FoliaMessages.header("Vanilla Override Layer"));
+							var config = FabricFoliaMod.config();
+							lines.add(FoliaMessages.row("Configured", config != null && config.overrideVanilla() ? "enabled" : "disabled"));
+							lines.add(FoliaMessages.row("Kill switch", PatchRegistry.vanillaOverrideKillSwitchEngaged() ? "ENGAGED" : "armed"));
+							lines.add(FoliaMessages.row("Directional collision", PatchRegistry.isEnabled("entity-collision-opt") ? "active" : "inactive"));
+							lines.add(FoliaMessages.row("Hard-hitbox index", PatchRegistry.isEnabled("hard-hitbox-entity-collision") ? "active" : "inactive"));
+							lines.add(FoliaMessages.info("Enable with patches.override-vanilla=true, then restart."));
+							send(context.getSource(), lines);
+							return 1;
+						}))
+				.then(Commands.literal("kill")
+						.executes(context -> {
+							boolean newlyEngaged = PatchRegistry.killVanillaOverrides();
+							send(context.getSource(), FoliaMessages.warn(newlyEngaged
+									? "Vanilla override kill switch engaged. New optimized collision/query operations are disabled; in-flight operations finish on their original path. Restart to re-arm."
+									: "Vanilla override kill switch is already engaged. Restart to re-arm."));
+							return 1;
+						})));
 
 		registerLegacySubcommands(root);
 		dispatcher.register(root);

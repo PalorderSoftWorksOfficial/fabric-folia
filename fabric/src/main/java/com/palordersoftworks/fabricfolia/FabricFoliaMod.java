@@ -392,11 +392,17 @@ public class FabricFoliaMod implements ModInitializer {
 						Set.of(), Set.of(),
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry
-				.register("entity-collision-opt", "Entity Collision Optimization",
-						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.MINECRAFT,
-						"axis-only block collision for sub-block movement (lithium-style OFEM pattern); "
-								+ "force-disabled when Lithium is installed",
+				.register("entity-collision-opt", "Directional Entity Collision Queries",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.VANILLA_OVERRIDE,
+						"TIS Addition OFEM pattern: reduce block-shape candidates for fast diagonal movement",
 						"Entity.collectCollidersIgnoringWorldBorder/getBlockCollisions + collideWithShapes Shapes.collide",
+						Set.of(), Set.of(),
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry
+				.register("hard-hitbox-entity-collision", "Hard Hitbox Entity Index",
+						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.VANILLA_OVERRIDE,
+						"TIS Addition pattern: index hard-hitbox entities per section for entity collision queries",
+						"EntityGetter.getEntityCollisions + EntitySection.getEntities",
 						Set.of(), Set.of(),
 						com.palordersoftworks.fabricfolia.patches.PatchRegistry.Lifecycle.STARTUP_ONLY);
 	}
@@ -413,6 +419,9 @@ public class FabricFoliaMod implements ModInitializer {
 		for (var layer : com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.values()) {
 			com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(layer, global);
 		}
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setLayerEnabled(
+				com.palordersoftworks.fabricfolia.patches.PatchRegistry.Layer.VANILLA_OVERRIDE,
+				global && config.overrideVanilla());
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("regionize-chunk-load",
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_CHUNK_REGIONIZATION, true));
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("stage-entity-ticks",
@@ -440,15 +449,22 @@ public class FabricFoliaMod implements ModInitializer {
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("task-queue",
 				config.patchEnabled(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_TASK_QUEUE, true));
 		boolean lithiumPresent = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("lithium");
+		boolean c2mePresent = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("c2me");
+		boolean asyncPresent = net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("async");
 		boolean collisionOptRequested = config.patchEnabled(
-				com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_COLLISION_OPT, false);
-		if (collisionOptRequested && lithiumPresent) {
-			// Lithium owns the entity-movement collision path; double-optimizing
-			// the same methods is an unverified combination — defer to Lithium.
-			Console.config("  Entity collision optimization: disabled (Lithium installed — its entity-movement optimization owns this path)");
+				com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_ENTITY_COLLISION_OPT, true);
+		boolean hardHitboxOptRequested = config.patchEnabled(
+				com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_PATCH_HARD_HITBOX_COLLISION, true);
+		if (lithiumPresent && (collisionOptRequested || hardHitboxOptRequested)) {
+			Console.config("  Vanilla collision overrides: Lithium detected; conflicting overrides are disabled.");
+		}
+		if ((c2mePresent || asyncPresent) && hardHitboxOptRequested) {
+			Console.config("  Hard hitbox entity index: disabled (incompatible asynchronous entity access mod detected).");
 		}
 		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("entity-collision-opt",
 				collisionOptRequested && !lithiumPresent);
+		com.palordersoftworks.fabricfolia.patches.PatchRegistry.setRequested("hard-hitbox-entity-collision",
+				hardHitboxOptRequested && !lithiumPresent && !c2mePresent && !asyncPresent);
 
 		var blocked = com.palordersoftworks.fabricfolia.patches.PatchRegistry.resolveAndApply();
 		int active = 0;

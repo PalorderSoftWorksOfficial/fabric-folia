@@ -20,12 +20,10 @@
 ## 1. Project identity
 
 - **Repo:** `fabric-folia` at `D:\fabric-folia` (MSYS path `/d/fabric-folia`).
-- **What it is:** an experimental Fabric-native staged-region execution mod for
-  vanilla Minecraft **26.2**. Vanilla still selects tick work on the server thread;
-  supported captured bodies run in region-owned worker contexts behind server-thread
-  quiescence barriers. This is NOT a complete independently ticking Folia world loop
-  and is NOT production-ready. Must stay Fabric-native: mixins, Fabric API, Loom.
-  NEVER a Paper/Folia fork or patch-based distribution.
+- **What it is:** a real Fabric mod implementing Folia-style regionized
+  multithreaded execution for vanilla Minecraft **26.2** (Mojang names ARE the
+  runtime names — no mappings layer). Must stay Fabric-native: mixins, Fabric API,
+  Loom. NEVER a Paper/Folia fork or patch-based distribution.
 - **License:** Apache-2.0, Palorder Softworks, 2026.
 - **Git:** `main` branch — **the owner directive (2026-09-25) is to stay on
   main and push there**; remote `origin` =
@@ -34,27 +32,29 @@
 - **Modules:** `api` (public contract, ~968 LOC) → `common` (engine core: regionizer,
   schedulers, config, metrics, threading) → `fabric` (mixins, engine bootstrap,
   entrypoints, the only module touching Minecraft classes).
-- **Mixin inventory:** 26 mixins are registered in fabric/src/main/resources/fabricfolia.mixins.json; source intent and release validation are documented in MIXINS.md.
-- **Tests:** latest 2026-11-15 full validation: 227 tests green (common 142,
-  api 4, fabric 81), zero failures/errors/skips. This is automated unit/integration
-  coverage only; the candidate has NOT received a new dedicated-server boot or soak.
+- **Mixin count:** 24 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
+  (`ChunkTicketMixin` added in the 2026-09-25 ticket-deferral turn; a faulty
+  `ReportTypeMixin` was removed in commit `c36f8c3`).
+- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 133/133 green
+  (2026-09-25 ticket-deferral turn; no Mockito). Fabric tests boot the REAL engine
+  (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
+  see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
 - **CI: JENKINS IS THE CI (owner directive, 2026-10-06) — GitHub Actions is
-  NOT used.** `.github/workflows/build.yml` remains deleted. `Jenkinsfile` is the
-  only pipeline. Current pipeline requires non-empty module-specific JUnit XML,
-  verifies exact branded mod/API artifacts and metadata, creates SHA-256 checksums
-  and a release manifest, archives only validated candidates, and has an explicit
-  PRODUCTION_RELEASE gate. Stable Fill publication is disabled unless a clean-tree,
-  exact-commit approval record contains runtime soak, compatibility, and independent
-  review evidence. Current approval record is BLOCKED.
+  NOT used.** `.github/workflows/build.yml` was DELETED this turn (it could
+  never run: account-level Actions disabled, confirmed 422 three times).
+  `Jenkinsfile` = the only pipeline: stage 1 `./gradlew :common:test
+  :fabric:test :api:test --stacktrace` with `junit` publishing of
+  `*/build/test-results/test/*.xml`, stage 2 `./gradlew build --stacktrace`,
+  then archives `fabric/build/libs/*.jar`. README already documents the
+  self-hosted instance (jenkins.palorderhosting.net) as primary.
 
 ## 2. Architecture in one page
 
 - **Staging model (the load-bearing idea):** vanilla's own server-thread tick passes
   decide WHAT to tick; capture mixins stage the *bodies* into `RegionStageHub`
   (`fabric/.../engine/RegionStageHub.java`); at end of server tick the engine flushes
-  staged bodies grouped by owning region AND target chunk, into position-aware task
-  batches on each region queue (`RegionScheduler`, shared worker pool). Each staged
-  batch is tied to one chunk so split migration can move it to the post-split owner. Slices: ENTITY, BLOCK_ENTITY,
+  each staged batch, grouped by owning region, onto that region's task queue
+  (`RegionScheduler`, shared worker pool). Slices: ENTITY, BLOCK_ENTITY,
   SCHEDULED_TICK, PLAYER (declared LAST to preserve vanilla intra-tick order:
   entity pass before connection tick, per region).
 - **Player path (gated by config `gameplay.stage-player-path`, default off):**
@@ -72,18 +72,19 @@
   global state.
 - **Transitions:** `RegionTransitions` (`fabric/.../engine/RegionTransitions.java`)
   routes worker-context teleports to the destination context (region queue, or the
-  GLOBAL scheduler for unowned chunks), with a CAS idempotence window keyed by
-  (source world, entity id). EntityTeleportMixin captures
+  global scheduler for unowned chunks), with a CAS idempotence window
+  (entity id → stamp, 50 ms tick window). `EntityTeleportMixin` captures
   `Entity.teleport(TeleportTransition)` HEAD, cancellable.
 - **Entity ownership:** `EntityRegionTracker` + `EntityMixin` (add/remove/move hooks,
   per-entity cached tracker + packed chunk); `RegionEntityRegistry` does atomic
   stripe-locked register/migrate/unregister.
 - **Threading classification:** `ThreadOwnership` — one context slot per thread;
-  kinds UNKNOWN/NETWORK/GLOBAL/REGION/...; region workers run inside REGION context.
-  GLOBAL callbacks run on the Minecraft server thread after region workers quiesce;
-  there is no dedicated global scheduler daemon thread. Check facade: `RegionChecks`,
+  kinds UNKNOWN/NETWORK/GLOBAL/REGION/...; region workers run inside REGION context
+  (set by `RegionScheduler` line ~501 `enterRegion`). Check facade: `RegionChecks`,
   violations: `ViolationReporter`. Mandates §8/§11/§15/§32 live in docs/mandates.
-- **Metrics:** RegionMetrics (common/.../metrics/RegionMetrics.java) provides counters and timing snapshots. /folia commands include status, shutdown, regions, workers, scheduler, patches, health, threads, metrics, entities, gpu, compat, pin, unpin, version and help. Exact tree and permissions are in docs/command-reference.md.
+- **Metrics:** `RegionMetrics` (`common/.../metrics/RegionMetrics.java`) — enum
+  `Counter` + `snapshotLines()`. `/folia` command: status|shutdown|regions|entities|
+  threads|metrics|global|watchdog|compat|pin|unpin.
 - **Config:** `common/.../config/` — `CommentedYaml` (has `collapseDuplicates` for
   last-wins duplicate keys), `ConfigWriter` (groups sections by name),
   `FoliaConfig`. Runtime file `fabric/run/config/fabric-folia.yml` is gitignored.
@@ -1446,6 +1447,13 @@ Named jar for inspection (project loom cache):
 - Jenkinsfile now checks that the publisher script is readable by the Jenkins user, then invokes it explicitly with bash "$PUBLISH_SCRIPT" instead of requiring the script's executable bit. Publisher arguments, artifact selection, version/build/channel values, and failure propagation are unchanged. If the script is not readable or the parent path cannot be traversed, the pipeline emits an explicit diagnostic.
 - Commit: 988b58744feaf44a400fa6e0319c21375160b57d (ci: invoke fill publisher through bash). The next Jenkins run must confirm that the Jenkins account can read the file and that the publisher itself succeeds; no live publisher invocation was performed during this change.
 
+### 2026-11-14 — Jenkins Fill publisher privilege boundary and pipeline repair
+- Jenkins build output confirmed that the Linux tests, full Gradle build, and artifact archive all passed. The remaining failure was inside the Fill publishing stage, which returned exit code 1 without useful output because the publisher script intentionally suppresses tracing.
+- Inspection on FAC established the permission boundary: `fill.env` and `storage/admin/credentials.sqlite` are administrator-owned mode 0600, and `storage/admin/` is mode 0700. Jenkins must not be granted direct access to these secrets or the encrypted credential database.
+- The existing `/usr/local/sbin/fill-publish-fabric-folia` helper was inspected. It validates the project, version, build number, channel, and canonical artifact path, restricts artifacts to `/var/lib/jenkins/workspace/fabric-folia_main/fabric/build/libs/*.jar`, then executes the existing publisher as the administrator account. Its file metadata reports mode 0755. The sudoers file `/etc/sudoers.d/jenkins-fill-publish` is present with mode 0440; its contents and sudoers parse status still need host-side validation.
+- Repaired the `Publish to Fill` stage in `Jenkinsfile`. It now checks that the helper is executable, makes the built artifact readable, resolves its canonical path, and invokes `sudo -n -u administrator -- /usr/local/sbin/fill-publish-fabric-folia ...`. The Linux test, optional cross-OS, build, archive, and post stages were retained.
+- Commit: `9958297999c8b35a57eefa291c0e140ff0d0708c` (`ci: fix Fill publishing stage to use restricted helper`). The next Jenkins run must verify that the sudoers rule authorizes the command and that the upload succeeds. Do not loosen permissions on `fill.env`, `storage/admin/`, or `credentials.sqlite`.
+- Operator clarification: the Jenkins `sh ''' ... '''` block is Groovy Pipeline syntax and must be edited in the repository's `Jenkinsfile`; it is not a shell command to paste into an SSH terminal.
 
 ### 2026-11-15 — staged-region correctness, API and release-candidate recovery
 
@@ -1494,3 +1502,39 @@ Named jar for inspection (project loom cache):
 
 
 - Fix commit pushed to `origin/main`: `b4ea4bee4e80732e60d89a113530c7e6e54ac725` (`fix: suppress intentional idle pauses and bound stall dumps`).
+### 2026-11-21 — vanilla-override layer: TIS-Addition collision + hard-hitbox index + light-engine guard + kill switch (verified live; committed)
+- **User request:** fix remaining cost by touching vanilla classes directly (AABB/collision,
+  light engine), add engine kill switch + `override-vanilla: false` default toggle that
+  enables the performance patches when on. Commit + push after real tests + benchmarks.
+- **What shipped:**
+  - NEW `patches.override-vanilla` (schema default FALSE, restart-required). All
+    vanilla-touching patches moved to NEW `PatchRegistry.Layer.VANILLA_OVERRIDE`, gated on
+    `patches.enabled AND override-vanilla`. `/folia vanilla status|kill` + help topic.
+  - `entity-collision-opt` rewritten to the Carpet TIS Addition OFEM movement gate:
+    fast diagonal movement only (MIN_MOVEMENT_SQR=100, directional factor 12); per-axis
+    inflated slabs clipped to vanilla's original search box; `Shapes.collide` untouched;
+    failures fall back to the full vanilla box with a fallback counter. Lithium disables it.
+  - NEW `hard-hitbox-entity-collision`: per-section concurrent insertion-ordered index
+    (`ConcurrentClassInstanceMultiMap`) of `canBeCollidedWith(null)` + HappyGhast entities;
+    `EntityGetterMixin` (wraps the verified `getEntities(Entity,AABB,Predicate)` call inside
+    `EntityGetter.getEntityCollisions`) + `EntitySectionMixin` (both `getEntities` overloads)
+    select the index; boats/minecarts keep the full list. Disabled with Lithium/C2ME/Async.
+  - Light engine: NEW `LevelChunkLightEngineMixin` redirects `LevelChunk.setBlockState`'s
+    `updateSectionStatus`/`checkBlock` through `LightEngineDeferral` → `ServerThreadDeferral`
+    (server thread runs inline; workers replay FIFO). Correctness guard, not a perf override.
+  - Kill switch: `PatchRegistry.killVanillaOverrides()` — one-way until restart; `isEnabled`
+    returns false for the whole layer; `/folia patches` shows KILLED; honestly: in-flight ops
+    finish on their original path (no mid-collision abort).
+  - Verified vanilla facts (javap 26.2): `EntityGetter.getEntityCollisions` DOES invoke the
+    3-arg `getEntities` (mixin target valid); `EntitySection` has both overloads + `storage`
+    field; `LevelChunk.setBlockState` calls both light methods.
+- **Verification (fresh, this turn):** `--rerun-tasks` EXIT=0, 218 tests / 0 failures /
+  0 errors (22 fabric + 22 common suites); `build` EXIT=0. Live boot `Done (4.893s)`,
+  `SUCCESS: Fabric Folia is ready`, zero mixin errors; `/folia vanilla status` ENABLED/active;
+  TPS 20.00/20.00 (2x30s gametime deltas, empty world); `vanilla kill` → ENGAGED/KILLED/inactive
+  live; RCON `stop` clean (all dimensions saved), ports free, daemon stopped.
+- **Limits (honest):** empty-world TPS only — no entity-load A/B this turn (61k clump world
+  from 11-11 is gone; re-summon + soak is the next benchmark). Hard-hitbox `hasHardHitBox`
+  calls `canBeCollidedWith(null)` at index time; modded hitbox impls may need type additions.
+  Runtime `fabric/run/config` is gitignored (local had `override-vanilla: true`; schema default
+  false is what ships).

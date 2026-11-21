@@ -47,7 +47,8 @@ public final class PatchRegistry {
 		NETWORK,
 		ALLOCATION,
 		SCHEDULER,
-		REGION
+		REGION,
+		VANILLA_OVERRIDE
 	}
 
 	/** When a patch's state may change. */
@@ -167,6 +168,7 @@ public final class PatchRegistry {
 
 	private static final Map<String, Patch> PATCHES = new LinkedHashMap<>();
 	private static final Map<Layer, Boolean> LAYER_ENABLED = new ConcurrentHashMap<>();
+	private static volatile boolean vanillaOverrideKillSwitchEngaged;
 	private static volatile boolean resolved;
 
 	private PatchRegistry() {
@@ -248,9 +250,9 @@ public final class PatchRegistry {
 					Status prior = patch.status;
 					Status now = evaluate(patch);
 					if (now != prior) {
-						patch.setStatus(now, reasonFor(patch, now));
 						changed = true;
 					}
+					patch.setStatus(now, reasonFor(patch, now));
 				}
 			}
 			resolved = true;
@@ -323,7 +325,18 @@ public final class PatchRegistry {
 	 */
 	public static boolean isEnabled(String id) {
 		Patch patch = PATCHES.get(id);
-		return patch != null && patch.status() == Status.ACTIVE;
+		return patch != null && patch.status() == Status.ACTIVE
+				&& (patch.layer() != Layer.VANILLA_OVERRIDE || !vanillaOverrideKillSwitchEngaged);
+	}
+
+	public static boolean killVanillaOverrides() {
+		boolean newlyEngaged = !vanillaOverrideKillSwitchEngaged;
+		vanillaOverrideKillSwitchEngaged = true;
+		return newlyEngaged;
+	}
+
+	public static boolean vanillaOverrideKillSwitchEngaged() {
+		return vanillaOverrideKillSwitchEngaged;
 	}
 
 	/** @return the registered patch, or null when the id is unknown. */
@@ -368,6 +381,7 @@ public final class PatchRegistry {
 		synchronized (PATCHES) {
 			PATCHES.clear();
 			LAYER_ENABLED.clear();
+			vanillaOverrideKillSwitchEngaged = false;
 			resolved = false;
 		}
 	}

@@ -22,6 +22,7 @@ public final class FoliaHelp {
                 "<aqua>/folia scheduler</aqua> <dark_gray>—</dark_gray> <gray>deadlines and queue diagnostics</gray>",
                 "<aqua>/folia threads</aqua> <dark_gray>—</dark_gray> <gray>thread ownership diagnostics</gray>",
                 "<aqua>/folia patches</aqua> <dark_gray>—</dark_gray> <gray>registered patch state</gray>",
+                "<aqua>/folia vanilla status|kill</aqua> <dark_gray>—</dark_gray> <gray>vanilla override status and emergency kill switch</gray>",
                 "<aqua>/folia entities</aqua> <dark_gray>—</dark_gray> <gray>entity tracking diagnostics</gray>",
                 "<aqua>/folia metrics</aqua> <dark_gray>—</dark_gray> <gray>runtime counters and timings</gray>",
                 "<aqua>/folia gpu [bench [boxes]]</aqua> <dark_gray>—</dark_gray> <gray>experimental OpenCL status and benchmark</gray>",
@@ -64,6 +65,13 @@ public final class FoliaHelp {
                 "<gray>patches.enabled is the master switch. The chunk-regionization patch is a prerequisite for chunk ownership.</gray>",
                 "<gray>Do not disable chunk-regionization while relying on region-owned execution.</gray>",
                 "<gray>Patch changes require a server restart.</gray>"));
+        TOPICS.put("vanilla", List.of(
+                "<gold><bold>Help: vanilla overrides</bold>",
+                "<gray>patches.override-vanilla defaults to false and leaves the",
+                "<gray>vanilla collision and entity-query paths untouched.</gray>",
+                "<gray>Set it to true and restart to enable compatible overrides.</gray>",
+                "<gray>/folia vanilla status shows the effective layer state.</gray>",
+                "<gray>/folia vanilla kill immediately disables this layer until restart.</gray>"));
         TOPICS.put("health", List.of(
                 "<gold><bold>Help: health</bold></gold>",
                 "<gray>Reports the built-in invariants and available engine health checks.</gray>",

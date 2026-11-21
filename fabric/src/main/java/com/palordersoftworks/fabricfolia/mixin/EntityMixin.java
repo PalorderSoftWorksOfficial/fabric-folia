@@ -53,27 +53,20 @@ import java.util.List;
  * tracker; failures are contained, un-cache, and log, never propagated into
  * vanilla's movement or removal paths.</p>
  *
- * <h2>Collision optimization (lithium-style, Carpet TIS Addition OFEM pattern)</h2>
+ * <h2>Collision optimization (Carpet TIS Addition OFEM pattern)</h2>
  *
  * <p>Vanilla resolves movement one axis at a time in {@code collideWithShapes}
- * via {@code Shapes.collide(axis, box, colliders, maxDist)}, but collects block
- * colliders for the full 3D-expanded box up front. A shape can only limit
- * movement along an axis if it intersects the box swept along that axis, so
- * for small movements this patch defers block collection and queries a thin
- * 1-axis slab per axis pass instead ({@link OfemCollision}). The
- * {@code Shapes.collide} result is mathematically identical to vanilla; only
- * the shape-set size changes. Entity-vs-entity colliders and the world-border
- * shape always flow through unchanged.</p>
+ * but collects block colliders for the full 3D swept box first. For fast
+ * diagonal movement, this patch queries an inflated axis slab per pass and
+ * clips it to vanilla's original search bounds. The {@code Shapes.collide}
+ * calculation, entity colliders and world-border shape remain unchanged.</p>
  *
- * <p><strong>Safety:</strong> behind {@code patches.entity-collision-opt}
- * (default OFF — operator opt-in, startup-only). Every hook falls through to
- * the original vanilla call when the patch is off, the movement exceeds the
- * sub-block threshold, or any context is missing; the step-up path and the
- * foreign {@code collideBoundingBox(CollisionContext, ...)} flow see a fully
- * vanilla collider list (context is cleared at the Entity-overload TAIL).
- * If Lithium is installed the patch is force-disabled at startup — Lithium's
- * own entity-movement optimization owns this path; double-optimizing the same
- * methods is an unverified combination, so we defer to it.
+ * <p><strong>Safety:</strong> behind {@code patches.override-vanilla} and
+ * {@code patches.minecraft.entity-collision-optimization}. It falls through
+ * to vanilla unless movement is fast and diagonal. Each slab is clipped to
+ * vanilla's original search bounds; query failures fall back to the full
+ * vanilla box. The step-up path and foreign collision-context flow remain
+ * vanilla. The patch is disabled when Lithium is installed.
  */
 @Mixin(Entity.class)
 public abstract class EntityMixin implements FabricFoliaEntityHolder {

@@ -50,7 +50,7 @@ class PatchRegistryTest {
 
 	@Test
 	void layerSwitchDisablesEveryPatchInThatLayer() {
-		PatchRegistry.register("t-layer-a", "A", PatchRegistry.Layer.MINECRAFT,
+		PatchRegistry.Patch patch = PatchRegistry.register("t-layer-a", "A", PatchRegistry.Layer.MINECRAFT,
 				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
 		PatchRegistry.register("t-layer-b", "B", PatchRegistry.Layer.SCHEDULER,
 				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
@@ -58,6 +58,24 @@ class PatchRegistryTest {
 		PatchRegistry.resolveAndApply();
 		assertFalse(PatchRegistry.isEnabled("t-layer-a"));
 		assertTrue(PatchRegistry.isEnabled("t-layer-b"));
+		assertTrue(patch.statusReason().contains("disabled by configuration"));
+	}
+
+	@Test
+	void vanillaOverrideKillSwitchDisablesOnlyThatLayer() {
+		PatchRegistry.register("t-vanilla", "Vanilla", PatchRegistry.Layer.VANILLA_OVERRIDE,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.register("t-core", "Core", PatchRegistry.Layer.REGION,
+				"d", "t", PatchRegistry.Lifecycle.STARTUP_ONLY);
+		PatchRegistry.resolveAndApply();
+
+		assertTrue(PatchRegistry.isEnabled("t-vanilla"));
+		assertTrue(PatchRegistry.isEnabled("t-core"));
+		assertTrue(PatchRegistry.killVanillaOverrides());
+		assertFalse(PatchRegistry.isEnabled("t-vanilla"));
+		assertTrue(PatchRegistry.isEnabled("t-core"));
+		assertFalse(PatchRegistry.killVanillaOverrides());
+		assertTrue(PatchRegistry.vanillaOverrideKillSwitchEngaged());
 	}
 
 	@Test
