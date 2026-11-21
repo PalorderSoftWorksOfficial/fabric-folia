@@ -1502,7 +1502,7 @@ Named jar for inspection (project loom cache):
 
 
 - Fix commit pushed to `origin/main`: `b4ea4bee4e80732e60d89a113530c7e6e54ac725` (`fix: suppress intentional idle pauses and bound stall dumps`).
-### 2026-11-21 — vanilla-override layer: TIS-Addition collision + hard-hitbox index + light-engine guard + kill switch (verified live; committed)
+### 2026-11-21 — vanilla-override layer: TIS-Addition collision + hard-hitbox index + light-engine guard + kill switch (verified live; rebased onto 94976ef, pushed)
 - **User request:** fix remaining cost by touching vanilla classes directly (AABB/collision,
   light engine), add engine kill switch + `override-vanilla: false` default toggle that
   enables the performance patches when on. Commit + push after real tests + benchmarks.
@@ -1529,10 +1529,14 @@ Named jar for inspection (project loom cache):
     3-arg `getEntities` (mixin target valid); `EntitySection` has both overloads + `storage`
     field; `LevelChunk.setBlockState` calls both light methods.
 - **Verification (fresh, this turn):** `--rerun-tasks` EXIT=0, 218 tests / 0 failures /
-  0 errors (22 fabric + 22 common suites); `build` EXIT=0. Live boot `Done (4.893s)`,
-  `SUCCESS: Fabric Folia is ready`, zero mixin errors; `/folia vanilla status` ENABLED/active;
-  TPS 20.00/20.00 (2x30s gametime deltas, empty world); `vanilla kill` → ENGAGED/KILLED/inactive
-  live; RCON `stop` clean (all dimensions saved), ports free, daemon stopped.
+  0 errors pre-rebase; post-rebase onto upstream 94976ef: 248 tests / 0 failures / 0 errors
+  (26 fabric suites + common + api), `build` EXIT=0. Live boot pre-rebase `Done (4.893s)` +
+  post-rebase `Done (1.639s)`, both `SUCCESS: Fabric Folia is ready`, zero mixin errors;
+  `/folia vanilla status` ENABLED/active; TPS 20.00 (gametime deltas, empty world);
+  `vanilla kill` → ENGAGED/KILLED/inactive live; RCON `stop` clean (all dimensions saved),
+  ports free, daemon stopped. Rebase conflicts (FREEBUFF/MIXINS/FoliaConfig/FoliaHelp)
+  resolved by keeping upstream 11-15/11-16 sections + validation block + topics()/overview()
+  and re-applying vanilla-overview line, vanilla topic, overrideVanilla() accessor.
 - **Limits (honest):** empty-world TPS only — no entity-load A/B this turn (61k clump world
   from 11-11 is gone; re-summon + soak is the next benchmark). Hard-hitbox `hasHardHitBox`
   calls `canBeCollidedWith(null)` at index time; modded hitbox impls may need type additions.
