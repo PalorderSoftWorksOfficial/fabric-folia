@@ -285,12 +285,9 @@ public void flushPass(String worldName) {
 		// the code vanilla would have run inline on the server thread.
 		int randomTickSpeed = level.getGameRules()
 				.get(net.minecraft.world.level.gamerules.GameRules.RANDOM_TICK_SPEED);
-		long count = executedChunkWork.addAndGet(batch.size());
-		if (debugLogging() && (count <= batch.size() || count % 2000 < batch.size())) {
-			info.accept("WORKER-EVIDENCE: " + count + " chunk random-tick execution(s) on '"
-					+ Thread.currentThread().getName() + "' (region " + region.world() + ":"
-					+ region.regionId() + ", batch=" + batch.size() + ")");
-		}
+		com.palordersoftworks.fabricfolia.metrics.RegionMetrics engineMetrics =
+				engine == null || engine.metrics() == null ? null : engine.metrics();
+		long executed = 0;
 		for (OfferedChunk oc : batch) {
 			// Execution-time edge check: the capture-time guard can go stale
 			// when the region's queue is backed up (the walking player's wake
@@ -305,7 +302,17 @@ public void flushPass(String worldName) {
 				level.getServer().execute(() -> level.tickChunk(oc.chunk, randomTickSpeed));
 				continue;
 			}
-			level.tickChunk(oc.chunk, randomTickSpeed);
+						level.tickChunk(oc.chunk, randomTickSpeed);
+		executed++;
+		if (engineMetrics != null) {
+			engineMetrics.increment(com.palordersoftworks.fabricfolia.metrics.RegionMetrics.Counter.RANDOM_TICK_CHUNKS_EXECUTED);
+		}
+	}
+		long count = executedChunkWork.addAndGet(executed);
+		if (executed > 0 && debugLogging() && (count <= executed || count % 2000 < executed)) {
+			info.accept("WORKER-EVIDENCE: " + count + " chunk random-tick execution(s) on '"
+					+ Thread.currentThread().getName() + "' (region " + region.world() + ":"
+					+ region.regionId() + ", batch=" + batch.size() + ")");
 		}
 	}
 

@@ -287,3 +287,13 @@ callers (server thread, unregistered containers) run vanilla unchanged.
 | Transformation | `addTicketAndLoadWithRadius` called off the server thread is cancelled and deferred as a whole call, answering a bridge `CompletableFuture` completed when the replayed call's future completes (its inner ticket add cannot be deferred alone — the chunk-visibility check would fail); `tick` HEAD drains `ServerThreadDeferral` so every replay lands before `runAllUpdates`/`tickChunks` enumeration |
 | Why this seam | `addTicketAndLoadWithRadius` additionally calls `runDistanceManagerUpdates()` (a tracker-map mutator) on the caller's thread and returns a load future callers chain on — partial deferral would break both |
 | Effect when disarmed / gate off | worker ticket-loads race the trackers and their visibility check |
+
+### ServerChunkCacheMixin (worker present-chunk fast path)
+
+| Field | Value |
+|---|---|
+| Class | `fabricfolia.mixins.json` → `ServerChunkCacheMixin` |
+| Target | `getChunk(int, int, ChunkStatus, boolean)` HEAD (`@Inject`, cancellable) |
+| Transformation | region workers: chunk present at the status returns inline; holder absent with `create=false` answers `null` inline (vanilla's own absent answer, no join); `create=true` misses and present-but-below-status reads fall through to the vanilla join (upgrade semantics unchanged) |
+| Why this seam | vanilla routes every off-thread `getChunk` through `supplyAsync(mainThreadExecutor).join` — a worker join on an unticketed far chunk needs ticket-gated promotion from the server tick the quiesce barrier is holding, which never completes: the fail-safe spins forever and the server freezes without recovery. The `null` short-circuit removes the whole park class (decision table pinned in `WorkerChunkProbeTest`) |
+| Effect when disarmed / gate off | every worker miss parks on the join; the barrier pump completes ticketed loads transiently, unticketed ones never |

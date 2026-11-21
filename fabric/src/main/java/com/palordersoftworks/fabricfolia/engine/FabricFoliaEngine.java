@@ -848,6 +848,7 @@ public final class FabricFoliaEngine {
 		lines.add("staged bodies executed on workers: " + RegionStageHub.executedOnWorkers());
 		lines.add("staged bodies executed on server thread: " + RegionStageHub.executedOnServerThread());
 		lines.add("staged bodies bounced to server thread (probe stale): " + RegionStageHub.bouncedToServer());
+		lines.add("worker getChunk absent no-create served null: " + WorkerChunkProbe.absentNulls());
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
 		lines.add("staged bodies pending (backlog): " + pendingStagedBodies()
 				+ ", staging suppressed by backlog: " + RegionStageHub.suppressedBacklog());

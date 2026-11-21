@@ -8,6 +8,7 @@ package com.palordersoftworks.fabricfolia.mixin;
 import com.palordersoftworks.fabricfolia.api.ThreadContext.Kind;
 import com.palordersoftworks.fabricfolia.engine.ChunkBroadcastDeferral;
 import com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral;
+import com.palordersoftworks.fabricfolia.engine.WorkerChunkProbe;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.TicketType;
@@ -94,8 +95,15 @@ public abstract class ServerChunkCacheMixin {
 	 * {@code visibleChunkMap} (volatile, clone-on-write) →
 	 * {@code GenerationChunkHolder.getChunkIfPresent}, which is purely
 	 * volatile/atomic {@code getNow} reads — no mutation, no blocking.
-	 * Absent chunk (unload race between staging and execution) falls
-	 * through to vanilla's join, which the barrier pump completes.</p>
+	 * Absent chunk with {@code create=false} answers {@code null} inline:
+	 * that is vanilla's own main-path answer for the absent case
+	 * (verified on the 26.2 jar: the future resolves empty and the
+	 * {@code !create} branch returns null), and it keeps the worker off
+	 * the join the off-thread path would otherwise park on — a join whose
+	 * future needs ticket-gated promotion from the server tick the
+	 * quiesce barrier is holding is the unrecoverable freeze. Only
+	 * {@code create=true} and present-but-below-status reads keep the
+	 * vanilla join (upgrade semantics stay byte-for-byte vanilla).</p>
 	 */
 	@Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
 			at = @At("HEAD"), cancellable = true)
@@ -105,14 +113,16 @@ public abstract class ServerChunkCacheMixin {
 			return; // vanilla paths (server thread, netty, async scheduler) unchanged
 		}
 		ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.pack(x, z));
-		if (holder == null) {
-			return; // absent → vanilla fall-through (join; barrier pump completes it)
-		}
-		ChunkAccess chunk = holder.getChunkIfPresent(status);
-		if (chunk != null) {
-			// Present at the requested status: the exact result vanilla's
-			// main path would return from its lastChunk/holder lookup.
-			cir.setReturnValue(chunk);
+		boolean holderPresent = holder != null;
+		ChunkAccess chunk = holderPresent ? holder.getChunkIfPresent(status) : null;
+		switch (WorkerChunkProbe.decide(create, holderPresent, chunk != null)) {
+			case RETURN_CACHED -> cir.setReturnValue(chunk);
+			case RETURN_NULL -> {
+				WorkerChunkProbe.recordAbsentNull();
+				cir.setReturnValue(null);
+			}
+		case FALL_THROUGH -> {
+			}
 		}
 	}
 

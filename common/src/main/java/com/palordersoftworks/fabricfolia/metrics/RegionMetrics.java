@@ -39,6 +39,7 @@ public final class RegionMetrics {
 		REGION_SPLITS,
 		REGION_ABORTS,
 		SCHEDULED_TICKS_EXECUTED,
+		RANDOM_TICK_CHUNKS_EXECUTED,
 		ENTITY_TICKS_EXECUTED,
 		BLOCK_ENTITY_TICKS_EXECUTED,
 		PLAYER_CONNECTION_TICKS,
@@ -165,6 +166,7 @@ public final class RegionMetrics {
 		lines.add("Work: entityTicks=" + value(Counter.ENTITY_TICKS_EXECUTED)
 				+ " blockEntityTicks=" + value(Counter.BLOCK_ENTITY_TICKS_EXECUTED)
 				+ " scheduledTicks=" + value(Counter.SCHEDULED_TICKS_EXECUTED)
+				+ " randomTickChunks=" + value(Counter.RANDOM_TICK_CHUNKS_EXECUTED)
 				+ " playerConnectionTicks=" + value(Counter.PLAYER_CONNECTION_TICKS));
 		lines.add("Cross-region: tasks=" + value(Counter.CROSS_REGION_TASKS)
 				+ " migrations=" + value(Counter.ENTITY_MIGRATIONS));
