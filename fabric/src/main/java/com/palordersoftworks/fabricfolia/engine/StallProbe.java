@@ -116,6 +116,16 @@ public final class StallProbe {
 			try {
 				int tick = server.getTickCount();
 				long now = System.nanoTime();
+				if (shouldSuppressPreFirstTick(tick)) {
+					lastTick = tick;
+					lastProgress = now;
+					lastDump = now;
+					reported = false;
+					crawlTickBase = tick;
+					crawlWindowStart = now;
+					crawlReported = false;
+					continue;
+				}
 				if (access != null && isIntentionallyPaused(server, access)) {
 					lastTick = tick;
 					lastProgress = now;
@@ -136,8 +146,9 @@ public final class StallProbe {
 						Console.error("StallProbe: sustained crawl at " + String.format(java.util.Locale.ROOT, "%.2f", tps)
 								+ " TPS — the tick loop is PROGRESSING (not hung), but below ~1.67 TPS the "
 								+ "watchdog's 100-tick re-base cannot cap its 60s drift limit: a kill is on "
-								+ "this trajectory. Reduce the workload (this is the known vanilla O(n^2) "
-								+ "entity-clump cost) or enable regionized execution.");
+								+ "this trajectory. Capture a profiler sample and inspect the server-thread "
+								+ "hot path; do not enable staged gameplay unless the installed mods and "
+								+ "contraptions are compatible with region-worker execution.");
 					} else if (tps >= CRAWL_KILL_TPS && crawlReported) {
 						crawlReported = false;
 						Console.error("StallProbe: tick rate recovered (" + String.format(java.util.Locale.ROOT, "%.2f", tps) + " TPS)");
@@ -170,6 +181,10 @@ public final class StallProbe {
 				Console.error("StallProbe: probe iteration failed: " + t);
 			}
 		}
+	}
+
+	static boolean shouldSuppressPreFirstTick(int tickCount) {
+		return tickCount <= 0;
 	}
 
 	static boolean shouldSuppressEmptyPause(boolean dedicatedServer, int pauseSeconds, int onlinePlayers, int emptyTicks) {

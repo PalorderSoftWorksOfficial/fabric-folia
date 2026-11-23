@@ -50,6 +50,11 @@ public abstract class ConnectionFlushQueueMixin {
 			require = 1)
 	private void fabricfolia$dispatchDrainedAction(java.util.function.Consumer action,
 	                                               Object connection) {
+		if (FabricFoliaMod.engine() == null
+				|| !com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")) {
+			action.accept(connection);
+			return;
+		}
 		NetworkDispatch.runForConnection(FabricFoliaMod.engine(), (Connection) connection,
 				() -> action.accept(connection));
 	}

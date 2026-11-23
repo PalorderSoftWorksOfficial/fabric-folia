@@ -86,15 +86,7 @@ public final class WorldRegionizer {
 	private final Map<Long, Region> regions = new HashMap<>();
 	/** Sections with any chunks, per region id, for split recalculation. Guarded by structureLock. */
 	private final Set<Region> liveRegions = new LinkedHashSet<>();
-	/**
-	 * Reverse ownership index: section key → owning region. Maintained under
-	 * the structure lock at every ownership mutation (adopt, immediate merge,
-	 * split, kill); turns ownerOfChunk from a linear scan over live regions
-	 * into one map read (the hot ownership lookup on every staged body, packet
-	 * re-home, and ownership check). When the owning region dies the section
-	 * is gone or re-adopted, so no stale entries accumulate.
-	 */
-	private final java.util.Map<Long, Region> sectionOwners = new java.util.HashMap<>();
+	private final java.util.Map<Long, Region> sectionOwners = new java.util.concurrent.ConcurrentHashMap<>();
 
 	private long nextRegionId = 1;
 
@@ -615,11 +607,15 @@ public final class WorldRegionizer {
 	// Queries
 	// =================================================================================
 
-	/** @return the region owning the section containing this chunk, or null. */
 	public Region ownerOfChunk(int chunkX, int chunkZ) {
+		long key = sectionKey(sectionX(chunkX), sectionZ(chunkZ));
+		if (ownerLookupIndex) {
+			Region owner = sectionOwners.get(key);
+			return owner == null || owner.state == RegionState.DEAD ? null : owner;
+		}
 		structureLock.lock();
 		try {
-			RegionSection section = sections.get(sectionKey(sectionX(chunkX), sectionZ(chunkZ)));
+			RegionSection section = sections.get(key);
 			return section == null ? null : ownerOfSectionLocked(section);
 		} finally {
 			structureLock.unlock();

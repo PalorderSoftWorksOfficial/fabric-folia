@@ -1,11 +1,15 @@
 package com.palordersoftworks.fabricfolia.mixin;
 
 import com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.objects.ObjectSet;
 import net.minecraft.core.SectionPos;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.DistanceManager;
 import net.minecraft.server.level.ServerPlayer;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -13,6 +17,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(DistanceManager.class)
 public abstract class DistanceManagerTrackingMixin {
+
+	@Shadow
+	@Final
+	private Long2ObjectMap<ObjectSet<ServerPlayer>> playersPerChunk;
 
 	@Inject(method = "addPlayer(Lnet/minecraft/core/SectionPos;Lnet/minecraft/server/level/ServerPlayer;)V", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferAddPlayer(SectionPos pos, ServerPlayer player, CallbackInfo ci) {
@@ -27,6 +35,9 @@ public abstract class DistanceManagerTrackingMixin {
 	@Inject(method = "removePlayer(Lnet/minecraft/core/SectionPos;Lnet/minecraft/server/level/ServerPlayer;)V", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferRemovePlayer(SectionPos pos, ServerPlayer player, CallbackInfo ci) {
 		if (ServerThreadDeferral.isServerThread()) {
+			if (this.playersPerChunk.get(pos.chunk().pack()) == null) {
+				ci.cancel();
+			}
 			return;
 		}
 		ci.cancel();

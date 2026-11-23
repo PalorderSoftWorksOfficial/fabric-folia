@@ -24,7 +24,8 @@ public abstract class ChunkMapTrackingMixin {
 
 	@Inject(method = "move(Lnet/minecraft/server/level/ServerPlayer;)V", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferMove(ServerPlayer player, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+				|| ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -33,7 +34,8 @@ public abstract class ChunkMapTrackingMixin {
 
 	@Inject(method = "addEntity(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferAddEntity(Entity entity, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+				|| ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -42,7 +44,8 @@ public abstract class ChunkMapTrackingMixin {
 
 	@Inject(method = "removeEntity(Lnet/minecraft/world/entity/Entity;)V", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferRemoveEntity(Entity entity, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+				|| ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();

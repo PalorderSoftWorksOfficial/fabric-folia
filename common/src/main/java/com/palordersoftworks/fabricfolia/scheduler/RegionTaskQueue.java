@@ -45,8 +45,12 @@ public final class RegionTaskQueue {
 	 * without it, children would start with stranded ownership (mandate §8:
 	 * "redistribute region-local data"; spec 16 groundwork).
 	 */
-	public record Entry(Runnable task, long chunkPos) {
+	public record Entry(Runnable task, long chunkPos, Runnable onDropped) {
 		public static final long NO_POSITION = Long.MIN_VALUE;
+
+		public Entry(Runnable task, long chunkPos) {
+			this(task, chunkPos, null);
+		}
 	}
 
 	private final Queue<Entry> tasks = new ConcurrentLinkedQueue<>();
@@ -62,13 +66,16 @@ public final class RegionTaskQueue {
 	 * that protocol.
 	 */
 	public void add(Runnable task) {
-		tasks.add(new Entry(task, Entry.NO_POSITION));
-		pendingCount.incrementAndGet();
+		add(task, Entry.NO_POSITION, null);
 	}
 
 	/** Enqueues a task that targets a specific chunk position (split-aware). */
 	public void add(Runnable task, long chunkPos) {
-		tasks.add(new Entry(task, chunkPos));
+		add(task, chunkPos, null);
+	}
+
+	public void add(Runnable task, long chunkPos, Runnable onDropped) {
+		tasks.add(new Entry(task, chunkPos, onDropped));
 		pendingCount.incrementAndGet();
 	}
 
@@ -191,9 +198,14 @@ public final class RegionTaskQueue {
 	/** Drops all tasks at region death (drain policy: DROP — see class docs). */
 	public int dropAll() {
 		int n = 0;
-		while (tasks.poll() != null) {
+		Entry entry;
+		while ((entry = tasks.poll()) != null) {
 			pendingCount.decrementAndGet();
 			n++;
+			Runnable onDropped = entry.onDropped();
+			if (onDropped != null) {
+				onDropped.run();
+			}
 		}
 		return n;
 	}

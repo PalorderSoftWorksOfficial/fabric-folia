@@ -14,6 +14,13 @@ class ConfigSchemaPatchTest {
     }
 
     @Test
+    void gameplayMutationStagingIsDisabledByDefault() {
+        assertEquals(Boolean.FALSE, ConfigSchema.get().option(ConfigSchema.KEY_PATCH_ENTITY_TICK).defaultValue());
+        assertEquals(Boolean.FALSE, ConfigSchema.get().option(ConfigSchema.KEY_PATCH_CHUNK_TICK).defaultValue());
+        assertEquals(Boolean.FALSE, ConfigSchema.get().option(ConfigSchema.KEY_PATCH_RANDOM_TICK).defaultValue());
+    }
+
+    @Test
     void unsupportedEventDispatchToggleIsNotAdvertised() {
         assertNull(ConfigSchema.get().option("patches.fabric.event-dispatch"));
     }

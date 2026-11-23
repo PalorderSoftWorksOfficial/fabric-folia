@@ -66,19 +66,16 @@ public abstract class LevelEntityTickMixin {	@Redirect(
 				? RegionStageHub.hubFor((Level) (Object) this) : null;
 		if (hub != null && hub.stagingEnabled(RegionStageHub.Slice.ENTITY)) {
 			if (entity instanceof net.minecraft.server.level.ServerPlayer player) {
-				if (fabricfolia$playerPhysicsSafe(player)
-						&& hub.stageIfRoom(RegionStageHub.Slice.ENTITY,
-								new StagedEntityBody(consumer, (Entity) entity))) {
+				if (hub.stagePlayerEntity(player,
+						position -> new StagedEntityBody(consumer, player, position))) {
 					return;
 				}
-				// Edge player (unloaded neighborhood) or backlog-suppressed:
-				// vanilla inline path.
 				runInline(consumer, entity);
 				return;
 			}
 			if (fabricfolia$neighborhoodLoaded((Entity) entity)
 					&& hub.stageIfRoom(RegionStageHub.Slice.ENTITY,
-							new StagedEntityBody(consumer, (Entity) entity))) {
+							new StagedEntityBody(consumer, (Entity) entity, null))) {
 				return;
 			}
 		}
@@ -91,20 +88,6 @@ public abstract class LevelEntityTickMixin {	@Redirect(
 		@SuppressWarnings("unchecked")
 		java.util.function.Consumer<Object> raw = (java.util.function.Consumer<Object>) consumer;
 		raw.accept(entity);
-	}
-
-	/**
-	 * A staged player body must not park its worker on a chunk load. Same
-	 * probe as the generic entity check, evaluated at staging time (server
-	 * thread) for players because the worker-side bounce for players would
-	 * reorder against the region's other staged player work.
-	 */
-	private boolean fabricfolia$playerPhysicsSafe(net.minecraft.server.level.ServerPlayer player) {
-		if (!(((Object) this) instanceof net.minecraft.server.level.ServerLevel level)) {
-			return true;
-		}
-		RegionStageHub hub = RegionStageHub.hubFor(level);
-		return hub != null && hub.vanillaNeighborhoodLoaded(player.chunkPosition());
 	}
 
 	/**
@@ -129,20 +112,14 @@ public abstract class LevelEntityTickMixin {	@Redirect(
 		return hub != null && hub.vanillaNeighborhoodLoaded(entity.chunkPosition());
 	}
 
-	/**
-	 * The staged entity body: its position resolves the owning region at
-	 * flush — after all of vanilla's server-thread passes, so a tick-time
-	 * migration is reflected in the owner that executes the body (see
-	 * RegionStageHub's correctness boundaries). The body IS vanilla's
-	 * consumer; nothing is copied.
-	 */
 	private record StagedEntityBody(java.util.function.Consumer<?> consumer,
-	                                Entity entity)
+	                                Entity entity,
+	                                net.minecraft.world.level.ChunkPos pinnedPosition)
 			implements RegionStageHub.Positioned, Runnable {
 
 		@Override
 		public net.minecraft.world.level.ChunkPos fabricfolia$position() {
-			return entity.chunkPosition();
+			return pinnedPosition != null ? pinnedPosition : entity.chunkPosition();
 		}
 
 		@Override

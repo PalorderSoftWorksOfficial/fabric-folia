@@ -7,6 +7,7 @@ package com.palordersoftworks.fabricfolia.scheduler;
 
 import com.palordersoftworks.fabricfolia.api.ValidationMode;
 import com.palordersoftworks.fabricfolia.region.Region;
+import com.palordersoftworks.fabricfolia.region.RegionState;
 import com.palordersoftworks.fabricfolia.region.RegionizerConfig;
 import com.palordersoftworks.fabricfolia.region.WorldRegionizer;
 import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
@@ -22,14 +23,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Failure-policy behavior tests (spec 33/34), exercised through the
- * scheduler's real catch sites: a malformed task is contained, reported with
- * the mandated diagnostic fields, and isolated from other regions; the
- * Nth consecutive failure aborts the region; a success resets the streak.
- */
 class RegionFailurePolicyTest {
 
 	@AfterEach
@@ -78,27 +75,46 @@ class RegionFailurePolicyTest {
 	@Test
 	void consecutiveFailuresAbortOnlyTheFailingRegion() throws Exception {
 		List<String> diag = new CopyOnWriteArrayList<>();
+		CountDownLatch abortDecided = new CountDownLatch(1);
+		CountDownLatch queueDropped = new CountDownLatch(1);
 		WorldRegionizer rz = newRegionizer();
 		Region bad = rz.addChunk(0, 0);
 
 		try (RegionScheduler scheduler = new RegionScheduler(rz, 1,
-				ValidationMode.STRICT, region -> { }, diag::add)) {
+				ValidationMode.STRICT, region -> { }, message -> {
+					diag.add(message);
+					if (message.contains("aborting the region")) {
+						abortDecided.countDown();
+					}
+					if (message.contains("died: dropped")) {
+						queueDropped.countDown();
+					}
+				})) {
 			scheduler.start();
-			// Defaults: maxConsecutiveFailures is the policy's configured
-			// threshold. Enqueue enough failing tasks to trip it.
-			CountDownLatch ran = new CountDownLatch(8);
-			for (int i = 0; i < 8; i++) {
+			int threshold = RegionFailurePolicy.DEFAULT_MAX_CONSECUTIVE_FAILURES;
+			CountDownLatch failuresRan = new CountDownLatch(threshold);
+			for (int i = 0; i < threshold; i++) {
 				final int idx = i;
 				scheduler.enqueue(bad, () -> {
-					ran.countDown();
+					failuresRan.countDown();
 					throw new RuntimeException("persist-" + idx);
 				});
 			}
-			assertTrue(ran.await(10, TimeUnit.SECONDS));
+			AtomicBoolean survivorRan = new AtomicBoolean(false);
+			scheduler.enqueue(bad, () -> survivorRan.set(true));
+
+			assertTrue(failuresRan.await(10, TimeUnit.SECONDS), "the failing tasks must run");
+			assertTrue(abortDecided.await(10, TimeUnit.SECONDS), "the policy must decide the abort");
+			assertTrue(queueDropped.await(10, TimeUnit.SECONDS),
+					"the abort must drop the remaining queue with a count");
 
 			String joined = String.join("\n", diag);
-			assertTrue(joined.contains("aborting the region"),
-					"the policy must abort a region that fails every tick: " + joined);
+			assertTrue(bad.isDead(), "the region must actually be aborted, not just logged: " + joined);
+			assertSame(RegionState.DEAD, bad.state());
+			assertFalse(rz.liveRegions().contains(bad), "a dead region must leave the live set");
+			assertFalse(survivorRan.get(),
+					"the drain must stop at the abort — later queued work must not run");
+			assertTrue(joined.contains("died: dropped 1 queued task(s)"), joined);
 		}
 	}
 
@@ -111,21 +127,110 @@ class RegionFailurePolicyTest {
 		try (RegionScheduler scheduler = new RegionScheduler(rz, 1,
 				ValidationMode.STRICT, r -> { }, diag::add)) {
 			scheduler.start();
-			// fail, succeed, fail, succeed ... never two consecutive fails.
-			CountDownLatch done = new CountDownLatch(6);
-			for (int i = 0; i < 3; i++) {
-				final int idx = i;
-				scheduler.enqueue(region, () -> {
-					done.countDown();
-					throw new RuntimeException("pulse-" + idx);
-				});
+			int belowThreshold = RegionFailurePolicy.DEFAULT_MAX_CONSECUTIVE_FAILURES - 1;
+			CountDownLatch done = new CountDownLatch((belowThreshold * 2) + 2);
+			for (int block = 0; block < 2; block++) {
+				for (int i = 0; i < belowThreshold; i++) {
+					final int idx = i;
+					scheduler.enqueue(region, () -> {
+						done.countDown();
+						throw new RuntimeException("pulse-" + idx);
+					});
+				}
 				scheduler.enqueue(region, done::countDown);
 			}
-			assertTrue(done.await(10, TimeUnit.SECONDS));
+			assertTrue(done.await(10, TimeUnit.SECONDS),
+					"all tasks must run; still pending: " + done.getCount() + " — " + String.join(" | ", diag));
+
 			String joined = String.join("\n", diag);
-			assertTrue(joined.contains("pulse-0"));
-			// No abort diagnostic: the streak never reached the threshold.
-			assertTrue(!joined.contains("aborting the region"), joined);
+			assertTrue(joined.contains("pulse-0"), joined);
+			assertFalse(joined.contains("aborting the region"),
+					"a success between failures must reset the streak: " + joined);
+			assertFalse(region.isDead(), "the region must still be live");
+			assertSame(RegionState.READY, region.state());
+		}
+	}
+
+	@Test
+	void failurePolicyBookkeepingIsReleasedOnRegionMerge() throws Exception {
+		List<String> diag = new CopyOnWriteArrayList<>();
+		WorldRegionizer rz = newRegionizer();			Region a = rz.addChunk(0, 0);
+		Region b = rz.addChunk(20, 0);
+		RegionFailurePolicy policy = new RegionFailurePolicy(diag::add, rz::abortTick,
+				RegionFailurePolicy.DEFAULT_MAX_CONSECUTIVE_FAILURES);
+		RegionScheduler scheduler = new RegionScheduler(rz,
+				new WorkerPool(1, "RegionFailurePolicyTest-Worker"), 1,
+				ValidationMode.STRICT, r -> { }, diag::add, true, policy);
+		try {
+			policy.reportTaskFailure(a, "probe-a", new IllegalStateException("a"));
+			policy.reportTaskFailure(b, "probe-b", new IllegalStateException("b"));
+			String before = String.join("\n", policy.diagnosticsLines());
+			assertTrue(before.contains("#" + a.id), before);
+			assertTrue(before.contains("#" + b.id), before);
+
+			for (int section = 2; section <= 8; section++) {
+				rz.addChunk(section * 2, 0);
+			}
+			assertSame(rz.ownerOfChunk(0, 0), rz.ownerOfChunk(20, 0),
+					"the bridge must merge both clusters into one region");
+			assertTrue(a.isDead() || b.isDead(), "a merge must have absorbed one of the two regions");
+
+			String after = String.join("\n", policy.diagnosticsLines());
+			for (Region region : List.of(a, b)) {
+				if (region.isDead()) {
+					assertFalse(after.contains("#" + region.id),
+							"a merged-away region's failure bookkeeping must be released: " + after);
+				} else {
+					assertTrue(after.contains("#" + region.id),
+							"the survivor keeps its own streak: " + after);
+				}
+			}
+		} finally {
+			scheduler.close();
+		}
+	}
+
+	@Test
+	void failurePolicyBookkeepingIsReleasedOnRegionDeath() throws Exception {
+		List<String> diag = new CopyOnWriteArrayList<>();
+		WorldRegionizer rz = newRegionizer();
+		Region region = rz.addChunk(8, 8);
+		RegionFailurePolicy policy = new RegionFailurePolicy(diag::add, rz::abortTick,
+				RegionFailurePolicy.DEFAULT_MAX_CONSECUTIVE_FAILURES);
+		RegionScheduler scheduler = new RegionScheduler(rz,
+				new WorkerPool(1, "RegionFailurePolicyTest-Worker"), 1,
+				ValidationMode.STRICT,
+				r -> {
+					throw new IllegalStateException("body failure");
+				},
+				diag::add, true, policy);
+		try {
+			scheduler.start();
+			CountDownLatch ran = new CountDownLatch(2);
+			for (int i = 0; i < 2; i++) {
+				final int idx = i;
+				scheduler.enqueue(region, () -> {
+					ran.countDown();
+					throw new RuntimeException("bookkeeping-" + idx);
+				});
+			}
+			assertTrue(ran.await(10, TimeUnit.SECONDS), "the failing tasks must run");
+
+			String before = String.join("\n", policy.diagnosticsLines());
+			assertTrue(before.contains("#" + region.id),
+					"a live streak must be reported before death: " + before);
+
+			scheduler.close();
+			rz.removeChunk(8, 8);
+			assertTrue(rz.tryBeginTick(region), "the region must still be tickable after dispatch stopped");
+			rz.completeTick(region, 1);
+
+			assertTrue(region.isDead(), "emptying the region must kill it");
+			String after = String.join("\n", policy.diagnosticsLines());
+			assertFalse(after.contains("#" + region.id),
+					"a dead region's failure bookkeeping must be released: " + after);
+		} finally {
+			scheduler.close();
 		}
 	}
 }

@@ -9,6 +9,7 @@ public final class WorkerChunkProbe {
 	}
 
 	private static final java.util.concurrent.atomic.AtomicLong ABSENT_NULLS = new java.util.concurrent.atomic.AtomicLong();
+	private static final java.util.concurrent.atomic.AtomicLong VANILLA_JOINS = new java.util.concurrent.atomic.AtomicLong();
 
 	private WorkerChunkProbe() {
 	}
@@ -31,7 +32,16 @@ public final class WorkerChunkProbe {
 		return ABSENT_NULLS.get();
 	}
 
+	public static void recordVanillaJoin() {
+		VANILLA_JOINS.incrementAndGet();
+	}
+
+	public static long vanillaJoins() {
+		return VANILLA_JOINS.get();
+	}
+
 	static void resetForTests() {
 		ABSENT_NULLS.set(0);
+		VANILLA_JOINS.set(0);
 	}
 }

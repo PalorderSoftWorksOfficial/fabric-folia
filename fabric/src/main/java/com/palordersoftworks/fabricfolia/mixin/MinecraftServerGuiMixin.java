@@ -5,6 +5,7 @@
 
 package com.palordersoftworks.fabricfolia.mixin;
 
+import com.palordersoftworks.fabricfolia.FabricFoliaMod;
 import com.palordersoftworks.fabricfolia.gui.ServerGuiIcon;
 import javax.swing.JFrame;
 import net.minecraft.server.gui.MinecraftServerGui;
@@ -46,7 +47,9 @@ public abstract class MinecraftServerGuiMixin {
 			)
 	)
 	private static void fabricfolia$applyIconThenShow(JFrame frame, boolean visible) {
-		ServerGuiIcon.applyTo(frame);
+		if (FabricFoliaMod.config() != null && FabricFoliaMod.config().enabled()) {
+			ServerGuiIcon.applyTo(frame);
+		}
 		frame.setVisible(visible);
 	}
 
@@ -55,7 +58,8 @@ public abstract class MinecraftServerGuiMixin {
 			constant = @Constant(stringValue = "Minecraft server")
 	)
 	private static String fabricfolia$changeTitle(String original) {
-		return "Fabric Folia";
+		return FabricFoliaMod.config() != null && FabricFoliaMod.config().enabled()
+				? "Fabric Folia" : original;
 	}
 
 	@ModifyConstant(
@@ -63,6 +67,7 @@ public abstract class MinecraftServerGuiMixin {
 			constant = @Constant(stringValue = "Minecraft server - shutting down!")
 	)
 	private static String fabricfolia$changeShutdownTitle(String original) {
-		return "Fabric Folia - shutting down!";
+		return FabricFoliaMod.config() != null && FabricFoliaMod.config().enabled()
+				? "Fabric Folia - shutting down!" : original;
 	}
 }

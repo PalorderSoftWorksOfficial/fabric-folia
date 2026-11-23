@@ -72,6 +72,22 @@ class ServerBrandTest {
 	}
 
 	@Test
+	void masterSwitchOffRestoresVanillaBrandEvenWhenBrandOverrideWasRequested() throws Exception {
+		Path dir = Files.createTempDirectory("folia-brand-engine-off");
+		Path file = dir.resolve("fabric-folia.yml");
+		Files.writeString(file, "general:\n  enabled: false\n  server-brand: true\n  server-brand-name: \"folia-test-brand\"\n");
+		FoliaConfig config = FoliaConfig.at(file);
+		config.load();
+		config.freeze();
+
+		FabricFoliaMod.config = config;
+
+		CallbackInfoReturnable<String> cir = invokeBrand();
+
+		assertFalse(cir.isCancelled());
+	}
+
+	@Test
 	void brandFallsBackToVanillaWhenOverrideDisabled() throws Exception {
 		Path dir = Files.createTempDirectory("folia-brand-off");
 		Path file = dir.resolve("fabric-folia.yml");

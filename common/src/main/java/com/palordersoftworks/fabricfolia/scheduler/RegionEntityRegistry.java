@@ -19,67 +19,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
-/**
- * Entity migration as a first-class system (mandate §15): every entity is
- * owned by exactly one region at any instant, per-region entity sets are
- * region-local data (the first real {@link RegionLocalData} consumer), and
- * migration is an explicit atomic protocol — never a concurrent mutation of
- * two regions' state from two threads.
- *
- * <p><strong>Ownership (mandate §15 steps 1–3):</strong> the authoritative
- * handle→region map is structural state, mutated only (a) by {@link #migrate}
- * and {@link #unregister} under a per-entity stripe lock and (b) by the
- * regionizer's structural transitions (merge/split/death) under the
- * regionizer structure lock. Ticking region threads only ever READ through
- * {@link #ownerOfHandle}; they never write it — single-writer by construction,
- * no global lock on the read path (mandate §31).</p>
- *
- * <p><strong>The migration protocol (one stripe lock):</strong>
- * remove-from-old + add-to-new + repoint the authoritative map is one
- * critical section. A region thread can observe pre- or post-migration state,
- * never the torn middle — which is what guarantees an entity is never ticked
- * by two regions simultaneously (mandate §15 step 2) and never disappears
- * during migration (mandate §15 step 5).</p>
- *
- * <p><strong>Why stripes, not one lock:</strong> a single lock over all
- * migrations would serialize unrelated regions' entity movement — the global
- * bottleneck §31 forbids. Stripes partition the lock space by handle
- * identity; different entities migrating between different region pairs
- * proceed in parallel. Stripe locks are NEVER taken while holding the
- * regionizer structure lock (documented lock order: structure → stripes), so
- * the structural handlers below retarget the authoritative map directly —
- * the structure lock already excludes every other structural writer, and
- * stripe holders only ever touch their own entity's rows.</p>
- *
- * <p><strong>Region death:</strong> entities owned by the dead region are
- * retired (mapping dropped, listeners fire) — an entity cannot outlive a
- * world structure that no longer exists, and no migration lock of a dead
- * region is left behind anywhere.</p>
- *
- * <p><strong>Splits:</strong> children are born TRANSIENT, so no child thread
- * can race the retarget. Each of the parent's entities is re-owned by the
- * child that owns its home chunk now, via the caller-supplied
- * {@code homeChunkResolver}; entities whose home chunk has no owner (purged
- * section) are retired.</p>
- *
- * <p><strong>Merges:</strong> the survivor's per-region set absorbs the
- * donor's through the data layer; the authoritative map is bulk-retargeted
- * to the survivor.</p>
- *
- * <p><strong>The common-module boundary:</strong> this class has no Minecraft
- * types. The fabric module supplies the home-chunk resolver (entity → packed
- * chunk position) and calls {@link #register}/{@link #migrate}/
- * {@link #unregister} from the entity add/remove/move hooks it owns; the
- * machinery here is complete and tested against fakes.</p>
- *,
- * <p><strong>Listener ordering (load-bearing):</strong> the regionizer fires
- * listeners in registration order, and the hub's split handler OVERWRITES
- * child data entries with fresh sets. This registry must therefore register
- * itself AFTER the hub — construct the hub, {@code hub.attachTo(regionizer)},
- * then call {@link #attach()}. The registry's split handler then runs after
- * the hub's, sees the fresh empty child sets, and fills them from the
- * authoritative map.</p>
- */
 public final class RegionEntityRegistry implements WorldRegionizer.Listener, AutoCloseable {
 
 	/** Stripe count: power of two, keeps {@code stripeFor} mask-friendly. */
@@ -166,11 +105,17 @@ public final class RegionEntityRegistry implements WorldRegionizer.Listener, Aut
 		if (handle == null || region == null) {
 			throw new IllegalArgumentException("handle and region must be non-null");
 		}
-		if (ownerByHandle.putIfAbsent(handle, region) != null) {
-			return false;
+		ReentrantLock stripe = migrationLocks[stripeFor(handle)];
+		stripe.lock();
+		try {
+			if (ownerByHandle.putIfAbsent(handle, region) != null) {
+				return false;
+			}
+			perRegionEntities.getOrCreateStructural(region).add(handle);
+			return true;
+		} finally {
+			stripe.unlock();
 		}
-		perRegionEntities.getOrCreateStructural(region).add(handle);
-		return true;
 	}
 
 	/** @return the region currently owning {@code handle}, or null if unowned/retired. */
@@ -321,9 +266,13 @@ public final class RegionEntityRegistry implements WorldRegionizer.Listener, Aut
 				byNewOwner.computeIfAbsent(newOwner, k -> new ArrayList<>()).add(e.getKey());
 			}
 		}
+		Set<Object> parentSet = perRegionEntities.existingStructural(parent);
 		for (Map.Entry<Region, List<Object>> e : byNewOwner.entrySet()) {
 			Set<Object> childSet = perRegionEntities.getOrCreateStructural(e.getKey());
 			for (Object handle : e.getValue()) {
+				if (parentSet != null) {
+					parentSet.remove(handle);
+				}
 				childSet.add(handle);
 				ownerByHandle.put(handle, e.getKey());
 			}
@@ -351,7 +300,12 @@ public final class RegionEntityRegistry implements WorldRegionizer.Listener, Aut
 	}
 
 	private void retire(Object handle) {
-		if (ownerByHandle.remove(handle) != null) {
+		Region previous = ownerByHandle.remove(handle);
+		if (previous != null) {
+			Set<Object> previousSet = perRegionEntities.existingStructural(previous);
+			if (previousSet != null) {
+				previousSet.remove(handle);
+			}
 			retiredCount.incrementAndGet();
 			for (Consumer<Object> listener : retirementListeners) {
 				listener.accept(handle);

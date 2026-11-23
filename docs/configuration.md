@@ -8,16 +8,19 @@ There is no /folia config command and no /folia reload command. Edit the file on
 
 | Key | Default | Notes |
 |---|---:|---|
-| general.enabled | true | Loads the Fabric-Folia engine and its integration layer |
-| general.regionized-gameplay | false | Opts into selected entity/block-entity staged execution |
-| general.regionized-random-ticks | false | Opts into the separate random-tick interception |
-| gameplay.stage-player-path | false | Opts into player connection/packet staging; experimental |
+| general.enabled | true | Loads the engine and ownership/scheduler infrastructure; false resolves all 13 patches inactive and leaves vanilla execution |
+| general.regionized-gameplay | false | Requests selected entity/block-entity staged execution; currently blocked by the R4 safety interlock |
+| general.regionized-random-ticks | false | Requests random-tick staging; currently blocked by the R4 safety interlock |
+| gameplay.stage-player-path | false | Requests player connection/physics staging; currently blocked by the R4 safety interlock |
+| patches.minecraft.entity-tick-optimization | false | Requests parallel entity ticking; currently blocked by the R4 safety interlock |
+| patches.minecraft.chunk-tick-optimization | false | Requests block-entity and scheduled block/fluid tick staging; currently blocked by the R4 safety interlock |
+| patches.minecraft.random-tick-optimization | false | Requests parallel chunk random ticks; currently blocked by the R4 safety interlock |
 | threads.worker-threads | auto | Negative/auto values are resolved from available CPUs |
 | threads.thread-check-mode | WARN | OFF, WARN, or STRICT |
 | diagnostics.debug | false | Diagnostic detail toggle |
 | diagnostics.debug-logging | false | Higher-volume dispatch/worker logging |
 | diagnostics.profiling | false | Profiling collection |
-| diagnostics.metrics | true | Runtime metrics collection |
+| diagnostics.metrics | false | Declared metrics toggle; `/folia metrics` reports current counters regardless |
 | diagnostics.watchdog | true | Region-stall watchdog |
 | patches.enabled | true | Master optimization-patch switch |
 | patches.fabricfolia.chunk-regionization | true | Registers loaded chunks with the regionizer; prerequisite for region ownership |
@@ -26,21 +29,23 @@ There is no /folia config command and no /folia reload command. Edit the file on
 | patches.fabricfolia.task-queue | true | Queue accounting/drain optimization |
 | gpu.enabled | false | Experimental OpenCL broadphase acceleration |
 
-The safe defaults intentionally keep staged gameplay, random ticks, and player connection staging on vanilla execution. Enabling these options is an operator opt-in, not a production compatibility certification.
+The current R4 safety interlock keeps entity ticking, block-entity ticking, scheduled ticks, random ticks, player physics, and packet-to-region mutation routing on vanilla execution even when their config requests are true. Startup emits a warning when it overrides a request. Region ownership, diagnostics, scheduler services and independent performance patches can remain active. This is a fail-closed safety measure, not a cross-region mutation bridge; the worker-side gameplay speedup is unavailable until that protocol is implemented and validated.
 
 ## Feature gates
 
 ### Regionized gameplay
 
-Set general.regionized-gameplay to true only in a disposable world first. Selected entity and block-entity bodies are captured from vanilla's server-thread passes and later dispatched to owning-region workers. Vanilla still chooses what should tick. This is not a full independent Folia world tick loop.
+general.regionized-gameplay is the master request for staged entity and chunk gameplay. The individual gates patches.minecraft.entity-tick-optimization and patches.minecraft.chunk-tick-optimization are also requests. The R4 safety interlock currently forces these built-in worker stages off regardless of those values, so vanilla owns all entity, block-entity and scheduled block/fluid ticking.
+
+Keep entity staging disabled when mods depend on main-thread entity behavior. This includes item entity pickup, merging, movement, and despawn logic. Keep chunk staging disabled for redstone, block entities, pistons, droppers, rails, trapdoors, scaffolding, and other blocks whose scheduled updates assume server-thread execution. Vanilla still chooses what should tick. This is not a full independent Folia world tick loop.
 
 ### Player connection staging
 
-gameplay.stage-player-path is a separate experimental gate. It moves selected player connection processing to region-owned contexts. Keep it disabled unless the player path, packet handoffs, teleport, respawn, migration and mod compatibility have been tested.
+gameplay.stage-player-path is a separate experimental request. It would move player connection processing and the player physics chain to region-owned contexts. The R4 interlock currently forces it off; player movement and interactions therefore remain on vanilla server-thread execution. Packet dispatch is also forced to the vanilla queue until region-owned packet mutation is safe.
 
 ### Regionized random ticks
 
-general.regionized-random-ticks is separately gated and disabled by default. Some mod interactions can suppress or invalidate this path; test random tick events and world mutation timing before enabling it.
+general.regionized-random-ticks and patches.minecraft.random-tick-optimization are separate requests. The R4 interlock currently forces random-tick worker execution off, so vanilla performs random ticks on the server thread.
 
 ### Thread checking
 
@@ -48,11 +53,11 @@ threads.thread-check-mode accepts OFF, WARN, or STRICT. STRICT throws on detecte
 
 ### Diagnostics
 
-diagnostics.debug and diagnostics.debug-logging increase diagnostic output. Enable them temporarily while collecting an incident reproduction; debug logging can be noisy. diagnostics.profiling and diagnostics.metrics control profiling and metrics collection. diagnostics.watchdog enables the periodic region-stall scan.
+diagnostics.debug and diagnostics.debug-logging increase diagnostic output. Enable them temporarily while collecting an incident reproduction; debug logging can be noisy. diagnostics.profiling controls per-region timing collection. diagnostics.metrics defaults to false in `ConfigSchema`; it does not currently gate the `/folia metrics` command, which reports the engine's current counters regardless of its value. diagnostics.watchdog enables the periodic region-stall scan.
 
 ### Patch toggles
 
-patches.enabled controls the optimization-patch layer. Individual keys live under patches.minecraft, patches.network and patches.fabricfolia. The chunk-regionization option is distinct from the region-lookup option; disabling chunk regionization prevents chunk-to-region registration and therefore disables the basis for staged region work. Do not change it on an active test without understanding the feature gates.
+patches.enabled controls the optimization-patch layer. Individual keys live under patches.minecraft, patches.network and patches.fabricfolia. Entity, block-entity/scheduled-tick, random-tick and packet-dispatch requests are forced off by the R4 interlock even if set to true. The chunk-regionization option is distinct from the region-lookup option; disabling chunk regionization prevents chunk-to-region registration and therefore disables the basis for staged region work. Do not change it on an active test without understanding the feature gates.
 
 ### GPU
 

@@ -24,7 +24,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferAddTicketWithRadius(TicketType type, ChunkPos pos, int radius, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -38,7 +39,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferAddTicket(Ticket ticket, ChunkPos pos, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -52,7 +54,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferAddTicketAt(long packedPos, Ticket ticket, CallbackInfoReturnable<Boolean> cir) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		cir.setReturnValue(true);
@@ -67,7 +70,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferRemoveTicketWithRadius(TicketType type, ChunkPos pos, int radius, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -81,7 +85,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferRemoveTicket(Ticket ticket, ChunkPos pos, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -95,7 +100,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferRemoveTicketAt(long packedPos, Ticket ticket, CallbackInfoReturnable<Boolean> cir) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		cir.setReturnValue(true);
@@ -110,7 +116,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferRemoveTicketIf(TicketStorage.TicketPredicate predicate, Long2ObjectOpenHashMap<List<Ticket>> tickets, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -124,7 +131,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferReplaceTicketLevelOfType(int level, TicketType type, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();
@@ -138,7 +146,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferUpdateChunkForced(ChunkPos pos, boolean forced, CallbackInfoReturnable<Boolean> cir) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		cir.setReturnValue(true);
@@ -153,7 +162,8 @@ public abstract class TicketStorageMixin {
 		cancellable = true
 	)
 	private void fabricfolia$deferPurgeStaleTickets(ChunkMap chunkMap, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ci.cancel();

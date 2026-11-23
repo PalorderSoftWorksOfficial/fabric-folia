@@ -123,9 +123,8 @@ public final class RegionFailurePolicy {
 		return maxConsecutiveFailures;
 	}
 
-	/** Internal helper kept for the scheduler's existing per-task report call. */
-	public void reportTaskFailure(Region region, String description, Throwable cause) {
-		onFailure(region, description, cause);
+	public Action reportTaskFailure(Region region, String description, Throwable cause) {
+		return onFailure(region, description, cause);
 	}
 
 	/** Summarizes per-region health for /folia (diagnostics). */

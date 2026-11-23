@@ -19,24 +19,43 @@
 
 ## 1. Project identity
 
-- **Repo:** `fabric-folia` at `D:\fabric-folia` (MSYS path `/d/fabric-folia`).
+- **Repo (current host, 2026-11-22):** Linux FAC host. Original working checkout
+  `/home/administrator/CDN-bucket/fabric-folia` (branch `main`, local dirty work
+  preserved); reconciled worktree `/tmp/ff-reconcile` at `c2fbe21`. The historical
+  Windows path `D:\fabric-folia` (`/d/fabric-folia`) is kept only in the history
+  sections below and no longer describes the active machine.
 - **What it is:** a real Fabric mod implementing Folia-style regionized
   multithreaded execution for vanilla Minecraft **26.2** (Mojang names ARE the
   runtime names — no mappings layer). Must stay Fabric-native: mixins, Fabric API,
   Loom. NEVER a Paper/Folia fork or patch-based distribution.
 - **License:** Apache-2.0, Palorder Softworks, 2026.
-- **Git:** `main` branch — **the owner directive (2026-09-25) is to stay on
-  main and push there**; remote `origin` =
+- **Git (historical owner directive, 2026-09-25):** stay on `main` and push there.
+  **For the current delegated/manager work this is history only: no commit, push,
+  publish or deploy without explicit approval.** Remote `origin` =
   `https://github.com/PalorderSoftWorksOfficial/fabric-folia.git`.
   Push works via `credential.helper=manager`; REST/PR needs a PAT we do not have.
 - **Modules:** `api` (public contract, ~968 LOC) → `common` (engine core: regionizer,
   schedulers, config, metrics, threading) → `fabric` (mixins, engine bootstrap,
   entrypoints, the only module touching Minecraft classes).
-- **Mixin count:** 24 registered in `fabric/src/main/resources/fabricfolia.mixins.json`
-  (`ChunkTicketMixin` added in the 2026-09-25 ticket-deferral turn; a faulty
-  `ReportTypeMixin` was removed in commit `c36f8c3`).
-- **Tests:** `./gradlew :common:test :api:test :fabric:test` — 133/133 green
-  (2026-09-25 ticket-deferral turn; no Mockito). Fabric tests boot the REAL engine
+- **Mixin register:** 29 declared classes in `fabric/src/main/resources/fabricfolia.mixins.json`
+  (2026-11-22 reconciled tree). A declared count is **not** proof that any mixin
+  applied; only an exact-jar mixin export or a server boot can show that, and neither
+  has been run on the reconciled tree.
+- **Team sessions (canonical role names, 2026-11-22):** `fabric-folia-manager`,
+  `fabric-folia-core`, `fabric-folia-runtime`, `fabric-folia-compatibility`,
+  `fabric-folia-protocol`, `fabric-folia-qa`. Not every role is running at a given
+  moment; check `tmux list-sessions` rather than assuming. Transient review sessions
+  may carry a suffix (e.g. `fabric-folia-runtime-review-r1`). The launcher matches
+  exact names and never kills a session.
+- **Tests:** `bash ./gradlew :common:test :api:test :fabric:test` (bare `./gradlew`
+  fails: the worktree wrapper lacks the executable bit and `/tmp` is `noexec`). The
+  reconciled tree records **280 tests (API 10, common 148, Fabric 122), zero
+  failures/errors/skips** from the reconciliation run's JUnit XML (2026-11-22; unit
+  evidence only, no boot). A later focused core run adds **25 passing common tests**
+  (7 `RegionSchedulerSplitRehomeTest`, 4 `RegionFailurePolicyTest`, 10
+  `RegionEntityRegistryTest`, 4 `EntitySchedulerLifecycleTest`; 0 failures/errors/
+  skips) — a **separate** run from the 280 baseline, not a replacement. Older counts
+  in this file's history are historical. No Mockito. Fabric tests boot the REAL engine
   (`FoliaConfig.at(...)` → `load()` → `freeze()` → `FabricFoliaEngine.bootstrap(config, info, error)`),
   see `fabric/src/test/java/com/palordersoftworks/fabricfolia/engine/NetworkDispatchTest.java`.
 - **CI: JENKINS IS THE CI (owner directive, 2026-10-06) — GitHub Actions is
@@ -55,8 +74,10 @@
   (`fabric/.../engine/RegionStageHub.java`); at end of server tick the engine flushes
   each staged batch, grouped by owning region, onto that region's task queue
   (`RegionScheduler`, shared worker pool). Slices: ENTITY, BLOCK_ENTITY,
-  SCHEDULED_TICK, PLAYER (declared LAST to preserve vanilla intra-tick order:
-  entity pass before connection tick, per region).
+  SCHEDULED_TICK, PLAYER, flushed in declaration order **relative to each other**.
+  The PLAYER slice flushes at `END_SERVER_TICK`, after `PlayerList.tick` and
+  `PlayerChunkSender.sendNextChunks`; that is not vanilla's intra-tick order (runtime
+  audit R21). Do not claim vanilla ordering parity for the player slice.
 - **Player path (gated by config `gameplay.stage-player-path`, default off):**
   `ServerConnectionTickMixin` stages the whole `Connection.tick()` body (packet drain,
   `SGPLI.tick` → `doTick` physics, flush) into the PLAYER slice;
@@ -70,14 +91,20 @@
   rehomes it to `MinecraftServer.processPacketsAndTick` on the server thread,
   where `PlayerList.respawn` can safely build its replacement player and mutate
   global state.
-- **Transitions:** `RegionTransitions` (`fabric/.../engine/RegionTransitions.java`)
-  routes worker-context teleports to the destination context (region queue, or the
-  global scheduler for unowned chunks), with a CAS idempotence window
-  (entity id → stamp, 50 ms tick window). `EntityTeleportMixin` captures
-  `Entity.teleport(TeleportTransition)` HEAD, cancellable.
+- **Transitions (accepted at E3, E4 pending):** `RegionTransitions`
+  (`fabric/.../engine/RegionTransitions.java`) routes teleports to the destination
+  context (region queue, the global scheduler for unowned chunks, or a server-thread
+  safe continuation on rejection) through an exact-match invocation token
+  (`TransitionToken.matches`, entity + world + destination context) and a per-context
+  matrix; `scheduleToChunk` carries the destination position. `EntityTeleportMixin`
+  captures `Entity.teleport(TeleportTransition)` HEAD, cancellable. `EntityTeleportDispatchTest`
+  is 14/14; the final-tree jar booted with zero mixin errors. **Do not close R1 without
+  the disposable-world `/tp`/portal check (E4).**
 - **Entity ownership:** `EntityRegionTracker` + `EntityMixin` (add/remove/move hooks,
-  per-entity cached tracker + packed chunk); `RegionEntityRegistry` does atomic
-  stripe-locked register/migrate/unregister.
+  per-entity cached tracker + packed chunk); `RegionEntityRegistry` stripe-locks
+  `migrate`, `unregister` **and, since 2026-11-23, `register`** (put + set-add in one
+  per-entity stripe critical section). R11 is fixed at E3 by an 8x500 invariant hammer,
+  not a fixed schedule; R11b/R3 (structure-lock hold time in `onRegionSplit`) is open.
 - **Threading classification:** `ThreadOwnership` — one context slot per thread;
   kinds UNKNOWN/NETWORK/GLOBAL/REGION/...; region workers run inside REGION context
   (set by `RegionScheduler` line ~501 `enterRegion`). Check facade: `RegionChecks`,
@@ -91,9 +118,15 @@
 
 ## 3. Verified MC 26.2 facts (javap against the named jar)
 
-Named jar for inspection (project loom cache):
-`/d/fabric-folia/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-common-043a8b3edf/26.2/minecraft-common-043a8b3edf-26.2.jar`
-(inspect: `javap -c -p -cp "$JAR" net.minecraft.world.entity.Entity > /tmp/entity.txt`)
+Named jar for inspection (Linux FAC host, current worktree `/tmp/ff-reconcile`):
+`/tmp/ff-reconcile/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-common-201bed67e3/26.2/minecraft-common-201bed67e3-26.2.jar`
+The shared checkout has its own copy with a different hash:
+`/home/administrator/CDN-bucket/fabric-folia/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-common-043a8b3edf/26.2/minecraft-common-043a8b3edf-26.2.jar`.
+Both are 26.2 `minecraft-common` jars; use the one belonging to the tree you are
+inspecting and verify a class with
+`javap -c -p -cp "$JAR" net.minecraft.world.entity.Entity > /tmp/entity.txt`
+before trusting a fact. The historical Windows path `/d/fabric-folia/...` is not
+valid on this host.
 
 - `ServerPlayer` **overrides** `teleport(TeleportTransition)` with covariant return
   `ServerPlayer` — descriptor
@@ -133,28 +166,52 @@ Named jar for inspection (project loom cache):
   (no `hasPermission(int)`).
 - SGPLI anti-float guard: `dy > -0.03125 && noBlocksAround` → "kicked for floating too long!".
 
-## 4. Dev-server / testing protocol — READ BEFORE ANY TEST
+## 4. Dev-server / testing protocol — READ BEFORE ANY TEST (Linux FAC host)
 
 **The user's #1 pain: leftover server/Gradle processes overload the machine. Absolute rules:**
 
-1. **Before** starting any build/test/boot: `tasklist.exe /FI "IMAGENAME eq java.exe"`
-   and `netstat.exe -ano | grep -E ":(25901|25902)\s"` to inventory what exists.
-   Never touch processes you cannot prove belong to this work (e.g. a bare
-   `java.exe` on :8080 that predates the session = LEAVE ALONE).
+1. **Before** any build/test/boot, inventory: `ps -eo pid,etime,args | grep -E '[j]ava|[g]radle'`
+   and `ss -ltnp | grep -E ':(25901|25902)\s'`. Never touch a process you cannot
+   prove belongs to this work. Kill only processes you started; no blanket `pkill`.
 2. The dev server uses **ports 25901 (MC) / 25902 (RCON)** — NOT 25565/25575.
    RCON password `foliapass`.
-3. Launch pattern that works (launch and poll in SEPARATE commands — combining
-   them kills the server when the shell exits):
+3. `/tmp` is `noexec`: invoke Gradle as `bash ./gradlew`. Launch and poll in
+   SEPARATE commands (combining them kills the server when the shell exits):
    ```bash
-   cd /d/fabric-folia && rm -f /tmp/pplive.log && (nohup ./gradlew :fabric:runServer > /tmp/pplive.log 2>&1 & echo "pid=$!")
+   cd /home/administrator/CDN-bucket/fabric-folia && rm -f /tmp/pplive.log \
+     && (nohup bash ./gradlew :fabric:runServer > /tmp/pplive.log 2>&1 & echo "pid=$!")
    # then poll:  grep -E "Done \(|SUCCESS: Fabric Folia is ready|ERROR" /tmp/pplive.log
    ```
-4. **After** every boot/test cycle: verify exit (log shows "Stopping server"/process
-   gone from netstat), then `./gradlew --stop` (kills daemons started this session),
-   and re-run the tasklist/netstat check. Kill ONLY processes started for this work.
+   Use `/tmp/ff-reconcile` only when the reconciled tree is the one under test.
+4. **After** every boot/test cycle: RCON `stop` (or `MinecraftServer.halt(false)`),
+   wait for the process to exit, verify the ports are released, run
+   `bash ./gradlew --stop`, then repeat the process/port inventory. Kill ONLY
+   processes started for this work.
 5. `MinecraftServer.halt(false)` and RCON `stop` both produce clean exits (proven).
+6. Measure TPS with `time query gametime` deltas over RCON, never from warning
+   cadence. The current dev-server world under `fabric/run/` is not a benchmark world.
 
-## 5. Host quirks / tooling traps (this Windows machine)
+### Historical Windows protocol (no longer the active host)
+
+1. Inventory with `tasklist.exe /FI "IMAGENAME eq java.exe"` and
+   `netstat.exe -ano | grep -E ":(25901|25902)\s"`.
+2. Launch from `D:\fabric-folia` with `./gradlew :fabric:runServer`; poll in a
+   separate command.
+3. After a cycle: `./gradlew --stop`, then re-run the inventory.
+
+## 5. Host quirks / tooling traps — current Linux FAC host (2026-11-22)
+
+- **`/tmp` is mounted `noexec`** (including `/tmp/ff-reconcile`): run Gradle with
+  `bash ./gradlew`, never `./gradlew`; a fake `tmux`/`freebuff` binary cannot execute
+  from `/tmp` (launcher tests inject shell functions instead).
+- **Gradle daemon is shared:** check the process list before building; no concurrent
+  full builds. Stop only daemons started for this work with `bash ./gradlew --stop`.
+- **`code_search` / `read_files` may be unreliable in some sessions** — fall back to
+  `grep -rn`, `sed -n` or `cat` through the shell.
+- **Write tools** need `path` + `instructions` + `content`; `str_replace` uses
+  `{path, replacements:[{oldString,newString,allowMultiple}]}`.
+
+### Historical Windows notes (no longer the active host)
 
 - **The bash-spawn tool intermittently fails with `ENOENT ... 'C:\Program Files\Git\bin\bash.exe'`**
   right after a restart; retrying later works. `cwd` "." resolves to the project root.
@@ -178,6 +235,116 @@ Named jar for inspection (project loom cache):
   `git show 1325fdd:compat/probe_bot.py > /tmp/pb.py` if needed.
 
 ## 6. Work state (update this section every turn!)
+
+### 2026-11-23 R2 turn — player disconnect/removal off region workers (fixed at E3; NOT committed)
+- **Deliverable:** `tools/freebuff/reports/runtime-r2-player-liveness.md`. Tree HEAD `c2fbe21`,
+  `/tmp/ff-reconcile`, inherited dirty worktree preserved, no commit/push/deploy, R3/R4 and the SFS
+  repo untouched. Fabric runtime only.
+- **Evidence:** `bash ./gradlew :fabric:test` exit 0 — **146 tests, 0 failures/errors/skips** (141 +
+  5 new `PlayerConnectionLivenessTest`). Focused new class green first (5/0).
+- **Vanilla facts verified (do not rediscover):** `Connection.tick()` order is `flushQueue()` →
+  `TickablePacketListener.tick()` → `isConnected()` check → only then `handleDisconnection()`
+  (guarded by `disconnectionHandled`), which reaches `removePlayerFromWorld` → `PlayerList.remove` +
+  save + broadcast on the calling thread. `ServerConnectionListener.tick()` **never ticks a
+  disconnected connection**: it removes it from the list and calls `handleDisconnection()` itself on
+  the server thread.
+- **Fix (revision 3 — transport/player split, after two reviews):** the redirect sits inside SCL's
+  `if (isConnected())` branch, so a `StagedConnectionBody` exists only for a `Connection.tick()`
+  vanilla already admitted while connected — that tick is owed. `StagedConnectionBody` carries two
+  execution-time probes: transport closed ⇒ **defer** the admitted body to `ServerThreadDeferral`
+  (`closedTransportDeferredTicks()++`); transport open + player invalid ⇒ **defer** likewise
+  (`invalidPlayerDeferredTicks()++`); both live ⇒ worker as before. Deferrals run once on the server
+  thread (`deferredConnectionTicks()` = sum); next SCL pass does not tick a closed connection and
+  calls `handleDisconnection()` itself (`disconnectionHandled` guard). *Revision 2 wrongly abandoned
+  the closed-transport body, skipping an owed `flushQueue` + listener tick; revision 1 wrongly
+  treated the deferral as an extra tick.*
+  New `RegionStageHub.reclaimPlayerEntityBody(uuid)` (run inline on the server thread) and
+  `cancelPlayerEntityBody(uuid)` (player removed → no tick at all) consume the pin and remove the
+  still-staged ENTITY body; `stageConnectionTick` calls them on both liveness refusals, so the
+  mirror case no longer leaves a ghost tick.
+- **Tests:** `PlayerConnectionLivenessTest` now **7 tests** (adds closed-transport abandon,
+  transport-wins-over-player precedence, invalid-player-on-open-transport deferral); 148 fabric
+  tests green.
+- **Metrics:** `player liveness releases: reclaimed / canceled / missed` in `/folia metrics`, plus
+  `deferred(transport closed)=` / `deferred(player invalid)=` in `RegionPlayerRouting.metricsLine`.
+- **Open:** R2 E4 (live `/kick`, proxy drop, reconnect loop, STRICT + player staging on; assert no
+  disconnect-path work off the server thread, exactly one removal, no ghost entity tick);
+  `PlayerList.remove` is not constructible in a unit test, so exactly-once is structural + the
+  verified `disconnectionHandled` guard; the deferred admitted tick runs at the next server-thread
+  drain rather than inline in the SCL iteration (same total work); config asymmetry where ENTITY
+  staging on + PLAYER staging off still splits a
+  live player's state machine (pre-existing).
+- **Live boot not run** (focused tests only); no mixin changed this turn.
+- **Ledger rows for R1/R2/R5 still say "open P0"** — they need a manager/docs update (R1 accepted
+  at E3, R5 fixed at E3, R2 fixed at E3); docs edits were outside every turn's scope.
+
+### 2026-11-23 runtime hardening turn — R1 re-verified, R5 fixed at E3, R4 audited (NOT committed)
+- **Deliverable:** `tools/freebuff/reports/runtime-hardening-r4-r5.md`. Tree HEAD `c2fbe21`,
+  `/tmp/ff-reconcile`, dirty worktree preserved, no commit/push/config/common edit.
+- **Evidence:** `bash ./gradlew :fabric:test` exit 0; **141 tests, 0 failures/errors/skips**
+  (R1 `EntityTeleportDispatchTest` 14/14; deferral 13/0; new failure class 5/0).
+- **R1:** unchanged and green. **R10 correction (do not rediscover):**
+  `noteServerThread` IS called in production — `FabricFoliaMod.startEngine` (SERVER_STARTED) and
+  both `MinecraftServerMixin` injectors (`processPacketsAndTick`, `tickChildren`). The earlier
+  "called only from tests" note in `runtime-implementation.md` §6.1 was wrong; the R1 matrix row
+  for the physical server thread is exact from server start. The ledger's R10 "open" line should
+  be closed on that basis (docs edit not made here).
+- **R5 fixed (fabric only):** `runDeferred` no longer swallows — it counts, reports, stores the
+  first failure in `REPLAY_FAILURE` and rethrows (`RuntimeException`/`Error` unchanged, checked
+  wrapped). Both lanes stop polling until `takeReplayFailure()`; entries behind the failure stay
+  queued. `REPLAYED`/`BARRIER_DRAINED` now increment per success so accounting is exact under a
+  throw. `FabricFoliaEngine.beginTickPhase` throws the stored failure at entry **and after the
+  quiesce** (the second is what matters: `WorkerPool.closeExecutionAndAwait` swallows pump
+  throws); `global.tick()` is skipped. `pumpChunkExecutors` catches the drain failure only to keep
+  the barrier alive and counts it in `quiescePumpErrors`. New `ServerThreadDeferralFailureTest`
+  (5 tests incl. partial-mutation, lane poisoning, engine surfacing).
+- **Verified vanilla fact (new, do not rediscover):** `ServerChunkCache$MainThreadExecutor.doRunTask`
+  has **no** try/catch (only a profiler counter, then `BlockableEventLoop.doRunTask`), so chunk-task
+  failures propagate in vanilla; the "vanilla reports executor failures itself" comment in
+  `WorkerPool` is wrong. `WorkerPool` pump catch left untouched (common scope).
+- **R4 audited, NOT fixed:** gate proves loadedness only; `ServerLevel.blockEvent` is a plain
+  `ObjectLinkedOpenHashSet.add`; `ServerExplosion` calls `ServerLevel.setBlockAndUpdate` on the
+  calling thread; `Level.setBlockAndUpdate` = `setBlock(...,3)` (neighbour+client) and cascades via
+  `CollectingNeighborUpdater` with only `maxChainedNeighborUpdates` as a bound. A 3×3 halo bound is
+  therefore unproven and would inline most border bodies; left to the manager's design decision +
+  core ownership query/epoch. R4 remains open P0, no "region ownership safe" claim.
+- **Open:** R5 E4 (boot with a failing deferred mutation → crash report, no partial save); R4
+  design; chunk-task error absorption in `pumpChunkExecutors`/`drainChunkExecutorQueue`;
+  `docs/status.md` still lists R1–R5 as open P0 (R1 accepted E3, R5 fixed E3) and needs a docs pass.
+- **Inherited common red (pre-existing, NOT mine):** the full AGENTS check exits 1 because
+  `RegionFailurePolicyTest.failurePolicyBookkeepingIsReleasedOnRegionMerge` and
+  `RegionSchedulerSplitRehomeTest.staleOwnerAtRehomeIsReResolvedInsteadOfStrandingTheEntry` both
+  fail on "the bridge must merge one region away" (common 167, 2 failures; fabric 141/0, api 10/0).
+  `common` has no dependency on `fabric`, and no `common/` file was touched, so these belong to the
+  uncommitted `RegionScheduler`/`RegionFailurePolicy` work already in the tree.
+- **Live boot not run this turn** (assignment: focused tests only). Per AGENTS §2.5 one
+  `:fabric:runServer` boot with `Done (` and a clean shutdown is still required before merge of any
+  mixin-touching change; none of this turn's edits touch a mixin.
+
+### 2026-11-22 protocol-client research turn (research only; NOT committed)
+- **Deliverable:** `tools/freebuff/reports/protocol-client-research.md` (~600
+  lines). No code, no installs, no boot, no RCON, no production network, no
+  commit. Tree HEAD `c2fbe21`, working in `/tmp/ff-reconcile`.
+- **Verified protocol facts (do not rediscover):** 26.2 = **776** / data 4903;
+  26.3 = **777** / data 5023 (Wiki + minecraft-data + mctoolbox agree).
+- **Critical finding for the QA harness:** `tools/freebuff/qa/README.md` assumed
+  Mineflayer could drive 26.2 — it cannot. Upstream `minecraft-protocol` 1.68.0
+  and `mineflayer` 4.39.0 both cap at **26.1** (`version.js` and README checked
+  at tag/master). 26.2 and 26.3 exist only as open PR branches (#3926/#4192 and
+  #4124/#4206 for mineflayer; #1532 for nmp).
+- **Candidates and pins:** Azalea `0d38e0d` = native **776** (`PROTOCOL_VERSION
+  776` on main; crates.io still 26.1, so git pin required) → primary 26.2 driver.
+  rapidbot `b365a4a` and go-mclib `v0.0.0-20261112211548-022b47e95d21` = native
+  **777**, both immature (7 weeks / 0 stars) → 26.3 candidates behind a smoke
+  gate. MCProtocolLib master `65efb9d` version `26.3-4`, protocol 777, MIT,
+  GeyserMC-maintained, snapshots only (last GitHub release 1.21.4-1) → in-house
+  fallback. `@wp2508/mineflayer` 4.42.9 is a one-publisher fork with nine shadow
+  dependencies → rejected for production without audit. ViaProxy 3.4.14 /
+  ViaVersion 5.12.2 are **GPL-3.0** and translation-only; never count them as
+  native protocol evidence.
+- **Mount/vehicle, respawn and cross-dimension are undocumented for both 26.3
+  candidates** — the report's S11–S13 smoke phases must answer them before any
+  full-profile claim.
 
 ### 2026-10-10 SECOND turn — "fix the limitations and the performance issues" (verified live; on main, NOT committed)
 - **THE 60s STALL IS FULLY ROOT-CAUSED — and it was NEVER a hung tick:**
@@ -673,6 +840,64 @@ Named jar for inspection (project loom cache):
    legacy files still carry javadoc.
 8. Delete the merged feature branch `fix/region-pipeline-patch-layer`
    (optional housekeeping).
+
+### 2026-11-22 — live runtime validation and Fabrolia black-box check (this turn)
+
+Full report: `tools/freebuff/reports/live-runtime-and-benchmark.md`.
+
+- **Tree:** `c2fbe2135945e4e0ef42fc70094d3605ef03627d`, 45 dirty entries at build
+  time. The tree did **not** compile on arrival: `EntityTeleportMixin.java:72`
+  called package-private `RegionTransitions.transitionKey`. Visibility widened to
+  `public` (record, compact ctor, factory; no logic change) by this session, then
+  the runtime session rewrote the file at 02:40. Test fixtures in
+  `EntityTeleportDispatchTest` / `PlayerTeleportRoutingTest` moved the source chunk
+  from `(50,50)` to `(400,400)`: at simulation distance 10 the regionizer merges
+  within `mergeRadius(3)+emptyRadius(4)=7` sections, so 50 chunks is the SAME
+  region and 5+2 tests could never dispatch. Assertions untouched.
+- **Build/test (exact):** `bash ./gradlew :common:test :fabric:test :api:test build
+  --stacktrace` → `BUILD SUCCESSFUL`, exit 0, 6 s (`/tmp/ff-runtime-evidence/
+  build-full-4.log`). **300 tests** at this tree (api 10, common 161, fabric 129),
+  0 failures / 0 errors / 0 skipped. The earlier "280" and any "135" figure are
+  stale; `ConfigSchemaPatchTest` now runs and passes.
+- **Smoke boot (clientless, 2 GB heap, MC 26.2, loader 0.19.3, API 0.161.0+26.2):**
+  jar `0ac65238959e237e8036a35b91a192330cd772a579f22ae17905e595ab7b048e` built
+  02:28:55. Three runs (`~/.cache/ff-qa-evidence/runs/smoke-01-run{3,4,5}`):
+  `Done (5.241s / 5.038s / 4.946s)`, **zero mixin warnings or errors**, TPS mean
+  20.003 / 20.000 / 20.002 from `time query gametime` deltas, heap ≈716–794 MiB,
+  9 young + 6 old GCs in 443 s, JFR ~9.5 MB each, clean RCON stop, no crash
+  reports, ports closed. `protocol_clients: 0`.
+- **P1 runtime defect found:** every `/folia` command fails — `NoClassDefFoundError:
+  net/kyori/examination/Examinable`, then `Could not initialize class …
+  FoliaMessages`. 134 failed responses per run. Consequence: **MSPT p50/p95/p99,
+  worker utilization, queue depth and region count are unavailable** — the nulls are
+  command failures, not idle values. Raw:
+  `runs/smoke-01-run*/sample/raw/*-{metrics,health,workers,regions,scheduler}.txt`.
+  The jar nests `adventure-api` but not its `examination` dependency. Not repaired
+  (scope freeze).
+- **Fabrolia: BLOCKED, no run, no comparison, no winner.** Pinned
+  `f_3.2.6` / `fabrolia-alpha_3.2.6.jar`, SHA-256
+  `42678345eca6bc5b99ed9f3e405f98bc4d40f39ead15bcc1a55d5815a90dd3ca`, declares
+  `minecraft ~26.3`, `java >=25`, GPL-3.0. All three published releases (3.2.0,
+  3.2.1, 3.2.6) are 26.3, so no same-version comparison with our 26.2 baseline is
+  possible. No GPL source fetched or inspected; only `fabric.mod.json` and release
+  notes. Artifacts kept at `/tmp/ff-runtime-evidence/fabrolia/`.
+- **40-client stand deferred:** 14 GiB host, no verified native 26.2 protocol
+  client. The full profile's own 32 GiB gate refuses here.
+- **Harness gaps (H1–H5, unfixed):** `/tmp` is `noexec` so `QA_HOME` must live
+  under `/home`; the assembled classpath omits the loader's own deps (ASM 9.10.1 ×5,
+  sponge-mixin 0.17.3) so boot dies with `ASM not detected on the classpath`; no
+  `eula.txt` is written; RCON `stop` reports exit 1 because the socket closes as the
+  server exits (process still stops cleanly, `steps_all_zero=false`); a failed
+  metrics command silently yields null columns instead of failing the run.
+- **Freshness closed (run 6):** rebuilt `:fabric:jar` from the final tree
+  (`bash ./gradlew :fabric:jar --console=plain`, exit 0, 2 s) at 02:52:26 →
+  SHA-256 `06e852018bd19858683362deb0ad54341b83e830d5e9c1921eaacd6ba3b8d76a`,
+  proven current by `javap` (`RegionTransitions$TransitionToken.matches`).
+  Fresh instance `smoke-02`, run `smoke-01-run6`: `Done (4.920s)`, 48 mods,
+  **0 mixin warnings/errors**, 60 s at 20.000 TPS mean, heap 703.2 MiB, JFR
+  8.5 MB, clean RCON stop, no crash reports. `/folia health` still fails (L1).
+  Runs 3–5 (jar `0ac6523…`, 02:28:55) remain the benchmark evidence; run 6 only
+  proves the final tree loads. R1 behaviour is still untested.
 
 ## 7. Definition of done for any turn here
 - Changes compile: `./gradlew :fabric:compileJava` (or full `:common:test :api:test :fabric:test`).
@@ -1551,3 +1776,326 @@ Named jar for inspection (project loom cache):
 - **Verification (fresh):** `--rerun-tasks` EXIT=0, 255 tests / 0 failures (248 + 7 new), `build` EXIT=0. Live on new build: `Done`, 0 mixin errors, `randomTickChunks=319435` counting on workers, fast projectiles into unloaded terrain → TPS 20.00, 0 quiesce timeouts, 0 pump errors, no stall warnings; probe counter 0 (healthy: edge-bounce keeps workers off unloaded chunks; the counter catches the race). RCON `stop` clean, ports free, daemon stopped, scratch cleaned. Forceload removed after the storm.
 - **NOT committed** (no commit asked this turn). Open: full player-flight repro still needs a client/bot; 61k-world A/B of the probe counter under worker dispatch load.
 - **Delivered 2026-11-21 as `c850092`** (pushed `e98af65..c850092` to origin/main; user explicitly asked to commit+push): pre-commit gate = full suite `--rerun-tasks` EXIT=0 (255 tests / 0 failures) + `build` EXIT=0 in the same turn. Needed fix applied before commit: the "dead patch flags" claim was wrong — verified the three tick-optimization flags ARE live gates via `setRequested` + `stagingEnabled`, entry corrected instead of code churn. Tree clean after push.
+
+
+
+
+### 2026-11-16 — delegated Freebuff development wave
+
+The current deployed baseline is commit `b4ea4bee4e80732e60d89a113530c7e6e54ac725`; documentation follow-up is commit `94976ef`. The deployed mod JAR is `fabric-folia-0.1.0.jar`, SHA-256 `7c78b0e0acd75a6a66008779d21a534236253f40ea276b2dc84cf9a5f3ff4276`. On the live `thebrokenstarsmp-fabric` server, the 60-second empty-server pause was reached with zero new StallProbe dumps/errors; `/stall-probes` remains capped at 10 files (27,778 bytes).
+
+Three Freebuff sessions were resumed with non-overlapping ownership. They share the same `main` checkout. Agents must not create branches/worktrees or commit/push; the coordinator reviews and integrates their diffs after tests.
+- `fabric-docs-fix`: public docs only — README, TESTING, MIXINS, COMPATIBILITY, THREADING, TROUBLESHOOTING, architecture/parity docs. Verify runtime versions (MC 26.2, Loader 0.19.3, Fabric API 0.161.0), exact mixin inventory, and describe verified versus unverified compatibility. Do not touch FREEBUFF.md or FINAL_REVIEW.md.
+- `fabric-global-fix`: deferred-work/server-thread barrier deadlock investigation (runtime audit P0-3). Own FabricFoliaEngine, ServerThreadDeferral, ServerChunkCacheMixin, and focused tests. Do not change GlobalSchedulerImpl, RegionTransitions or NetworkDispatch; global scheduler thread removal is already implemented in current main.
+- `fabric-split-fix`: player ENTITY/PLAYER slice atomicity (planner audit C4). Establish one player owner region per server tick or prove a narrower safe invariant. Own RegionPlayerRouting, LevelEntityTickMixin, ServerConnectionTickMixin, RegionStageHub only if required, and focused tests. Do not touch the P0-3 files above or docs.
+- `fabric-api-fix` and `fabric-ci-fix` were attempted but returned to released state without producing a verified diff. Reopen when Freebuff capacity permits. API follow-up scope: api module and docs/api-guide.md; CI follow-up scope: Jenkinsfile and scripts/verify_release.py/runtime-smoke tooling. Do not overlap each other's verifier files.
+
+Freebuff concurrent-session capacity is limited. Do not claim the released API/CI sessions are working. Continue with the three active assignments first, review their source diffs, run relevant tests, then take the next queued task when a session slot is actually available.
+
+
+### 2026-11-17 — packet processor re-home fix and regionized live enablement
+
+- User reported `ServerboundContainerClosePacket` failing with `RunningOnDifferentThreadException` on the server thread. Root cause was confirmed against the exact Minecraft 26.2 bytecode: `PacketUtils.ensureRunningOnSameThread` schedules and throws whenever its `PacketProcessor.isSameThread()` gate returns false; `isSameThread()` is exactly `Thread.currentThread() == runningThread`. The previous `PacketUtilsMixin` unconditionally rejected every server-thread-only container packet, including when it was already executing on the server thread. The queued retry therefore rejected itself again, creating a server-thread requeue loop instead of processing the close packet.
+- `PacketUtilsMixin` now accepts the real processor thread unconditionally. A region worker is accepted only when it is the player's owner region and the packet is not a server-thread-only container mutation or respawn. `PacketProcessorMixin` continues to leave container mutations and respawn on the vanilla server-thread queue; vanilla's `RunningOnDifferentThreadException` remains an internal handoff signal for that off-thread case and is expected to be swallowed by `Connection`. The regression is the repeated rejection on the processor thread, which is now covered by `canHandlePacketOnCurrentThread` tests.
+- Added regression assertions for all five server-thread packet types: container click, button click, close, slot-state change, and creative-slot update. Tests confirm each is rejected on the region shortcut but accepted when the processor thread is current. Respawn and ordinary owner-region packet decisions are also covered. Updated stale routing Javadoc.
+- Validation: `git diff --check` passed. Full uncached command `bash ./gradlew --rerun-tasks --no-build-cache :common:test :fabric:test :api:test build --stacktrace` passed. Results: common 144, Fabric 105, API 10 = **259 tests**, zero failures, zero errors, zero skipped. Built artifact: `fabric/build/libs/fabric-folia-0.1.0.jar`, 1,250,771 bytes, SHA-256 `548d0e37a1593af97e5ff36e7c438fef867021dc6a14e8cc4897195a16be84c6`.
+- Live Pelican target `thebrokenstarsmp-fabric` / server UUID `6422f450-5edb-4db8-9216-c5a076c7e8b2`: saved pre-change JAR at `/mods/fabric-folia-0.1.0.jar.before-thread-fix-20261117` and config at `/config/fabric-folia.yml.pre-regionized-enable-20261117`. Uploaded the new JAR through the Pelican/Wings file API (HTTP 204) and read it back; remote size and SHA-256 exactly match the build artifact. Changed only `general.enabled: false` to `general.enabled: true`; retained `general.regionized-gameplay: true` and `gameplay.stage-player-path: true`. `general.regionized-random-ticks` remains false.
+- Requested restart accepted by Wings (HTTP 202). Wings subsequently reported `running` with a fresh uptime; authenticated WebSocket reported `auth success` and `status: running`. Live console after restart showed player/network-originated activity, including a Netty-originated player command at 13:37:37. Post-deploy check re-read config and JAR; both the enabled settings and remote artifact checksum matched.
+- **Not yet verified:** no controlled Minecraft client test of opening/closing an inventory on this build was performed, so do not claim the reported packet action itself was exercised after deployment. A TCP probe to the node's public allocation address `80.112.32.76:25599` was refused; the backend may be reachable only through its proxy path, but external allocation reachability was not established in this pass. Direct player-side packet testing should follow.
+- **Compatibility remains experimental:** prior mod scan found 248 installed mods with no declared Fabric-Folia support and zero certified declarations. This patch fixes the confirmed vanilla processor-thread self-requeue bug; it does not rewrite or certify every third-party mod. Further thread-ownership violations must be handled at their actual integration boundaries, preferably by region-safe API scheduling or a server-thread fallback. Do not claim that every possible `RunningOnDifferentThreadException` or third-party thread assumption has been eliminated. No commit or push was made; existing dirty worktree changes were preserved.
+
+### 2026-11-22 — team wave, upstream reconciliation (staged, NOT applied), Fabrolia baseline
+
+- **State at turn start:** `main` at `94976ef`, four commits behind `origin/main` (`c2fbe21`), 26 modified tracked files, four untracked Java/test files, plus untracked `tools/` (the Freebuff team harness). Nothing was reset, cleaned, stashed or checked out over.
+- **Upstream inspected (all four):** `a42e96a` + `e98af65` vanilla-override layer (OFEM directional collision, `ConcurrentClassInstanceMultiMap` hard-hitbox index, light-engine deferral, `/folia vanilla kill`), `c850092` worker `getChunk` no-create → null (`WorkerChunkProbe`) + random-tick executed-chunk counter, `c2fbe21` handoff notes.
+- **Reconciliation (isolated worktree `/tmp/ff-reconcile` = `origin/main` + local patch, backup in `/tmp/ff-backup/`):** only three files conflicted — `FREEBUFF.md`, `MIXINS.md`, `ServerChunkCacheMixin.java`.
+  - **Chunk lookup:** upstream's `WorkerChunkProbe` decision table wins (absent + `create=false` → vanilla's `null`; `create=true`/below-status keep vanilla's join).  The local `RegionChunkAccessGuard` is **retired by design** — it threw `IllegalStateException` for `create=true`, which turns a pump-satisfiable wait into a lost entity tick. Added `recordVanillaJoin()`/`vanillaJoins()` so the blocking fall-through is visible (`worker getChunk creating/below-status vanilla joins: N`). **Correction (2026-11-22 final turn): the two files were never actually deleted** — both are still present untracked and its test asserts the retired behaviour (defect M1).
+  - **Kept from local work:** `ServerThreadDeferral.deferBarrierSafe` + the pump-side drain (P0-3 barrier deadlock), per-tick player owner pin, packet-routing carve-outs, safe-default gates, StallProbe pre-first-tick suppression.
+  - **MIXINS.md** keeps the rewritten inventory, count corrected 26 → **29** (from `fabricfolia.mixins.json`), three upstream rows added; table now matches the JSON exactly.
+  - **Test repair:** `PlayerSliceAtomicityTest` asserted `pendingBodies()` before the batch `finally` decremented it (order-dependent; failed once in the full suite, passed focused). Now awaits the decrement with a bounded deadline and still requires exactly 0. Debug `System.out.println` removed.
+  - **Docs corrected for the merged semantics:** `docs/status.md`, `THREADING.md`, `TROUBLESHOOTING.md` no longer claim a fail-fast chunk guard.
+- **Verification of the reconciled tree:** conflict-marker scan clean; `:common:compileJava :fabric:compileJava` exit 0; full `:common:test :fabric:test :api:test --rerun-tasks` **twice, 280 tests, 0 failures/errors/skips**, BUILD SUCCESSFUL both times. **This is a worktree result; the shared checkout has not been validated.**
+- **NOT applied.** Specialists were working in the original checkout, so applying now would clobber them. File-scoped manifest (30 copies + 2 deletions) and the ordered procedure are in `tools/freebuff/reports/reconciliation.md` §4. Application waits for the runtime/compatibility reports.
+- **Fabrolia baseline verified independently (public docs/metadata only, no GPL source read):** repo created 2026-10-10, **3 releases / 4 tags**, newest `f_3.2.6` 2026-11-21, `version=3.2.6-alpha`, assets `fabrolia-alpha_*.jar`, MC **26.3** (`[26.3,26.4)`), Fabric API 0.161.0+26.3, Loader 0.19.5, GPL-3.0. **No mature release history**; the f_3.2.6 notes still list a server stop when a routed body teleports/removes the player whose tick it runs in. Its ~1,600-test / 40-client harness claims are repository documentation, not reproduced.
+- **Toolchain:** official Fabric page (2026-11-22) recommends MC 26.3 / Loader 0.20.1 / Loom 1.19-SNAPSHOT / Fabric API 0.166.0+26.3. The 26.3 move is a dedicated port **after** this reconciliation, not a `gradle.properties` edit.
+- **Docs/artifacts created this turn:** `docs/PROJECT_VISION_AND_ROADMAP.md`, `tools/freebuff/reports/{reconciliation,defect-ledger}.md`, follow-up prompts under `tools/freebuff/prompts/followups/`, and a launcher `--send/--resume/--prompt-file` implementation. The launcher was subsequently completed and exact-match hardened in the 2026-11-22 manager integration turn below.
+- **Defect ledger now carries** the runtime audit's five P0 claims (R1 teleport double-cancel, R2 disconnect on a worker, R3 structure lock on the Netty path, R4 non-owned mutations, R5 deferred-replay swallow), the core audit's D1–D9, and this session's findings (backlog gauge zeroing, create-chunk blocking join). It points to `tools/freebuff/reports/qa.md` for QA-101…QA-110 rather than duplicating them. **All unverified by execution except where stated.**
+- **Follow-ups sent:** core → implement D4, D2, D1, D3 in `common/{region,scheduler}`; QA → restore the dead `verifyServerGui` check and build the disposable benchmark harness. Runtime and compatibility were still running their audits.
+- **Host quirk (new):** `/tmp` on this host is mounted `noexec`, so a worktree under `/tmp` must be built with `bash gradlew` (plain `./gradlew` fails with exit 126).
+- **Open at end of turn:** apply the manifest (after runtime/compat reports), wire the new scheduler counters into `/folia metrics`, first live boot of the merged tree (mixins changed: +3), then R1–R5 triage. No commit, push, publish or deploy.
+
+### 2026-11-22 — manager integration review (reconciled tree in /tmp/ff-reconcile)
+
+- **State:** worktree at `c2fbe21`, no unmerged paths, local dirty work preserved. The original checkout's **existing dirty implementation files were preserved and not overwritten**; it is not wholly untouched — this session added `docs/PROJECT_VISION_AND_ROADMAP.md` and `tools/freebuff/**` (prompts, reports, QA/compatibility scripts), and no reconciled Java fix was copied back. The working implementation remains isolated here. Review artifacts: `tools/freebuff/reports/{defect-ledger,manager-review,fabrolia-comparison}.md`, this section, `docs/status.md`, `docs/folia-parity.md`, `docs/PROJECT_VISION_AND_ROADMAP.md`, `tools/freebuff/{README.md,launch-team.sh}`. No commit, push, boot, RCON, soak or benchmark.
+- **Defect ledger rebuilt (owner-requested).** R1–R15 from the runtime audit plus the Netty owner-lookup report are now entries with severity, evidence level, exact file/method, root cause, named regression test, runtime verification (all "none" for this tree) and owner. The five open P0s are R1 non-player teleport double-cancel; R2 disconnect/removal on a region worker or a staged player ticking after removal; R3 `ownerOfChunk` structure lock on Netty loops (plus the second lock in `RegionScheduler.enqueue`); R4 cross-region side effects from staged bodies (loadedness gate, not ownership); R5 swallowed deferred-mutation failures. **Green unit tests do not downgrade them.** The ledger also carries the core D1–D9 table, the three previously fixed P0s as unit-only, and manager/QA pointers.
+- **R1 review (five/six cases, patch not accepted as-is).** Confirmed: registry-based re-entry cancels twice and the vanilla body never runs; `IN_FLIGHT` is stamped before validation/enqueue so a failed enqueue becomes a false duplicate; the null-owner global lane double-cancels because `isCurrentContextOwner` is false for non-REGION contexts; `DispatchKey` (source world+entity+destination world+chunk) collapses two same-chunk intentional transitions; same-region server-thread teleports now dispatch because UNKNOWN is not the owner; an "inline for every non-REGION" patch is unsafe (cross-region inline on the server thread, NETWORK/ASYNC world mutation inline). Required: per-context policy matrix, exact-destination identity, positioned enqueue, target-liveness re-check, no Throwable swallow, and six deterministic cases. Assigned to `fabric-folia-runtime-impl-r1` (only `EntityTeleportMixin`, `RegionTransitions`, focused Fabric tests).
+- **D4 core patch: accepted with conditions.** Execution-time ownership net for position-bearing entries, 7 tests (stale-region rehome, own-region control, NO_POSITION, no-owner, ordering, no double-run). Conditions: **positionless producers remain R6** (packet rehome, `enqueueTransition` including the global lane, command re-dispatch, random-tick batches), so **task migration is not complete**; the 8-arg constructor lost `private` and its javadoc format is broken (`*/	RegionScheduler(`); a re-homed entry does not mark the owner due, so it may wait a tick. Review recorded in `manager-review.md` §3.
+- **ConfigSchema default change: APPROVED, separately.** Entity/chunk/random-tick staging defaults moved `true`→`false`, matching README/`docs/configuration.md`/`status`/`COMPATIBILITY` and the safe-default rule. It must land as its own change, not inside the D2 scheduler patch. It reduces default exposure but does **not** fix R4: explicit `true` still enables the unsafe gate, and existing configs keep their explicit values.
+- **R11 stays open.** The D1 patch removes split/retire residue from per-region sets, but `RegionEntityRegistry.register` still updates the map and set outside the stripe lock; a register-vs-retire race can orphan a set entry. Separate race fix + deterministic test required.
+- **Launcher/README mismatch fixed and tested.** `launch-team.sh` now has `--send ROLE...` (existing session only), `--resume`, `--prompt-file`, `--dry-run`, idle confirmation with `--force` override, and **exact** session matching (`=name`). Testing exposed tmux target prefix matching: `fabric-folia-manager` resolved to the live `fabric-folia-manager-r1` and a stray manager prompt was pasted into this session (no session killed, no other mutation). Exact matching now prevents lookalike sends. 12 fake-tmux cases pass; real tmux was never intentionally mutated.
+- **QA harness reviewed read-only; accepted for dry-run only.** Checklist items verified: positive `max-tick-time` with no `-1`; RCON password redacted in copied env/properties (`chmod 600`, digest only in the manifest); canonical `QA_HOME`/output outside-repo checks; full profile gated on `--allow-full-profile` + ≥32 GB and clientless runs record `protocol_clients: 0` with `requested_client_target`; profile allowlist and sanitized run ids; bundle entry path escape + SHA-256 validation. `run_bench.sh` dry-run exits 0 with `started_processes: 0`, `wrote_files: 0`, no `QA_HOME` created; `bash -n` and Python compile pass. Follow-ups before `--execute`: password via env/stdin instead of argv, enforce Java 25, drop the unused `qa_outside_region` helper, document `QA_JVM_ARGS` word-splitting, remove `qa/__pycache__`.
+- **Fabrolia comparison recorded.** `fabrolia-comparison.md` distinguishes `prod/current` (operational reference; README states ~35-player production server, 20 TPS goal; AGENTS states ~1,400 tests, 40-client stand) from `f_3.2.6` (newer alpha development, ~1,600 tests, unresolved routed-player self-teleport/removal stop). Production surfaces named for independent design: PlayerTurnOwnership/IslandPlayerTurnSession, AsyncIslandPlayerLifecycle, AsyncIslandPacketContinuations, IslandScheduledTicks/ScheduledTickIslandAdmission, ChunkDelivery/ConnectionOutbox, explicit Main fallback. **R2/R21 are the missing turn-lifecycle class.** All claims attributed, none independently verified. GPL-3.0 vs Apache-2.0 boundary restated; no source copied, ported or derived.
+- **Toolchain:** two pinned 26.3 matrices — (A) conservative `prod/current`-compatible Loader 0.19.5 / API 0.161.0+26.3 and (B) official Loader 0.20.1 / API 0.166.0+26.3 — must both be tested against the optimization-mod set; they are not equivalent and neither is a silent upgrade.
+- **Test evidence (unit only):** reconciled full suite **280 tests (API 10, common 148, Fabric 122), 0 failures/errors/skips** from the named reconciliation run's JUnit XML. The `common/build/test-results` in this snapshot was later overwritten by the core agent's focused 7-test run, so the present XML does not itself sum to 280. No mixin export, boot, gameplay, persistence, soak or performance run exists for this tree; the Jenkins verifier has not run (dirty tree).
+- **Open:** core D2/D1/D3 implementation and `core-implementation.md`; R1 patch rework; positionless policy (R6); R2/R4/R5/R3 designs and handoffs; `compatibility.md`; QA follow-ups; apply the reconciliation manifest only after explicit user approval; then first live boot + mixin audit.
+- **Host quirk reconfirmed:** `/tmp` (including `/tmp/ff-reconcile`) is `noexec`; a fake tmux/freebuff binary cannot execute, so launcher tests used injected shell functions and `bash tools/freebuff/launch-team.sh`.
+- **Stream inputs pending formal acceptance:** compatibility reports a static scan of 40 JAR containers across 8 top-level optimization mods, 1,411 mixin classes, 0 missing classes, 0 scan errors (server mixin counts Lithium 277, C2ME 225 across 30 nested containers, FerriteCore 13, Krypton 10, VMP 45, ScalableLux 13, Carpet 172, TIS Addition 599). Static inventory only, not runtime compatibility; the resolved 26.2 C2ME `0.4.2-alpha.0.71` is below `prod/current`'s declared `.88` floor. QA is repurposed as `fabric-folia-protocol-r1` to research a native 26.3 protocol client (upstream Mineflayer may lag; a `@wp2508/mineflayer` fork and a Rust `mcclient` claim protocol 777 — unverified; nothing installed, no boot).
+- **Benchmark host planning:** FAC has ~14 GB available, so the 12 GB-heap + 40-client full profile must not run there. Candidate full-load host is the owner's Ryzen 7 5700X desktop with 32 GB and WSL/Linux. Desktop Commander currently shows only FAC online; Cluster-0 is offline and the Windows desktop is not connected, so the 32 GB host is a **future option only**. Keep the 40-client profile unexecuted and the scripts portable; use FAC for low-memory smoke/compile work only, after approval.
+- **Sessions canonicalised (2026-11-22):** tmux sessions renamed to `fabric-folia-manager`, `fabric-folia-core`, `fabric-folia-compatibility` and `fabric-folia-protocol` (from suffixes); no agent was stopped by the rename. `protocol` was added to launcher `ROLES`; `prompts/protocol.md` was created from `prompts/protocol-client-research.md`; `qa` remains the separate harness role. The runtime and qa sessions are currently **not running**; the canonical names are reserved for when they are relaunched. Transient review sessions may keep a suffix.
+
+### 2026-11-22 — manager final handoff (docs/ledger/roadmap only; NO commit, push, boot)
+
+- **This turn's scope:** project-level handoff, not production code. No Java, config,
+  test or mixin file was edited; no Gradle run, server boot, RCON, world access,
+  commit, push, publish or deploy. Work stayed in the detached worktree
+  `/tmp/ff-reconcile` at `c2fbe21` (`git diff --name-only --diff-filter=U` empty).
+- **User instruction honoured:** the historical owner directive to commit/push to
+  `main` is **not** applied to this task. The tree stays dirty and uncommitted.
+- **Artifacts updated this turn:** `tools/freebuff/reports/defect-ledger.md`,
+  `tools/freebuff/reports/manager-review.md`, `docs/PROJECT_VISION_AND_ROADMAP.md`,
+  `tools/freebuff/launch-team.sh` (help text only), this file. Reviewed inputs that
+  landed during the turn: `reports/core-implementation.md`,
+  `reports/compatibility.md`, `reports/protocol-client-research.md`.
+- **Core patch state (verified from the diff and `reports/core-implementation.md`):**
+  D1 (split/retire set residue), D2 (real `ABORT_REGION`, streak reset, policy
+  cleanup on death + returning action), D3 (rejected `enqueueDelayed` runs `retired`)
+  and D4 (execution-time ownership net for position-bearing entries) are implemented.
+  Manager decisions: D2 signed off (a failing task or tick body resets the streak, so
+  one failure per tick does not abort); the package-private 8-arg `RegionScheduler`
+  constructor is accepted for test injection (the javadoc line-sharing is pre-existing
+  at HEAD); the `ConfigSchema` staged-gameplay default flip is approved as its own
+  change and is **untested** until `ConfigSchemaPatchTest`/the full suite runs.
+  **D4 is not done:** **D4-F1** — the re-home can add to a freshly created queue for a
+  donor that merged in the resolve→add window and strand the task until close; route
+  it through `enqueue(owner, task, pos)` and retry on `false`. **F2** —
+  `onRegionRemoved` is wired for death only, so merged donors leak policy entries;
+  one line in `onRegionMerged`. D5–D8 remain open; D9 deferred. **Superseded
+  2026-11-23:** D4-F1/F2 and R11 are fixed at E3, and the ConfigSchema default flip is
+  **not approved — recommend REVERT**; see the end of this file.
+- **Focused core test evidence — 25 tests, 0 failures/errors/skips:** 7
+  `RegionSchedulerSplitRehomeTest`, 4 `RegionFailurePolicyTest`, 10
+  `RegionEntityRegistryTest`, 4 `EntitySchedulerLifecycleTest`. Command form was
+  `bash ./gradlew` (the worktree wrapper is not executable; `/tmp` is `noexec`).
+  Provenance: the four JUnit XML files in `common/build/test-results/test/`. **The
+  280-test reconciliation baseline is a different, earlier run** and its XML was
+  overwritten; never quote 280 as covering the D1–D4 patch.
+- **R1 (non-player teleport): not tested, not accepted.** The current diff in
+  `RegionTransitions.java`, `EntityTeleportMixin.java` and the new
+  `EntityTeleportDispatchTest` replaces the 50 ms stamp with a `DispatchToken` +
+  `Decision` enum and retires tokens on rejection/completion, but: (a) the owner gate
+  is REGION-only, so a body on the global lane re-enters, sees its own live token and
+  returns `DUPLICATE_IN_FLIGHT` — the vanilla body still never runs, and a same-region
+  server-thread call still dispatches; (b) the enqueue is still positionless
+  (`scheduler.enqueue(owner, body)`), so it is invisible to split partitioning and to
+  D4's net (R6); (c) `DispatchKey` is still destination-chunk level, so two intentional
+  teleports inside one chunk still collapse; (d) the token has no lease and the
+  global-lane token is untested; (e) `EntityTeleportDispatchTest` has **never run** —
+  it is absent from `fabric/build/test-results/test/`. No runtime session is active;
+  do not treat any of this diff as landed. **Superseded later on 2026-11-22** — runtime
+  rewrote the path and the 14-test suite is green; see the live-validation section at
+  the end of this file. R1 is accepted at E3 but **not closed**.
+- **Compatibility:** `tools/freebuff/reports/compatibility.md` landed during this turn
+  and was reviewed against `tools/freebuff/compatibility/scan-26.2.json`. Counts
+  recomputed and matching: 8 top-level artifacts, 40 containers (8 + 32 nested),
+  34 configs (2 empty), **1,411 mixin classes / 1,354 server-applicable**, 606 distinct
+  targets, 1,862 handlers, 0 missing classes, 0 scan errors. It is **metadata plus
+  static mixin inventory only** — no mixin export, boot, gameplay, soak or performance
+  run — and must never be described as runtime compatibility. Risk C means "same
+  method and same `@At` selector", not a proven conflict. C2ME
+  `0.4.2-alpha.0.71+26.2` is below Fabrolia prod/current's declared floor
+  `0.4.2-alpha.0.88`, so it is **not supported**. Owner decisions left open: a
+  Carpet/TIS compatibility note (TIS has the most same-point overlap and no note) and
+  whether the OFEM collision patch should also be force-disabled for TIS, as it
+  already is for Lithium.
+- **Protocol research reviewed:** `tools/freebuff/reports/protocol-client-research.md`
+  grades every claim [V]/[R]/[U], states that no released PrismarineJS package speaks
+  26.2 or 26.3, that Azalea (`0d38e0d`) is the only mature native 776 client (git pin
+  required), and that every 26.3 candidate is young and unproven. Nothing was
+  installed, run or validated, and the 40-client stand remains unbuilt. Keep the two
+  lanes separate; never count ViaProxy translation as native protocol evidence.
+- **Launcher:** `tools/freebuff/launch-team.sh` has the six canonical roles
+  (manager/core/runtime/compatibility/protocol/qa), exact `PREFIX-ROLE` matching,
+  `--send`, `--resume`, `--dry-run`, `--prompt-file`, idle confirmation and `--force`.
+  It is executable (`rwxrwxr-x`) and was tested with `bash -n`, `--help` and
+  `--dry-run` only (all exit 0; dry-run reported manager/core/compatibility/protocol
+  running and would start runtime/qa). The help text said "all five" for six roles;
+  corrected to "all six". No tmux session was created, killed or messaged.
+- **FREEBUFF accuracy fixes:** the javap jar path was Windows-only and is now the Linux
+  worktree path (plus the shared checkout's distinct hash); the test command is
+  `bash ./gradlew`. Two claims were checked and are already correct in §2 and must stay
+  that way: `RegionEntityRegistry.register` is **not** stripe-locked (R11), and the
+  PLAYER slice flushes after `PlayerList.tick`/chunk sending, so its intra-tick order
+  is **not** vanilla-equivalent (R21). Windows-only protocol notes remain isolated in
+  the historical subsections.
+- **Synced to the original checkout:** only `docs/PROJECT_VISION_AND_ROADMAP.md`,
+  `FREEBUFF.md` and `tools/freebuff/**`. No production Java, config, test or mixin file
+  was copied back; the user's existing dirty implementation files were left untouched.
+- **Tree hygiene defect found this turn (M1):** the retired
+  `fabric/src/main/java/.../engine/RegionChunkAccessGuard.java` and
+  `fabric/src/test/java/.../engine/RegionChunkAccessGuardTest.java` still exist
+  untracked. Nothing production references the class, but its test asserts the
+  rejected `create=true` behaviour that `WorkerChunkProbe` replaced, and it would run
+  in a fresh `:fabric:test`. `reconciliation.md` says they were deleted; they were
+  not. Handoff-only: delete both, rerun `:fabric:test`, expect 3 fewer tests. Recorded
+  as M1 in the ledger, not applied (no production edits this turn).
+- **Open P0 (release-blocking):** R1 (teleport, patch unaccepted), R2 (disconnect on a
+  worker), R3 (structure lock on Netty), R4 (loadedness not ownership), R5 (swallowed
+  deferred failures). **Open P1:** D4-F1 (merge-window re-home stranding), F2 (merge
+  policy bookkeeping), R6 (positionless work), R11 (register/retire race), plus R7–R13.
+  Next engineering sequence is in `manager-review.md` §9.
+
+## 2026-11-22 — live-validation wave (QA smoke boots, R1 finish, no sync)
+
+**Scope:** manager coordinated QA (`prompts/live-benchmark.md`) and runtime
+(`prompts/runtime-review-r1.md`), reviewed core's open D4/R11/R6 items, and updated
+only `tools/freebuff/**`, this file and the ledger. **No Java was synced, committed,
+pushed or deployed; the shared checkout is untouched.**
+
+- **Tree:** still HEAD `c2fbe2135945e4e0ef42fc70094d3605ef03627d`, detached, 0 unmerged,
+  45 dirty entries in `/tmp/ff-reconcile`. Shared checkout verified at `94976ef`, 33
+  dirty entries, same status hash as wave start — its dirty Java is preserved.
+- **R1: ACCEPT at E3, not closed.** Runtime replaced the chunk-keyed stamp with an
+  exact-match invocation token (entity + world + destination chunk, thread-confined for
+  the body), a per-context matrix, `scheduleToChunk`, and a `ServerThreadDeferral` safe
+  continuation on rejection. `EntityTeleportDispatchTest` **14/14**, full fabric
+  **136/136**, all green (XML `01:40:36Z`). Manager rejected its first revision because
+  it inlined *any* nested transition on the thread; runtime added
+  `TransitionToken.matches` and a nested-other-entity/destination regression. Still
+  open before closure: run 6 booted the **final-tree jar** (`06e8520…`, built 02:52:26)
+  at `Done (4.920s)` with zero mixin errors, so mixin application is proven; a
+  `/tp`/portal functional check is still missing, and R10 `noteServerThread` is absent
+  (a foreign `UNKNOWN` thread can still take the server inline path). Report:
+  `tools/freebuff/reports/runtime-implementation.md`.
+- **Live evidence (clientless only):** three benchmark boots on the 02:28:55 jar
+  reached `Done (5.241s / 5.038s / 4.946s)` with zero mixin warnings/errors, ~20.00 TPS
+  from `time query gametime` deltas, ~716–794 MiB heap, JFR + jcmd, clean save/stop, no
+  crash reports, `protocol_clients=0`. That jar (`0ac652…b048e`) predates the R1
+  rewrite, so it does **not** validate final R1. **Run 6** rebuilt the final tree
+  (`06e8520…`, 02:52:26) and booted `Done (4.920s)`, zero mixin errors, 60 s at 20.000
+  TPS, clean stop — mixin application for final R1 is proven; it is not benchmark data
+  and not a teleport check. Report:
+  `tools/freebuff/reports/live-runtime-and-benchmark.md`.
+- **L1 (new P1, found by the boot): every `/folia` command fails.**
+  `NoClassDefFoundError: net/kyori/examination/Examinable` / `Could not initialize
+  class FoliaMessages`; 134 failing responses in one run. Verified root cause: the jar
+  nests only `adventure-api` + `adventure-text-minimessage`, while
+  `adventure-api-4.23.0.pom` requires `adventure-key`, `examination-api` and
+  `examination-string`. MSPT/region/worker metrics are therefore unavailable. Not
+  repaired (scope freeze); needs a jar-content regression + boot test.
+- **Fabrolia: BLOCKED, nothing compared.** Pinned `f_3.2.6`, sha256 `42678345…d3ca`,
+  declares `minecraft ~26.3`; 3.2.1/3.2.0 also `~26.3`; this project is 26.2. No 26.3
+  toolchain installed, no run, no A/B, **no winner**. GPL-3.0 metadata only; no GPL
+  source fetched and no Fabrolia file in this repo. The 40-client benchmark stays
+  deferred (14 GiB host, no verified native 26.2 client).
+- **Core re-verified in code:** D4-F1 still strands a re-home in a merge window
+  (`RegionScheduler` ~708–716 does unlocked `get`/`computeIfAbsent` + `add`); F2 still
+  missing (`onRegionMerged` never calls `failurePolicy.onRegionRemoved(donor)`); R11
+  still open (`register` mutates outside the stripe); R6 unchanged. **D4 is not done.**
+- **Tests:** current module XML = api 10 + common 161 + fabric 136 = **307**, 0
+  failures/errors/skips, but from different runs; QA's green build snapshot was 300
+  (fabric 129 pre-rewrite). `ConfigSchemaPatchTest` 4/4 passed, closing that condition.
+  One full-suite command at one tree is still owed.
+- **Tooling:** launcher idle check was dead (`capture-pane -t "=session"` rejected by
+  tmux 3.6) so `--send`/`--resume` always needed `--force`; fixed to `"=session:0.0"`
+  and verified (idle core accepted, busy QA refused). Compatibility and protocol
+  sessions were closed after delivery to free concurrency slots; runtime was relaunched
+  with its prompt; no additional agents were spawned.
+- **Not done:** no `/tp`/portal functional check on the final jar, no L1 fix, no
+  D4-F1/F2 fix, no full suite in one command, no sync, no commit/push, no performance
+  claim.
+
+## 2026-11-23 — integration review: core F1/F2/R6/R11, runtime R5/R10, ConfigSchema
+
+**Scope:** reviewed the second core pass and the runtime hardening pass as they landed,
+verified one full suite and one build at a stable snapshot, reconciled the unapproved
+ConfigSchema default flip, and recorded the shared-file conflicts. **No Java/config
+default edit, merge, commit, push, deploy or sync.** Tree HEAD `c2fbe21`, detached, 0
+unmerged, status hash `ae97c1adabf5448a`.
+
+- **Mid-flight collision (process fact):** core and runtime were both writing this tree
+  at ~10:15-10:23. Two early full-suite runs caught inconsistent source/test states
+  (`RegionFailurePolicyTest` abort latch; `DeferredBarrierDeadlockTest` before runtime's
+  test update). Only the run after both agents went idle is evidence. Do not run a
+  suite against a tree whose agent is still `working...`; check `tmux capture-pane`
+  and file mtimes first.
+- **Verified at the stable snapshot:** `:common:test :fabric:test :api:test
+  --rerun-tasks` -> **exit 0**, api 10 + common 167 + fabric 141 = **318** tests, 0
+  fail/err/skip; `build --stacktrace` -> **exit 0** at the same status hash.
+- **Core second pass (42 focused green):** D4-F1 fixed via `rehomeToOwner` (two-phase
+  `enqueue`, bounded re-resolve `REHOME_ATTEMPTS = 4`, no queue for a dead region); F2
+  wired in `onRegionMerged`; accepted-then-dropped R6 half fixed with an `onDropped`
+  hook + entity re-proof (`EntitySchedulerImpl.recoverDropped`); **R11 fixed**
+  (`register` under the stripe). R6 producer half (positionless packet/re-home/command/
+  random-tick enqueues) remains open. Details in `core-implementation.md` §9-12.
+- **Runtime:** **R5 fixed at E3** — `runDeferred` records the failure and rethrows it,
+  both lanes stop until `takeReplayFailure()`, and `beginTickPhase` surfaces a failure
+  the quiesce pump swallowed; `ServerThreadDeferralFailureTest` 5/5. The **R10
+  `noteServerThread` residual is closed** — production call sites are
+  `FabricFoliaMod.startEngine` and the HEAD of both `MinecraftServerMixin` handlers.
+  R10 admission/ordering/pause items remain open. R1 unchanged, 14/14. **R4 audited
+  only** (mutation reach is chunk-unbounded: `setBlockAndUpdate` flag 3,
+  `CollectingNeighborUpdater`, plain `blockEvents` set, POI, explosions), so R4 stays
+  open P0 and no halo check was shipped. Report: `runtime-hardening-r4-r5.md`.
+- **ConfigSchema (separate reconciliation): recommend REVERT** the three staged-gameplay
+  defaults `TRUE` -> `FALSE` for this wave. `mergePreservingComments` repairs missing
+  keys to the new default (silent upgrade change); patch state is
+  `regionizedGameplay() && patchEnabled(KEY, false)`, so `general.regionized-gameplay=true`
+  now enables nothing on its own; the live boot prints every gameplay slice as `server
+  thread`; the pinning test was added in the same unapproved diff; and R4 remains for
+  configs already set `true`. Approve only as an explicit owner product decision with a
+  config-version bump/migration note. **The default was not edited by the manager.**
+- **L1 still open:** the current jar (`5905e13...`) nests only `adventure-api` +
+  `adventure-text-minimessage`; a nested-jar scan found **zero** `net/kyori/examination`
+  classes (`Examinable` absent). Every `/folia` command still fails. Release blocker.
+- **T1 (new, test determinism):**
+  `RegionFailurePolicyTest.consecutiveFailuresAbortOnlyTheFailingRegion` calls
+  `scheduler.start()` before enqueuing; under load the region can abort mid-enqueue and
+  `enqueue` removes the survivor, so `died: dropped` reports 0 and the latch times out
+  (observed once, 10.014 s). Fix: enqueue before `start()` (legal path). Not applied.
+- **QA live evidence:** a 26.2 server on the current jar booted `Done (5.331s)`, zero
+  mixin errors, `ProbeBot` logged in and spawned; the walk phase is pinned in the known
+  teleport-resync loop (position `(6.5,114,3.5)` never changes), so no gameplay/R1
+  evidence. `bot-262-run1`, ports 26800/26801, 2G heap.
+- **Fabrolia:** QA booted **Fabrolia 3.2.6 standalone on 26.3** (loader 0.20.1, API
+  0.166.2+26.3) in `runs/fabrolia-26.3-run1`: `Done (6.090s)`, 0 protocol clients,
+  180 s sampling, clean stop, 6 cancelled mixins. This is a **different MC version**
+  from this 26.2 project, so it is **not a comparison**; no winner, no speedup claim.
+  No Fabrolia jar/source/GPL file is in the repo (checked). The 40-client benchmark
+  stays deferred (14 GiB host); one probe bot is not a benchmark-grade client.
+- **Shared files:** `FabricFoliaEngine` (core metric + runtime R5), `RegionStageHub` /
+  `LevelEntityTickMixin` (core pin + runtime connection staging), `RegionTransitions`
+  (runtime + frozen QA accessor), `ConfigSchema`/test (unapproved, isolated).
+- **Next:** L1 transitives + `/folia health` boot; R1 `/tp` + portal E4; R5 live crash
+  injection; R4 handoff design; R6 producer positions; T1 test order; M1 deletion;
+  ConfigSchema owner decision. Then one full `:common:test :fabric:test :api:test build`
+  at one tree.
+
+## 2026-11-23 final integration pass — 334 tests, build and 26.2 diagnostics boot (NOT committed)
+
+- Tree base HEAD c2fbe2135945e4e0ef42fc70094d3605ef03627d; dirty worktree /tmp/ff-reconcile; no merge, commit, push, deploy or sync to /home/administrator/CDN-bucket/fabric-folia.
+- One coordinated test run: bash ./gradlew :common:test :fabric:test :api:test --rerun-tasks --stacktrace exited 0. XML totals: common 171, Fabric 153, API 10 = 334 tests, zero failures/errors/skips.
+- Full build: bash ./gradlew build --stacktrace exited 0. Warnings remain: Java 25 ThreadDeath deprecation in fatal-error catch clauses, unchecked operations in LevelScheduleTickMixin, the OpenCL FFM restricted-native-access warning, and Gradle deprecations. The build is not warning-free.
+- Final JAR: fabric/build/libs/fabric-folia-0.1.0.jar, SHA-256 fd528b632997838eaf5a01997eda27d1d58f5e7c9654049b71835005b6d9cf77. It bundles Adventure API/key/MiniMessage 4.23.0 and Examination API/string 1.3.0.
+- Final-tree boot: copied that exact JAR into disposable MC 26.2 / Fabric API 0.161.0+26.2 instance ff-l1-health; reached Done (0.481s), no Mixin errors, NoClassDefFoundError or Examination initialization errors. RCON /folia health, /folia workers and /folia metrics all responded. Health warns because the disposable world is idle with no loaded spawn chunks/regions; workers report healthy idle. Metrics are zero because no gameplay was performed. RCON stop completed; no QA server process remains.
+- R1: accepted at E3; 14 focused tests and previous final-tree boot; live player /tp and portal E4 remain open.
+- R2: E3 implementation; seven deterministic liveness tests. A staged connection tick is admitted only inside SCL's isConnected branch. If transport closes after staging, its already-admitted body is deferred once to the server thread; an open transport with an invalid player is also deferred. A staged player entity body is reclaimed or canceled when its paired connection stage refuses. E4 live /kick, proxy-drop, reconnect and STRICT testing remain open; exactly-once PlayerList.remove is structurally established, not counted in a live server.
+- R3: ownerOfChunk default path reads the concurrent published section-owner map without structureLock; RegionizerPublicationTest 4/4. The second lock in RegionScheduler.enqueue is deliberately retained for accept-vs-death ordering; the addChunk transient false-null window, dead-region empty-queue leak, R11b split lock hold time and latency/JFR measurement remain open.
+- R4: OPEN P0 / release blocker for parallel staged gameplay. A 3x3 loaded halo is not ownership proof; no synchronous mutation handoff or single-writer cascade protocol is implemented. The design review rejected optimistic asynchronous world writes. Entity/block-entity/scheduled/random staging defaults remain false; explicit opt-in is not proven safe. See tools/freebuff/reports/r4-design-review.md.
+- R5: deferred-mutation failure propagation fixed at E3 with five tests; live crash-report injection E4 remains open. The noteServerThread residual in R10 is fixed; other R10 admission/order/pause defects remain.
+- R6/R11: accepted-task drop/retirement half of R6 and R11 registry stripe-lock fix are E3; positionless producers, R11b split/registry lock hold time, and D5-D9 remain open.
+- L1: fixed at E3 with bundled Adventure key and Examination transitives; final JAR boot and command responses prove class-loading/command initialization, not all live command behavior.
+- Benchmark: no valid same-version Fabric-Folia versus Fabrolia comparison; do not claim performance superiority.
+- Next gates: live player and disconnect tests; R4 safe mutation protocol; R1 teleport/portal E4; R5 crash injection; R6 producer position policy; R3 JFR/latency and enqueue/death race cleanup; compatibility, persistence/soak testing and release review.
+
+## 2026-11-23 — R4 fail-closed interlock and engine-off vanilla restoration (NOT committed)
+
+- Scope: restore master-off vanilla behavior, repair a queued-packet drop, and prevent built-in worker-side world-mutation staging from running without the R4 single-writer protocol. This is a safety fallback; it does not implement the cross-region mutation bridge.
+- Master switch: resolvePatchStates(config) now runs before the general.enabled=false return and global = config.enabled() && config.patchesEnabled(). All 13 registered patches resolve inactive. Chunk-regionization attaches only after successful engine bootstrap. The stall probe and server-thread deferral diagnostics do not start when the master switch is off. Server brand and GUI branding are gated by general.enabled.
+- Vanilla fall-through: ConnectionFlushQueueMixin previously passed pending connection actions into NetworkDispatch.runForConnection with a null engine; that helper returned without executing the action. It now preserves the action, and the mixin directly invokes the original Consumer.accept when the engine or packet-dispatch layer is inactive. Network context tagging and entity-command re-home are also gated by the packet-dispatch patch. TicketStorage, ChunkMapTracking, ServerChunkCache ticket loading, and light-engine mutation deferrals bypass their custom queues when the engine is absent. Server tick deferral drains and server-thread registration are engine-gated.
+- R4 interlock: the resolver forces entity tick, block-entity tick, scheduled tick, player path, random tick, and packet-dispatch requests inactive even if config values are true. Startup warns when it overrides a request. Region ownership/region scheduler infrastructure can still run, but all built-in mutation-bearing gameplay paths remain on the vanilla server thread.
+- Tests: one coordinated suite passed 334 tests — API 10, common 171, Fabric 153 — with zero failures/errors/skips. Full Gradle build exited 0. Fabric still emits Java 25 ThreadDeath deprecation warnings, unchecked-operation and OpenCL native-access warnings, and Gradle deprecation notices.
+- Final JAR: fabric/build/libs/fabric-folia-0.1.0.jar, SHA-256 fd528b632997838eaf5a01997eda27d1d58f5e7c9654049b71835005b6d9cf77.
+- Master-off boot: disposable 26.2 server reached Done (0.431s), Patches: 0 active / 13 registered (13 blocked), and Region system: disabled (general.enabled=false) - vanilla execution, no worker threads. No Mixin errors. RCON redstone lamp test produced REDSTONE_POWERED_OK and REDSTONE_UNPOWERED_OK.
+- Engine-on interlock boot: with general gameplay, random ticks, player path, entity/chunk/random patch requests all true, startup logged the R4 warning, Patches: 5 active / 13 registered (8 blocked), region ownership infrastructure initialized, and the gameplay/player/random staging summaries all reported disabled by R4 interlock. Server reached Done (0.431s), no Mixin errors. Same redstone test produced R4_INTERLOCK_POWERED_OK and R4_INTERLOCK_UNPOWERED_OK.
+- QA cleanup: both temporary servers stopped cleanly, test force-load was removed, the disposable config was restored and no temporary server process remains.
+- R4 status: built-in staged mutation exposure is mitigated by disabling the worker path, not by implementing a synchronous write protocol. Third-party region-scheduler tasks remain subject to owner confinement; no arbitrary cross-region write safety is claimed. Details in tools/freebuff/reports/r4-design-review.md and tools/freebuff/reports/engine-off-and-redstone-smoke.md.

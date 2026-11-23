@@ -1,131 +1,117 @@
-# Fabric Folia — Folia Parity Checklist
+# Folia Parity Checklist
 
-Statuses against Folia's documented architecture (PaperMC Folia docs:
-overview + region-logic references; this project's clean-room derivation in
-ARCHITECTURE.md). Status vocabulary is fixed and honest:
+This ledger compares Fabric-Folia with the execution model documented by Folia. It is not a claim of Folia parity, and it is not a release certificate. The current release is experimental and not production-ready.
+
+## Status vocabulary
 
 - **NOT_IMPLEMENTED** — no code path exists.
-- **PARTIAL** — real code exists but does not cover the subsystem's contract.
-- **IMPLEMENTED** — the contract is implemented; not yet exercised by tests
-  at that claim's strength.
-- **TESTED** — implemented AND covered by automated tests at that strength.
-- **VALIDATED** — TESTED and additionally proven on live production servers
-  (compat harness / dev-server evidence).
+- **PARTIAL** — a code path exists but does not cover the subsystem's contract, or a required cross-region case is missing.
+- **IMPLEMENTED** — the described contract is implemented, but the strength of automated coverage does not justify a stronger status.
+- **TESTED** — implemented and covered by a named automated test in this repository.
 
-This file is the completion standard (mandate §43): nothing is called
-complete here that is only implemented, and nothing is TESTED without a
-named test. Update it in the same change that moves a status.
+No row uses a "validated" status. Live development sessions are recorded in the project handoff, but their logs, worlds and benchmark artifacts are not committed, so this repository cannot reproduce them. A status here means "code present" or "covered by a named test", not "proven on a production server".
+
+Two evidence classes are kept separate throughout:
+
+- **Code-path evidence** is source inspection plus the named automated tests.
+- **Live evidence for the current candidate** is limited to a 2026-11-16 smoke boot of the deployed artifact: the server reached `Done (` and `Fabric Folia is ready` with regionized gameplay and player staging enabled in the existing config, but no players were connected. That boot proves startup and mixin application only. It does not exercise entity, block-entity, scheduled-tick or player behavior.
 
 ## Regionizer core
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| Regionizer per world (create/maintain/destroy) | TESTED | `WorldRegionizer`; RegionizerInvariantTest, RegionizerConcurrencyTest; emptied-region death regardless of the recalculation gate (zombie-region fix) |
-| Region sections (NxN spatial organization) | TESTED | `RegionSection`, section-keyed maps; invariant tests |
-| Invariant 1 — unique ownership per chunk | TESTED | RegionizerInvariantTest |
-| Invariant 2 — merge-radius buffer around regions | TESTED | empty-section creation radius; invariant tests |
-| Invariant 3 — ticking regions cannot grow | TESTED | TRANSIENT gating; TickLifecycleTest |
-| Invariant 4 — state machine (TRANSIENT/READY/TICKING/DEAD) | TESTED | `RegionState`, TickLifecycleTest |
-| Merge logic (incl. merge-later deferral, transient downgrade) | VALIDATED | `mergeInto` + deferred-merge protocol; invariant tests + 8 donor merges observed live over RCON (bridge closing two regions) |
-| **Split logic (redistribute owned data)** | VALIDATED | flood-fill split + tick-counter inheritance + queue partitioning + region-local data redistribution — driven through the real tick-end protocol; live RCON run split a 21-section region into two independent ticking regions with balanced ledgers |
-| Merge/split tick-deadline reconciliation (redstone/current-tick offset) | NOT_IMPLEMENTED | requires per-region redstone time (below); queue deadlines use tick counters which already re-home/inherit |
-| Region tick state + lifecycle | TESTED | tryBeginTick/completeTick/abortTick; TickLifecycleTest |
-| Ticking eligibility (READY only, neighbor-free) | TESTED | invariant tests |
-| Region deadlines (independent pacing) | TESTED | RegionSchedulerTest (fairness: slow region does not delay others) |
-| Region-local queues | TESTED | `RegionTaskQueue` (multi-producer/single-consumer, merge re-home, death drop) |
+| Regionizer per world (create, maintain, destroy) | TESTED | `WorldRegionizer`; `RegionizerInvariantTest`, `RegionizerConcurrencyTest`, `RegionizerChunkLifecycleTest` |
+| Region sections (NxN spatial organization) | TESTED | `RegionSection`; invariant tests |
+| Unique chunk ownership | TESTED | `RegionizerInvariantTest` |
+| Merge buffer around regions | TESTED | Empty-section radius; invariant tests |
+| Ticking regions cannot grow | TESTED | TRANSIENT gating; `TickLifecycleTest` |
+| Region state machine (TRANSIENT, READY, TICKING, DEAD) | TESTED | `RegionState`; `TickLifecycleTest` |
+| Merge logic | TESTED | `mergeInto` and deferred merge at tick end; `RegionizerChunkLifecycleTest`, `RegionPipelineTest` |
+| Split logic and region-local data redistribution | TESTED | Flood-fill split, queue partitioning, `RegionLocalData` redistribution; `TickLifecycleTest`, `RegionizerChunkLifecycleTest`, `RegionLocalDataTest` |
+| Merge/split redstone-time reconciliation | NOT_IMPLEMENTED | Requires per-region redstone time |
+| Region tick state and lifecycle | TESTED | `tryBeginTick`, `completeTick`, `abortTick`; `TickLifecycleTest` |
+| Ticking eligibility | TESTED | READY-only and neighbour-free rules; invariant tests |
+| Region deadlines | TESTED | `RegionSchedulerTest` fairness cases |
+| Region-local queues | TESTED | `RegionTaskQueue`; `RegionTaskQueueConcurrencyTest`, `RegionSchedulerTest` |
 
-## Schedulers (the four-scheduler model)
+## Schedulers
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| Region scheduler | TESTED | `RegionScheduler` (EDF coordinator, shared pool); RegionSchedulerTest |
-| Global scheduler | TESTED | `GlobalSchedulerImpl` (dedicated dispatch thread, ordered queue) |
-| Async scheduler (distinct from global) | TESTED | `AsyncSchedulerImpl` (own bounded daemon pool + timer thread, wall-clock time base, IO context tagging, fixed-rate non-overlap, exception isolation, bounded-queue backpressure); AsyncSchedulerImplTest — never shares the global dispatch thread or region workers |
-| Entity scheduler (follows migration) | TESTED | `EntitySchedulerImpl` — follow/retire semantics tested; now wired per world to the live `RegionEntityRegistry` resolver, so entity tasks resolve the owning region at execution time |
-| RegionizedTaskQueue (create-region-if-absent) | TESTED | `scheduleToChunkOrCreate` creates the region for an unowned position and executes the task in its context |
-| Worker pool (bounded, world-agnostic) | TESTED | `WorkerPool` storm tests; shared across worlds |
-| Scheduler fairness (§37: one lagging region never delays others) | TESTED | RegionSchedulerTest deadline-independence case |
-| Scheduler robustness (malformed task ≠ region death) | TESTED | per-task catch + region abort protocol; RegionSchedulerTest |
+| Region scheduler | TESTED | `RegionScheduler`; `RegionSchedulerTest`, `RegionDrainBudgetTest` |
+| Global scheduler | TESTED | `GlobalSchedulerImpl` is an ordered queue, not a dedicated dispatch thread. It is drained on the Minecraft server thread during the tick coordination phase. `GlobalSchedulerImplTest` |
+| Async scheduler | TESTED | Own bounded daemon pool and timer; wall-clock delays; `AsyncSchedulerImplTest` |
+| Entity scheduler | IMPLEMENTED | Follow and retire semantics with a per-world region resolver; `RegionEntityRegistryTest` covers registry ownership, not a dedicated entity-scheduler test |
+| Create-region-if-absent task submission | TESTED | `scheduleToChunkOrCreate`; `RegionSchedulerTest.scheduleToChunkOrCreateRegionifiesUnownedPosition` |
+| Bounded worker pool | TESTED | `WorkerPoolGateTest`, `RegionSchedulerTest` |
+| Scheduler fairness | TESTED | A slow region does not delay others; `RegionSchedulerTest` |
+| Malformed task isolation | TESTED | Per-task catch and region abort; `RegionFailurePolicyTest` |
+| Staged-body retry and exhaustion | TESTED | `StageRetryTest` |
 
 ## Region data
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| RegionizedData (region-local data provider with lifecycle callbacks) | TESTED | `RegionLocalData` (common): context-enforced get/create, merge handler, split redistribution, destroy release; violation/lifecycle tests driven through the real regionizer |
-| Per-region entity lists | TESTED (engine) | the FIRST real consumer: `RegionEntityRegistry` keeps per-region entity sets through `RegionLocalData` — context-enforced access, merge adopt, split redistribution by home chunk, destroy release |
-| Queue redistribution on split | TESTED | split listener partitions the parent queue by child ownership; re-homed task executes in the child's context |
-
-| Chunk lifecycle: register on activity, release on unload | TESTED (engine) / VALIDATED (live server) | regionizer position-exact ownership (idempotent re-offers); **production registration now exists**: `ChunkRegionization` registers every chunk via Fabric `CHUNK_LOAD` (steady state), backfills the pre-attach spawn-area spiral + player chunks on the first server tick (the `regions=0` root-cause fix — before this turn the only `addChunk` caller was the opt-in random-tick slice), `ServerLevelUnloadMixin` routes `ServerLevel.unload` → `removeChunk`; live proof: forceload far chunk → 25/25 chunks regionized via the event, boot backfill +122, regions tick 20 TPS with per-region MSPT. Per-region chunk-*state* object still open (position lifecycle is owned, state is not) |
-| Block/fluid tick lists per region | PARTIAL | vanilla's LevelTicks coordinator stays server-thread; the worker-visible half is region-owned: `RegionPendingTicks` ledger (per-region pending counts by chunk) rides the merge/split/destroy lifecycle, records at worker capture, releases at drain execution — 71/71 live-balanced over RCON |
-| Per-region redstone time / current tick semantics | NOT_IMPLEMENTED | current tick counters are per-region (split children inherit; merge re-homes) — redstone-time split from game time not yet done |
+| Region-local data with lifecycle callbacks | TESTED | `RegionLocalData`; `RegionLocalDataTest` |
+| Per-region entity lists | TESTED | `RegionEntityRegistry`; `RegionEntityRegistryTest` |
+| Queue redistribution on split | TESTED | Parent queue partitioned by child ownership; `RegionSchedulerTest`, `RegionStageHubParallelGateTest` |
+| Pending scheduled-tick ledger | TESTED | `RegionPendingTicks`; `RegionPendingTicksTest` |
+| Chunk registration on load and release on unload | TESTED | `ChunkRegionization` plus `ServerLevelUnloadMixin`; `RegionPipelineTest`, `RegionizerChunkLifecycleTest` |
+| Per-region chunk state object | NOT_IMPLEMENTED | Ownership is a position-to-region map, not `ChunkHolder`/`ChunkMap` state |
+| Per-region redstone time | NOT_IMPLEMENTED | Tick counters are per region; redstone time is global |
 
 ## Inter-region operations
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| Cross-region task scheduling (explicit boundaries) | TESTED | region↔region/global enqueue via queues; ThreadContextTest |
-| Entity migration between regions | TESTED (engine) / TESTED (live server) | `RegionEntityRegistry`: authoritative ownership map, atomic stripe-locked migrate/unregister, per-region entity sets as real `RegionLocalData`, split retarget by home chunk, retire on death/purged home, merge adopt; storm test proves unique ownership under concurrency. LIVE vanilla hooks validated on a real 26.2 server (recorded protocol, PASS 10/10): single add funnel capture, removal release on every reason, and cross-region migration measured `0 → 1` on a real 4000-block teleport. Two live-found defects fixed: removal gate fought the hook's own timing; teleport path bypassed the first movement hook |
-| Teleportation (multi-phase, region-safe) | PARTIAL | `RegionTransitions.dispatch` + `EntityTeleportMixin`: worker-context teleports resolving to another region/world are routed to the destination context; same-region teleports stay inline vanilla. `ServerPlayerTeleportMixin` closes the player hole: `ServerPlayer` overrides `teleport(TeleportTransition)` (covariant return), so every player dimension change/portal crossing funnels through an override the Entity-level mixin could not see — player captures now dispatch through the same keyed destination-context path (region hop, global fallback for unowned chunks, re-entrance-safe) |
-| Player login placement | NOT_IMPLEMENTED | |
-| Player respawn | PARTIAL | the normal `PERFORM_RESPAWN` client command is deliberately excluded from owner-region packet routing: `PacketUtilsMixin` rejects the region fast path and `PacketProcessorMixin` leaves the packet in vanilla's server-thread queue, where `MinecraftServer.processPacketsAndTick` drains it. This protects `PlayerList.respawn`'s replacement-player construction, global `PlayerList` mutations, and level entity-manager placement. Direct `PlayerList.respawn` calls from mods and destination-region placement hooks remain open |
-| Dimension transfer (region-to-region across worlds) | PARTIAL | the cross-world branch of `RegionTransitions.dispatch` hands the transition to the destination world's scheduler; the `ServerPlayer.teleport` override (the funnel for every player cross-dimension move) now dispatches through the same path via `ServerPlayerTeleportMixin` — accepted risk: the branch's global `PlayerList` mutations run on the destination region's worker (documented in the mixin); full multi-phase login/respawn placement still open |
-| Portals | PARTIAL | the portal transition funnel is captured end-to-end for transitions: `Entity.handlePortal` virtual-dispatches `teleport(transition)`, which now lands in the region-safe capture for both the `Entity` base and the `ServerPlayer` override (verified: `ServerPlayer` does not override `handlePortal`, so players hit the override). Portal-side staging beyond the teleport funnel (portal search/creation on the origin context) still open |
-| Networking dispatch (netty → region/global) | IMPLEMENTED | the pending-action queue in `Connection` is the wired seam: `ConnectionPacketDispatchMixin` classifies event-loop-drained tasks (bounded window), `ConnectionFlushQueueMixin` routes every drained action through `NetworkDispatch.runOnOwner` (inline on the server thread, global hop from network context); NetworkDispatchTest proves region/global/engine-down routing through the real engine. Live client-session evidence still open (no GUI client in CI) |
-| Global→Region / Region→Global task flows | TESTED | global queue + region queues; ThreadContextTest |
+| Explicit region, global and async handoffs | TESTED | `ThreadContextTest`, `GlobalSchedulerImplTest` |
+| Entity migration between regions | TESTED | `RegionEntityRegistry` ownership, split retargeting and retirement; `RegionEntityRegistryTest` |
+| Teleportation | PARTIAL | `ServerPlayerTeleportMixin` routes worker-context player teleports to the destination context. The non-player `EntityTeleportMixin` has an open P0 double-cancel (R1 in `tools/freebuff/reports/defect-ledger.md`): a dispatched body re-enters, is read as a duplicate and the vanilla teleport never runs. `PlayerTeleportRoutingTest` covers routing decisions, not a live transition |
+| Player login placement | NOT_IMPLEMENTED | Login still uses vanilla's server-thread placement |
+| Player respawn | PARTIAL | `PERFORM_RESPAWN` is excluded from owner-region packet routing and drained on the server thread by vanilla. Direct `PlayerList.respawn` callers and destination-region placement are not covered. `PlayerRespawnRoutingTest` |
+| Dimension transfer | PARTIAL | The cross-world branch hands the transition to the destination scheduler. Global `PlayerList` mutations in that branch run on the destination region's worker. `PlayerTeleportRoutingTest` covers region hop, global fallback and unattached-world refusal, not a successful cross-dimension move |
+| Portals | PARTIAL | `Entity.handlePortal` virtual-dispatches `teleport(TeleportTransition)`, which is captured for both `Entity` and the `ServerPlayer` override. Portal search and creation on the origin side are not staged |
+| Networking dispatch (Netty to region or global) | IMPLEMENTED | `NetworkDispatch` plus `ConnectionPacketDispatchMixin` and `ConnectionFlushQueueMixin`; `NetworkDispatchTest` |
+| Player connection tick and packet routing | IMPLEMENTED | `ServerConnectionTickMixin`, `PacketProcessorMixin`, `PacketUtilsMixin`, `ServerPlayerTickMixin`; component routing tests only. Gated by `gameplay.stage-player-path` |
+| Explosion damage across regions | NOT_IMPLEMENTED | Not intercepted. An explosion triggered from a staged entity body executes in that region context and can mutate neighbouring regions |
 
 ## Vanilla tick pipeline integration
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| Random ticks on region workers | VALIDATED | the one intercepted slice; world-mutation + attribution + cessation proven on production servers (TESTING.md, all 11 compat combos) |
-| Precipitation (same pass as random ticks) | VALIDATED | same intercepted body |
-| Scheduled block ticks | TESTED (live) | two seams: `LevelScheduleTickMixin` defers worker-context schedules into `ScheduledTickDeferral` (server-thread replay keeps the container single-writer), and `LevelTicksTickMixin`+`ServerLevelTickMixin` stage the drain bodies at `runCollectedTicks`' accept site onto region workers. LIVE: water/fire on a dev server drove 6,132 staged scheduled-tick bodies executed on workers; 6,053 worker-originated re-schedules deferred and replayed in balance, zero backlog, zero failures |
-| Scheduled fluid ticks | TESTED (live) | same staged slice as block ticks (same `LevelTicks` machinery); fluid ticks from placed water are part of the live counts above |
-| Block entities | IMPLEMENTED | staged slice: `LevelBlockEntityTickMixin` redirects the `TickingBlockEntity.tick()` call site into the `BLOCK_ENTITY` slice; list management stays vanilla |
-| Entity ticking | IMPLEMENTED | staged slice: `LevelEntityTickMixin` redirects the `guardEntityTick` call site — the whole `tickNonPassenger` tree (tick-count increment, body, passenger recursion) flows through it, zero vanilla logic replicated; bodies execute on the owning region's worker |
-| Redstone/current-tick state | NOT_IMPLEMENTED | |
-| Chunk load/generation on region threads | NOT_IMPLEMENTED | chunk loads still server/async-cache driven |
-| Worldborder/daylight/weather/game rules classification | IMPLEMENTED | `GlobalStateRegistry`: machine-checked Domain→Ownership classification (global/region/unclassified), surfaced in `/folia` diagnostics; enforcement hooks land with each consumer |
+| Entity ticking | IMPLEMENTED | `LevelEntityTickMixin` redirects the `guardEntityTick` consumer; the whole `tickNonPassenger` tree is staged. No direct automated test of entity-body world effects |
+| Block entities | IMPLEMENTED | `LevelBlockEntityTickMixin` redirects `TickingBlockEntity.tick()`; list management stays vanilla. No direct automated test |
+| Scheduled block ticks | IMPLEMENTED | `LevelScheduleTickMixin` defers worker schedules to the server thread; `LevelTicksTickMixin` stages drain bodies. `StageRetryTest`, `RegionPendingTicksTest` cover retry and ledger accounting, not live block behavior |
+| Scheduled fluid ticks | IMPLEMENTED | Same `LevelTicks` machinery as scheduled block ticks |
+| Random ticks | IMPLEMENTED | `ServerChunkCacheTickMixin` redirects `forEachBlockTickingChunk`; `RegionTickInterceptorPolicyTest` covers the queue-limit policy. A region above 512 queued tasks skips that pass; a later pass re-offers the chunks, and the skip can repeat while the queue stays above the limit |
+| Precipitation | IMPLEMENTED | Same intercepted pass as random ticks |
+| Staged backlog backpressure | TESTED | `RegionStageHubBacklogTest` shows staging is suspended, refused bodies are counted rather than dropped (callers run them vanilla-inline), and staging resumes after drain. Random ticks use a separate pass-level skip, not this gate |
+| Retained staged rounds | TESTED | `RegionStageHubParallelGateTest.backedUpRegionRetainsEveryStagedRound` |
+| Redstone and current-tick state | NOT_IMPLEMENTED | Global tick semantics |
+| Chunk load and generation on region threads | NOT_IMPLEMENTED | Chunk loading remains server/async-cache driven |
+| World border, daylight, weather and game rules | IMPLEMENTED | `GlobalStateRegistry` classification, surfaced in diagnostics; enforcement lands with each consumer |
+| Save-time quiescence | PARTIAL | Shutdown drains through the engine, but no test asserts drain completion before vanilla saves |
 
 ## Platform
 
-| Subsystem | Status | Evidence / notes |
+| Subsystem | Status | Evidence and notes |
 |---|---|---|
-| Thread-ownership enforcement (STRICT/WARN/OFF) | TESTED | ThreadContextTest; live evidence in compat runs |
-| Per-thread random state (level RNG) | TESTED (engine) / VALIDATED (live) | `WorkerRandoms` dispatches per-thread sources to region threads; original instance untouched for all other threads (bit-identical server streams). Unit: `WorkerRandomsTest` incl. the guarded-source contention reproduction. Live: multi-region compat protocol greps the ThreadingDetector signature and the post-fix baseline run is PASS 13/13 with 0 offending lines |
-| Violation diagnostics (actionable, region/thread/operation named) | TESTED | ViolationReporter format |
-| Exception isolation per region | TESTED | `RegionFailurePolicy`: consecutive-failure accounting, abort at threshold (regionizer fail-safe kill), success resets; exercised through the scheduler's real catch sites (RegionFailurePolicyTest). Fixed en route: the default-policy construction previously left null in place, which would NPE inside the tick catch and wedge the region as eternal TICKING |
-| Performance metrics (MSPT per region, queue depths, utilization) | PARTIAL | per-region last-tick duration + queue sizes via commands; no metrics export, no TPS-per-region |
-| Multi-world support (shared pool, per-world regionizers) | TESTED | RegionScheduler shared-pool constructor; engine attaches all dimensions |
-| Optimization-mod compatibility (Lithium/C2ME/FerriteCore/Krypton/VMP/ScalableLux) | VALIDATED | 11 measured combos, all PASS; C2ME interaction root-caused with auto-suppression (COMPATIBILITY.md) |
-| Legacy Fabric-mod handling | PARTIAL | declaration scan + diagnostics + `LegacyDispatchPolicy` (per-mod destination declarations from mod metadata, configurable default, network/region direct-run gate; tested); entrypoint delivery of the public API implemented — automatic translation of legacy patterns still open |
-| Player path (connection tick + packets on the owning region) | VALIDATED (live, MC 26.2 + protocol bot) | `ServerConnectionTickMixin` stages the per-connection body (packet drain, `SGPLI.tick` → `doTick` physics, flush) into the hub's PLAYER slice — flushed last, preserving vanilla's entity-pass-then-connection intra-tick order per region; `PacketProcessorMixin` routes `ensureRunningOnSameThread` re-homes to the owning region's queue; `PacketUtilsMixin` makes the same-thread check pass on the owning region (the covered overload is the one the `ServerLevel` overload delegates to); `ServerPlayerTickMixin` bounces the two verified server-thread couplings in `ServerPlayer.tick` (`ServerChunkCache.move`, `ServerPlayerGameMode.tick`) to the server thread; event-loop packet drains hop via `NetworkDispatch.runForConnection` to the player's region (global fallback for handshake listeners). Fallbacks are whole (same gate everywhere): edge players, memory connections, disconnecting connections, unowned chunks stay fully server-thread. Gated by `gameplay.stage-player-path` |
-| Shutdown/quiescence | TESTED | drain-and-drop close protocol; graceful-shutdown phase in every compat combo |
-| Stress coverage (mandate §45) | PARTIAL | regionizer concurrency storm, worker-pool storms; no entity/teleport/redstone stress (nothing to stress yet) |
+| Thread ownership enforcement (STRICT, WARN, OFF) | TESTED | `ThreadContextTest` |
+| Per-thread level random state | TESTED | `WorkerRandoms`; `WorkerRandomsTest` |
+| Violation diagnostics | TESTED | `ViolationReporter`; `ThreadContextTest` |
+| Exception isolation per region | TESTED | `RegionFailurePolicy`; `RegionFailurePolicyTest` |
+| Fatal-error propagation from staged bodies | TESTED | `RegionStageHubFatalTest.fatalBodyErrorPropagatesThroughInlineFlush` |
+| Performance metrics (MSPT, queue depth, utilization) | PARTIAL | Per-region duration and queue sizes; no machine-readable export, no per-region TPS |
+| Multi-world support | IMPLEMENTED | Shared pool with per-world regionizers and world-qualified routing keys; tests attach a single overworld plus isolated regionizers, not two live dimensions |
+| Optimization-mod compatibility | PARTIAL | `docs/compatibility/` contains scoped investigations for six mods. There is no current matrix for the staged profile or a full modpack |
+| Legacy Fabric-mod handling | PARTIAL | Declaration scan, diagnostics and `LegacyDispatchPolicy` (`LegacyDispatchPolicyTest`); automatic translation of legacy thread assumptions is not implemented |
+| Shutdown and quiescence | PARTIAL | Drain-and-drop close protocol is tested for the pool (`WorkerPoolGateTest`); abandoned work accounting and drain-before-save are not covered end to end |
+| Stress coverage | PARTIAL | Regionizer and worker-pool concurrency storms; no committed entity, teleport, redstone or save stress suite |
 
-## Reading the gaps (the honest summary)
+## Reading the gaps
 
-What exists is a **tested regionization and scheduling core** plus the
-**staged gameplay execution layer**: entity ticking, block entities, and
-scheduled block/fluid ticks are captured at their exact vanilla call sites
-and executed on the owning region's worker (zero replicated vanilla logic;
-disarmed state is byte-for-byte vanilla), with worker-context tick
-schedules deferred and replayed on the server thread so container mutations
-stay single-threaded. Teleport/dimension transitions from region workers
-route through an explicit destination-context handoff, Netty event loops
-carry a machine-checked NETWORK context, and the global-state domain
-classification is enforced rather than documented. The failure policy and
-legacy dispatch policy are real, wired, and tested.
+What exists is a tested regionization and scheduling core plus a staged execution layer for selected vanilla tick bodies. Entity, block-entity, scheduled-tick and player bodies are captured at their vanilla call sites and executed on the owning region's worker when the corresponding gate is enabled. Worker-context tick schedules are deferred and replayed on the server thread so the tick containers remain single-writer. Teleport transitions from region workers route through an explicit destination-context handoff, and the server thread closes a worker gate at the start of each tick.
 
-What does **not** exist yet is Folia's full gameplay integration layer:
-entity migration tooling beyond the tracker's live hooks, teleport/**login/**
-respawn/dimension transfer as first-class regionized flows (player teleport
-and dimension transfer now route through the destination-context dispatch;
-the normal respawn command is server-thread-routed, but direct
-`PlayerList.respawn` callers and destination-region placement remain open;
-login placement is still open), chunk-lifecycle ownership beyond the unload
-hook, and per-region tick state beyond the staged slices. The player path now stages (connection tick, packets,
-physics on the owning region, gated by `gameplay.stage-player-path`),
-which was the last major tick surface on the server thread. Those
-remaining integration flows are the mandate's remaining bulk, and this
-checklist will say so until each survives tests at its claimed strength.
+What does not exist is Folia's full gameplay integration layer: region-independent world ticks, player login placement, first-class portal and respawn flows, region-aware explosion and multi-block damage, per-region redstone time, per-region chunk state, and saved-evidence compatibility and soak matrices. Those gaps are why the project is described as staged-region execution rather than Folia parity, and why the staged paths are opt-in.
+
+Two earlier statements in this repository are deliberately corrected here: the global scheduler is not a dedicated dispatch thread, and random ticks are not the only intercepted vanilla pass. Both were true at an earlier milestone and are preserved only in history.

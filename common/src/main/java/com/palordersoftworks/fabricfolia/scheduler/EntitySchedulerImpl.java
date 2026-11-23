@@ -58,7 +58,8 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 			return;
 		}
 		boolean enqueued = engine.enqueue(regionAtSchedule, () ->
-				executeFollowing(entityHandle, task, retired));
+				executeFollowing(entityHandle, task, retired), null,
+				() -> recoverDropped(entityHandle, task, retired));
 		if (!enqueued) {
 			// Region died between resolve and enqueue: the entity's owner no
 			// longer exists, so the entity is gone as far as this task cares.
@@ -86,8 +87,12 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 		// entity existence and migration when the deadline arrives, and the
 		// deadline itself survives merges (queue re-homing keeps tick-counter
 		// deadlines meaningful in the absorbing region).
-		engine.enqueueDelayed(regionAtSchedule, delay, () ->
-				executeFollowing(entityHandle, task, retired));
+		boolean enqueued = engine.enqueueDelayed(regionAtSchedule, delay, () ->
+				executeFollowing(entityHandle, task, retired), null,
+				() -> recoverDropped(entityHandle, task, retired));
+		if (!enqueued && retired != null) {
+			retired.run();
+		}
 	}
 
 	@Override
@@ -144,7 +149,8 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 			// owner (documented contract). The old owner never executes
 			// entity state mutation it no longer owns.
 			boolean followed = engine.enqueue(current, () ->
-					executeFollowing(entityHandle, task, retired));
+					executeFollowing(entityHandle, task, retired), null,
+					() -> recoverDropped(entityHandle, task, retired));
 			if (!followed && retired != null) {
 				// The new owner died in the resolve→enqueue window: the entity's
 				// owner no longer exists, so the task retires rather than
@@ -154,5 +160,20 @@ public final class EntitySchedulerImpl implements EntityScheduler {
 			return;
 		}
 		task.run();
+	}
+
+	private void recoverDropped(Object entityHandle, Runnable task, Runnable retired) {
+		Region owner = resolver.apply(entityHandle);
+		if (owner != null && engine.enqueue(owner, () -> executeFollowing(entityHandle, task, retired),
+				null, () -> recoverDropped(entityHandle, task, retired))) {
+			return;
+		}
+		if (retired != null) {
+			try {
+				retired.run();
+			} catch (Throwable t) {
+				engine.reportDroppedTaskFailure(t);
+			}
+		}
 	}
 }

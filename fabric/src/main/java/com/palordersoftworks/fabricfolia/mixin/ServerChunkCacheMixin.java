@@ -168,32 +168,21 @@ public abstract class ServerChunkCacheMixin {
 
 	@Inject(method = "tick(Ljava/util/function/BooleanSupplier;Z)V", at = @At("HEAD"))
 	private void fabricfolia$drainDeferredVanillaState(BooleanSupplier hasTimeLeft, boolean tickChunks, CallbackInfo ci) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() != null
+				&& ServerThreadDeferral.isServerThread()) {
 			ServerThreadDeferral.drainAll();
 		}
 	}
 
 	@Inject(method = "addTicketAndLoadWithRadius(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;I)Ljava/util/concurrent/CompletableFuture;", at = @At("HEAD"), cancellable = true)
 	private void fabricfolia$deferTicketLoad(TicketType type, ChunkPos pos, int radius, CallbackInfoReturnable<CompletableFuture<?>> cir) {
-		if (ServerThreadDeferral.isServerThread()) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+				|| ServerThreadDeferral.isServerThread()) {
 			return;
 		}
 		ServerChunkCache self = (ServerChunkCache) (Object) this;
-		CompletableFuture<Object> bridge = new CompletableFuture<>();
-		ServerThreadDeferral.defer(() -> {
-			try {
-				self.addTicketAndLoadWithRadius(type, pos, radius).whenComplete((result, error) -> {
-					if (error != null) {
-						bridge.completeExceptionally(error);
-					} else {
-						bridge.complete(result);
-					}
-				});
-			} catch (Throwable t) {
-				bridge.completeExceptionally(t);
-			}
-		});
-		cir.setReturnValue(bridge);
+		cir.setReturnValue(ServerThreadDeferral.deferBarrierSafe(
+				() -> self.addTicketAndLoadWithRadius(type, pos, radius)));
 		cir.cancel();
 	}
 }

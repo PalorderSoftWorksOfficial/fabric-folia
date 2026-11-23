@@ -122,7 +122,8 @@ public final class NetworkDispatch {
 		}
 		INLINE_NETWORK.incrementAndGet();
 		if (engine == null) {
-			return; // engine down: no sanctioned mutation context exists
+			task.run();
+			return;
 		}
 		RegionPlayerRouting.Route route = RegionPlayerRouting.routeFor(connection);
 		if (route == null) {

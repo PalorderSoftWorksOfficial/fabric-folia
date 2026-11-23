@@ -23,7 +23,7 @@ public class MinecraftServerMixin {
         // the server at loadLevel before the first tick.
         FoliaConfig config = FabricFoliaMod.config();
 
-        if (config != null && config.serverBrand()) {
+        if (config != null && config.enabled() && config.serverBrand()) {
             cir.setReturnValue(config.serverBrandName());
         }
     }
@@ -37,16 +37,18 @@ public class MinecraftServerMixin {
         // vanilla's iteration and worker-side mutations of the same
         // structures (entity sections, block-entity lists, tick lists)
         // from ever running concurrently.
-        ServerThreadDeferral.noteServerThread(Thread.currentThread());
         FabricFoliaEngine engine = FabricFoliaMod.engine();
         if (engine != null) {
+            ServerThreadDeferral.noteServerThread(Thread.currentThread());
             engine.beginTickPhase();
         }
     }
 
     @Inject(method = "tickChildren(Ljava/util/function/BooleanSupplier;)V", at = @At("HEAD"))
     private void fabricfolia$drainDeferredVanillaState(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
-        ServerThreadDeferral.noteServerThread(Thread.currentThread());
-        ServerThreadDeferral.drainAll();
+        if (FabricFoliaMod.engine() != null) {
+            ServerThreadDeferral.noteServerThread(Thread.currentThread());
+            ServerThreadDeferral.drainAll();
+        }
     }
 }

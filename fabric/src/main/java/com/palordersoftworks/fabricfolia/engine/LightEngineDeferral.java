@@ -19,7 +19,8 @@ public final class LightEngineDeferral {
     }
 
     public static void runMutation(Runnable mutation) {
-        if (ServerThreadDeferral.isServerThread()) {
+        if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() == null
+                || ServerThreadDeferral.isServerThread()) {
             mutation.run();
         } else {
             ServerThreadDeferral.defer(mutation);

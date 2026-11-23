@@ -101,6 +101,12 @@ public final class RegionStageHub {
 
 	private static final AtomicBoolean ACTIVE = new AtomicBoolean(false);
 	private static final Map<Level, RegionStageHub> HUBS_BY_LEVEL = new ConcurrentHashMap<>();
+	private static final Map<java.util.UUID, PlayerTickTarget> PLAYER_TICK_TARGETS =
+			new ConcurrentHashMap<>();
+	private static final AtomicLong PLAYER_TICK_WORLD_CHANGES = new AtomicLong();
+	private static final AtomicLong PLAYER_ENTITY_RECLAIMED = new AtomicLong();
+	private static final AtomicLong PLAYER_ENTITY_CANCELED = new AtomicLong();
+	private static final AtomicLong PLAYER_ENTITY_RECLAIM_MISSED = new AtomicLong();
 
 	private static final AtomicLong STAGED_TOTAL = new AtomicLong();
 	private static final AtomicLong EXECUTED_ON_WORKERS = new AtomicLong();
@@ -265,6 +271,7 @@ public final class RegionStageHub {
 	static void deactivateAll() {
 		ACTIVE.set(false);
 		HUBS_BY_LEVEL.clear();
+		PLAYER_TICK_TARGETS.clear();
 	}
 
 	/**
@@ -274,6 +281,7 @@ public final class RegionStageHub {
 	 */
 	void deactivate() {
 		HUBS_BY_LEVEL.remove(level);
+		PLAYER_TICK_TARGETS.values().removeIf(target -> target.worldKey().equals(worldKey));
 		if (HUBS_BY_LEVEL.isEmpty()) {
 			ACTIVE.set(false);
 		}
@@ -306,6 +314,22 @@ public final class RegionStageHub {
 
 	public static long executedOnServerThread() {
 		return EXECUTED_ON_SERVER.get();
+	}
+
+	public static long playerTickWorldChanges() {
+		return PLAYER_TICK_WORLD_CHANGES.get();
+	}
+
+	public static long playerEntityReclaimed() {
+		return PLAYER_ENTITY_RECLAIMED.get();
+	}
+
+	public static long playerEntityCanceled() {
+		return PLAYER_ENTITY_CANCELED.get();
+	}
+
+	public static long playerEntityReclaimMissed() {
+		return PLAYER_ENTITY_RECLAIM_MISSED.get();
 	}
 
 	public static long probePass() {
@@ -517,6 +541,97 @@ public final class RegionStageHub {
 		return true;
 	}
 
+	public boolean stagePlayerEntity(net.minecraft.server.level.ServerPlayer player,
+	                                 java.util.function.Function<ChunkPos, Runnable> bodyFactory) {
+		return stagePlayerTick(player.getUUID(), player.chunkPosition(), Slice.ENTITY, bodyFactory);
+	}
+
+	public boolean stagePlayerConnection(net.minecraft.server.level.ServerPlayer player,
+	                                     java.util.function.Function<ChunkPos, Runnable> bodyFactory) {
+		return stagePlayerTick(player.getUUID(), player.chunkPosition(), Slice.PLAYER, bodyFactory);
+	}
+
+	boolean stagePlayerTick(java.util.UUID playerId, ChunkPos observedPosition, Slice slice,
+	                        java.util.function.Function<ChunkPos, Runnable> bodyFactory) {
+		PlayerTickTarget target = PLAYER_TICK_TARGETS.get(playerId);
+		if (target != null && !target.worldKey().equals(worldKey)) {
+			PLAYER_TICK_TARGETS.remove(playerId, target);
+			PLAYER_TICK_WORLD_CHANGES.incrementAndGet();
+			target.hub().reclaimPinnedPlayerBody(target.entityBody());
+			return false;
+		}
+		if (target == null) {
+			boolean loaded = vanillaNeighborhoodLoaded(observedPosition);
+			Runnable body = loaded ? bodyFactory.apply(observedPosition) : null;
+			boolean staged = loaded && stageIfRoom(slice, body);
+			PLAYER_TICK_TARGETS.put(playerId, new PlayerTickTarget(worldKey, observedPosition,
+					staged, this, staged && slice == Slice.ENTITY ? body : null));
+			return staged;
+		}
+		if (target.staged()) {
+			stage(slice, bodyFactory.apply(target.position()));
+		}
+		return target.staged();
+	}
+
+	public boolean reclaimPlayerEntityBody(java.util.UUID playerId) {
+		Runnable body = takePlayerEntityBody(playerId);
+		if (body == null) {
+			return false;
+		}
+		PLAYER_ENTITY_RECLAIMED.incrementAndGet();
+		runStandalone(Slice.ENTITY, body);
+		return true;
+	}
+
+	public boolean cancelPlayerEntityBody(java.util.UUID playerId) {
+		Runnable body = takePlayerEntityBody(playerId);
+		if (body == null) {
+			return false;
+		}
+		PLAYER_ENTITY_CANCELED.incrementAndGet();
+		return true;
+	}
+
+	private Runnable takePlayerEntityBody(java.util.UUID playerId) {
+		PlayerTickTarget target = PLAYER_TICK_TARGETS.remove(playerId);
+		if (target == null) {
+			return null;
+		}
+		if (target.hub() != this || target.entityBody() == null) {
+			PLAYER_TICK_TARGETS.putIfAbsent(playerId, target);
+			return null;
+		}
+		List<Runnable> bodies = staged.get(Slice.ENTITY);
+		if (bodies.remove(target.entityBody())) {
+			return target.entityBody();
+		}
+		PLAYER_ENTITY_RECLAIM_MISSED.incrementAndGet();
+		return null;
+	}
+
+	private void reclaimPinnedPlayerBody(Runnable body) {
+		if (body == null) {
+			return;
+		}
+		List<Runnable> bodies = staged.get(Slice.ENTITY);
+		for (int i = 0; i < bodies.size(); i++) {
+			if (bodies.get(i) == body) {
+				bodies.remove(i);
+				break;
+			}
+		}
+		runStandalone(Slice.ENTITY, body);
+	}
+
+	private record PlayerTickTarget(String worldKey, ChunkPos position, boolean staged,
+	                                RegionStageHub hub, Runnable entityBody) {
+	}
+
+	static void clearPlayerTickTargets() {
+		PLAYER_TICK_TARGETS.clear();
+	}
+
 	/**
 	 * Flushes this world's staged batches: groups every body by the region
 	 * that owns its position and enqueues it onto that region's task queue.
@@ -580,6 +695,7 @@ public final class RegionStageHub {
 		// so cached answers must not leak across the boundary.
 		loadedTickCache.clear();
 		ownerTickCache.clear();
+		PLAYER_TICK_TARGETS.values().removeIf(target -> target.worldKey().equals(worldKey));
 	}
 
 	private void dispatch(Slice slice, List<Runnable> batch) {

@@ -1,0 +1,41 @@
+config-version: 2
+general:
+  enabled: true
+  server-brand: true
+  server-brand-name: "fabricFolia"
+  regionized-gameplay: false
+  regionized-random-ticks: false
+regions:
+  region-section-size: 8
+threads:
+  worker-threads: -1
+  thread-check-mode: WARN
+gameplay:
+  stage-player-path: false
+diagnostics:
+  debug: false
+  debug-logging: false
+  profiling: false
+  watchdog: true
+  metrics: true
+patches:
+  enabled: true
+  override-vanilla: false
+  minecraft:
+    entity-tick-optimization: false
+    chunk-tick-optimization: false
+    random-tick-optimization: false
+    entity-collision-optimization: true
+    hard-hitbox-entity-collision: true
+  network:
+    packet-dispatch: true
+    allocation-reduction: true
+  fabricfolia:
+    chunk-regionization: true
+    region-lookup: true
+    scheduler-dispatch: true
+    task-queue: true
+gpu:
+  enabled: false
+  device: ""
+  verify-on-boot: true

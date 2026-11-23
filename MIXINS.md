@@ -1,11 +1,40 @@
-# Fabric Folia — Mixin Register
+# Mixin inventory
 
-Every mixin Fabric Folia ships, why it exists, and the mandatory analysis
-that gates any future one. Fabric Folia is deliberately mixin-minimal: the
-intercept seam is a single call site, and everything else is done through
-Fabric API events (lifecycle, commands).
+Fabric-Folia uses mixins only at interception points not exposed by the Fabric lifecycle/command APIs. The configuration is `fabric/src/main/resources/fabricfolia.mixins.json`; it declares `required: true` and `defaultRequire: 1`, and lists exactly 29 mixins. The source tree contains the same 29 classes, with no additional mixin class outside the register. The candidate verifier also checks that every declared mixin class is present in the built JAR.
 
-## Current inventory (26 mixins registered; 23 documented below — CommandsMixin, MinecraftServerMixin, ServerPlayerTickMixin remain to be documented)
+This inventory describes source intent. It does not prove that an injection applies on a live 26.2 server. A dedicated-server boot that reports successful application of every required mixin remains a production release gate.
+
+| Mixin | Target / responsibility | Feature boundary |
+|---|---|---|
+| `ChunkMapTrackingMixin` | `ChunkMap.move`, `addEntity`, `removeEntity`; defers chunk/entity tracking mutations to the server thread when necessary | Player/entity ownership handoff |
+| `CommandsMixin` | `Commands.performCommand`; console context tagging and region-aware re-dispatch of entity commands from network threads | Diagnostics / player path |
+| `ConnectionFlushQueueMixin` | `Connection.flushQueue`; routes each drained packet action through `NetworkDispatch` to the owner context | Player path |
+| `ConnectionPacketDispatchMixin` | `Connection.runOnceConnected`; enters and exits the NETWORK ownership context around packet dispatch | Player path |
+| `DistanceManagerTrackingMixin` | `DistanceManager.addPlayer`, `removePlayer`, `runAllUpdates`; serializes ticket/tracking operations | Chunk ownership safety |
+| `EntityMixin` | Entity position/removal lifecycle hooks and optional collision optimization | Entity tracking / optional optimization |
+| `EntityGetterMixin` | `EntityGetter.getEntityCollisions`; routes the hitbox query through the per-section hard-hitbox index when the vanilla override layer is on | `patches.override-vanilla` + `hard-hitbox-entity-collision` (default off) |
+| `EntitySectionMixin` | `EntitySection.getEntities` (both overloads); serves from / maintains the per-section hard-hitbox index | `patches.override-vanilla` + `hard-hitbox-entity-collision` (default off) |
+| `EntityTeleportMixin` | `Entity.teleport(TeleportTransition)` capture and destination routing | Teleport path |
+| `LevelBlockEntityTickMixin` | `Level.tickBlockEntities`; captures supported block-entity tick bodies | `general.regionized-gameplay` and `patches.minecraft.chunk-tick-optimization` (default off) |
+| `LevelEntityTickMixin` | `Level.guardEntityTick`; captures supported entity tick bodies | `general.regionized-gameplay` and `patches.minecraft.entity-tick-optimization` (default off) |
+| `LevelChunkLightEngineMixin` | `LevelChunk.setBlockState` light hooks; defers worker-context light-engine section updates to the server thread | `patches.override-vanilla` (default off) |
+| `LevelMixin` | `Level` constructor; wraps `Level.random` with the `WorkerRandoms` per-thread dispatcher | Per-thread random state |
+| `LevelScheduleTickMixin` | `LevelTicks.schedule`; defers schedules made from region workers to the server-thread replay queue | Scheduled tick integration; execution staging also requires `patches.minecraft.chunk-tick-optimization` (default off) |
+| `LevelTicksQueryMixin` | `LevelTicks.hasScheduledTick`; answers worker-context queries from the region pending-tick ledger | Scheduled tick integration |
+| `LevelTicksTickMixin` | `LevelTicks.runCollectedTicks`; stages collected drain bodies into the `SCHEDULED_TICK` slice | Scheduled tick integration |
+| `MinecraftServerGuiMixin` | Dedicated server GUI frame and icon behavior | Branding / GUI only |
+| `MinecraftServerMixin` | `MinecraftServer.processPacketsAndTick`, `tickChildren`, server brand; establishes the server-thread tick barrier and drains deferred server mutations | Core lifecycle / coordination |
+| `PacketProcessorMixin` | `PacketProcessor.scheduleIfPossible`; routes eligible re-homed packets to the player's current region | Player path |
+| `PacketUtilsMixin` | `PacketUtils.ensureRunningOnSameThread`; checks whether a packet handler is already in its owner's context | Player path |
+| `PersistentEntitySectionManagerMixin` | `PersistentEntitySectionManager.addEntity` return; registers the entity with its owning region after the section manager accepts it | Entity ownership tracking |
+| `ServerChunkCacheMixin` | `getChunk`, `tick`, `blockChanged`, `broadcastChangedChunks`, and `addTicketAndLoadWithRadius`; worker present-chunk fast path, ticket deferral and block-change broadcast deferral to the server thread | Chunk safety / network broadcasts |
+| `ServerChunkCacheTickMixin` | `ServerChunkCache.tickChunks`; captures the vanilla chunk-ticking iteration seam | Staged chunk work |
+| `ServerConnectionTickMixin` | `ServerConnectionListener.tick`; stages eligible connection ticks when the player-path gate is enabled | `gameplay.stage-player-path` |
+| `ServerLevelTickMixin` | `ServerLevel.tick` begin/end; marks the scheduled-tick drain window so `LevelTicksTickMixin` stages only drain bodies | Scheduled tick integration |
+| `ServerLevelUnloadMixin` | `ServerLevel.unload`; detaches world regionizer state | World lifecycle |
+| `ServerPlayerTeleportMixin` | `ServerPlayer.teleport(TeleportTransition)` override | Player teleport path |
+| `ServerPlayerTickMixin` | Server-player tick couplings such as chunk-view movement and game-mode tick | Player path / server-thread deferral |
+| `TicketStorageMixin` | TicketStorage ticket mutation methods; defers cross-context ticket changes | Chunk ticket safety |
 
 ## Validation requirements
 

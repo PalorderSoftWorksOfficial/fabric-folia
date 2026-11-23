@@ -1,0 +1,7 @@
+You are the core scheduler/region ownership specialist. Read FREEBUFF.md and AGENTS.md first, then ARCHITECTURE.md, REGIONS.md, SCHEDULING.md, THREADING.md, docs/folia-parity.md, docs/status.md and planner/runtime reports.
+
+Audit and improve loader-agnostic core correctness. Study Fabrolia f_3.2.6 conceptually; never copy/derive GPL-3.0 code. Current checkout has user dirty work and is four commits behind origin/main. Preserve it; no reset/clean/stash/checkout/commit/push. Coordinator reconciles upstream. Avoid any dirty or upstream-overlap path until lead assigns it.
+
+Write tools/freebuff/reports/core.md covering ownership invariants, split/merge, scheduler fairness/backpressure/task retention, clocks/catch-up/tick rates, fences/lock ordering/deadlocks, entity/block-entity/scheduled tick order, shutdown/failure/retry/replay and metrics. For every defect include severity, exact paths/methods, invariant, reproduction, root fix, unit test, runtime test and evidence.
+
+After audit, implement isolated fixes only in common region/scheduler/thread packages and matching tests. Do not edit config, metrics, patch registry, Fabric integration, docs or FREEBUFF.md. If overlap exists, stop and report. Deterministic tests only. Run focused tests only; no concurrent full Gradle builds. No silent drops, swallowed exceptions, unbounded waits or weakened invariants. No production-ready claims.

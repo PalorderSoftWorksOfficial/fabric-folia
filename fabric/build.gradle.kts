@@ -49,6 +49,9 @@ dependencies {
 	include(libs.snakeyamlEngine)
 	include(libs.adventureApi)
 	include(libs.adventureMiniMessage)
+	include(libs.adventureKey)
+	include(libs.examinationApi)
+	include(libs.examinationString)
 
 	compileOnly(libs.jsr305)
 

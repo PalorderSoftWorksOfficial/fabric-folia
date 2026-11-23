@@ -1,0 +1,19 @@
+CMD time query gametime
+CMD folia health
+CMD folia status
+CMD folia workers
+CMD folia regions
+WAIT 5
+CMD time set day
+CMD forceload add 0 0 15 15
+WAIT 10
+CMD folia regions verbose
+CMD folia scheduler
+CMD folia metrics
+WAIT 5
+CMD forceload remove all
+WAIT 5
+CMD save-all flush
+WAIT 2
+CMD time query gametime
+CMD folia health

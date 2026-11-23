@@ -496,6 +496,7 @@ public final class FabricFoliaEngine {
 
 	/** Per pump call, upper bound on directly drained executor tasks (barrier time cap). */
 	private static final int PUMP_DRAIN_BUDGET = 128;
+	private static final int PUMP_BARRIER_SAFE_BUDGET = 128;
 	/**
 	 * Live levels by world key, recorded at entity-tracking attach — the
 	 * quiesce/shutdown pump drains each one's chunk executor so workers
@@ -524,6 +525,11 @@ public final class FabricFoliaEngine {
 			return;
 		}
 		quiescePumpCalls.incrementAndGet();
+		try {
+			com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.drainBarrierSafe(PUMP_BARRIER_SAFE_BUDGET);
+		} catch (Throwable deferredFailure) {
+			quiescePumpErrors.incrementAndGet();
+		}
 		for (java.util.Map.Entry<String, net.minecraft.server.level.ServerLevel> entry : pumpLevels.entrySet()) {
 			try {
 				net.minecraft.server.level.ServerChunkCache source = entry.getValue().getChunkSource();
@@ -599,6 +605,7 @@ public final class FabricFoliaEngine {
 		lastTickPhaseStartNanos = begin;
 		thisTickQuiesceNanos = 0L;
 		tickWorkRecorded = false;
+		throwPendingReplayFailure();
 		com.palordersoftworks.fabricfolia.scheduler.WorkerPool pool = workerPool();
 		if (pool == null) {
 			global.tick();
@@ -635,6 +642,9 @@ public final class FabricFoliaEngine {
 					+ " pumpTasks=" + quiescePumpedTasks.get()
 					+ " pumpErrors=" + quiescePumpErrors.get()
 					+ " chunkQueue=" + pending
+					+ " deferralsPending=" + com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.pendingCount()
+					+ " barrierDrained=" + com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.barrierDrained()
+					+ " barrierWaiters=" + com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.barrierSafeWaiters()
 					+ (quiescePumpLastError != null ? " lastPumpError=" + quiescePumpLastError : "") + "]");
 			// Phase 1B fail-safe: exclusive ownership is mandatory before the server thread
 			// touches gameplay state. A bounded timeout alone would let vanilla mutate state
@@ -654,7 +664,22 @@ public final class FabricFoliaEngine {
 			waited = java.lang.System.nanoTime() - start;
 			thisTickQuiesceNanos = waited;
 		}
+		throwPendingReplayFailure();
 		global.tick();
+	}
+
+	private static void throwPendingReplayFailure() {
+		Throwable replayFailure = com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.takeReplayFailure();
+		if (replayFailure == null) {
+			return;
+		}
+		if (replayFailure instanceof RuntimeException runtime) {
+			throw runtime;
+		}
+		if (replayFailure instanceof Error error) {
+			throw error;
+		}
+		throw new RuntimeException(replayFailure);
 	}
 
 	/** Reopens worker execution after the end-of-tick flush dispatched staged bodies. */
@@ -850,6 +875,9 @@ public final class FabricFoliaEngine {
 		lines.add("staged bodies bounced to server thread (probe stale): " + RegionStageHub.bouncedToServer());
 		lines.add("worker getChunk absent no-create served null: " + WorkerChunkProbe.absentNulls());
 		lines.add("staged bodies dropped (region died): " + RegionStageHub.droppedDeadRegion());
+		lines.add("player liveness releases: reclaimed=" + RegionStageHub.playerEntityReclaimed()
+				+ " canceled(removed)=" + RegionStageHub.playerEntityCanceled()
+				+ " missed(already dispatched)=" + RegionStageHub.playerEntityReclaimMissed());
 		lines.add("staged bodies pending (backlog): " + pendingStagedBodies()
 				+ ", staging suppressed by backlog: " + RegionStageHub.suppressedBacklog());
 		lines.addAll(com.palordersoftworks.fabricfolia.gpu.GpuSubsystem.metricsLines());
@@ -874,6 +902,7 @@ public final class FabricFoliaEngine {
 		lines.add("chunks regionized (chunk-load): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.chunkLoadRegistrations());
 		lines.add("chunks regionized (attach backfill): " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.backfillRegistrations());
 		lines.add("chunk-load events with no attached world: " + com.palordersoftworks.fabricfolia.engine.ChunkRegionization.unattachedRefusals());
+		lines.add("worker getChunk creating/below-status vanilla joins: " + WorkerChunkProbe.vanillaJoins());
 		lines.add("scheduled ticks deferred by workers: "
 				+ com.palordersoftworks.fabricfolia.engine.ScheduledTickDeferral.deferredTotal());
 		lines.add("scheduled ticks replayed server-thread: "
@@ -891,6 +920,10 @@ public final class FabricFoliaEngine {
 				+ com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.pendingCount()
 				+ ", failed: "
 				+ com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.failed()
+				+ ", barrier-drained: "
+				+ com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.barrierDrained()
+				+ ", bridge-waiters: "
+				+ com.palordersoftworks.fabricfolia.engine.ServerThreadDeferral.barrierSafeWaiters()
 				+ ")");
 		lines.add("staged-body retries (async entity load): scheduled="
 				+ com.palordersoftworks.fabricfolia.scheduler.StageRetry.scheduled()

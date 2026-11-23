@@ -45,7 +45,9 @@ public abstract class ConnectionPacketDispatchMixin {
 
 	@Inject(method = "runOnceConnected(Ljava/util/function/Consumer;)V", at = @At("HEAD"))
 	private void fabricfolia$enterNetworkContext(CallbackInfo ci) {
-		if (ThreadOwnership.current().kind() == ThreadContext.Kind.UNKNOWN) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() != null
+				&& com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")
+				&& ThreadOwnership.current().kind() == ThreadContext.Kind.UNKNOWN) {
 			// Unknown contexts are Netty event loops (and other unowned
 			// threads). The server thread is GLOBAL (engine registration),
 			// region workers are REGION inside the staged connection tick —
@@ -57,7 +59,9 @@ public abstract class ConnectionPacketDispatchMixin {
 
 	@Inject(method = "runOnceConnected(Ljava/util/function/Consumer;)V", at = @At("RETURN"))
 	private void fabricfolia$exitNetworkContext(CallbackInfo ci) {
-		if (ThreadOwnership.current().kind() == ThreadContext.Kind.NETWORK) {
+		if (com.palordersoftworks.fabricfolia.FabricFoliaMod.engine() != null
+				&& com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")
+				&& ThreadOwnership.current().kind() == ThreadContext.Kind.NETWORK) {
 			// This mixin is enterSide(NETWORK)'s only caller, so NETWORK on
 			// this thread's current window means WE tagged it: restore the
 			// event-loop idle default. Thread-local, so concurrent

@@ -54,9 +54,9 @@ class PlayerTeleportRoutingTest {
 			engine.attachWorld("minecraft:overworld", 10, null);
 			WorldRegionizer regionizer = engine.regionizerFor("minecraft:overworld");
 			regionizer.addChunk(0, 0);  // destination chunk (0,0)
-			regionizer.addChunk(50, 50); // source chunk — a DIFFERENT region
+			regionizer.addChunk(400, 400); // source chunk — a DIFFERENT region
 
-			var sourceRegion = regionizer.ownerOfChunk(50, 50);
+			var sourceRegion = regionizer.ownerOfChunk(400, 400);
 			ThreadOwnership.enterRegion(sourceRegion);
 
 			CountDownLatch ran = new CountDownLatch(1);
@@ -147,8 +147,8 @@ class PlayerTeleportRoutingTest {
 			engine.attachWorld("minecraft:overworld", 10, null);
 			WorldRegionizer regionizer = engine.regionizerFor("minecraft:overworld");
 			regionizer.addChunk(0, 0);
-			regionizer.addChunk(50, 50);
-			ThreadOwnership.enterRegion(regionizer.ownerOfChunk(50, 50));
+			regionizer.addChunk(400, 400);
+			ThreadOwnership.enterRegion(regionizer.ownerOfChunk(400, 400));
 
 			AtomicInteger runs = new AtomicInteger();
 			assertTrue(RegionTransitions.dispatchKeyed(engine, "minecraft:overworld",

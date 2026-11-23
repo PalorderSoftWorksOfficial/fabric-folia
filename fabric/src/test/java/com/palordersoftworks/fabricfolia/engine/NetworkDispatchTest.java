@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -99,6 +100,21 @@ class NetworkDispatchTest {
 		} finally {
 			engine.shutdown(5000);
 		}
+	}
+
+	@Test
+	void disabledEnginePreservesVanillaConnectionActionOnNetworkContext() {
+		ThreadOwnership.enterSide(com.palordersoftworks.fabricfolia.api.ThreadContext.Kind.NETWORK);
+		AtomicInteger executions = new AtomicInteger();
+		NetworkDispatch.runForConnection(null, null, executions::incrementAndGet);
+		assertEquals(1, executions.get());
+	}
+
+	@Test
+	void disabledEnginePreservesVanillaConnectionActionOnExistingContext() {
+		AtomicInteger executions = new AtomicInteger();
+		NetworkDispatch.runForConnection(null, null, executions::incrementAndGet);
+		assertEquals(1, executions.get());
 	}
 
 	@Test

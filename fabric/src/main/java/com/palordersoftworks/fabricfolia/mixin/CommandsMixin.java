@@ -54,7 +54,8 @@ public abstract class CommandsMixin {
 			com.mojang.brigadier.ParseResults<CommandSourceStack> parseResults,
 			String command, CallbackInfo ci) {
 		FabricFoliaEngine engine = FabricFoliaMod.engine();
-		if (engine == null) {
+		if (engine == null
+				|| !com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")) {
 			return;
 		}
 		CommandSourceStack source = parseResults.getContext().getSource();
@@ -73,6 +74,10 @@ public abstract class CommandsMixin {
 	private void fabricfolia$restoreConsoleContext(
 			com.mojang.brigadier.ParseResults<CommandSourceStack> parseResults,
 			String command, CallbackInfo ci) {
+		if (FabricFoliaMod.engine() == null
+				|| !com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")) {
+			return;
+		}
 		Deque<ThreadOwnership.Context> tokens = CONSOLE_TOKENS.get();
 		ThreadOwnership.Context token = tokens.pollLast();
 		if (token != null) {
@@ -86,8 +91,9 @@ public abstract class CommandsMixin {
 			com.mojang.brigadier.ParseResults<CommandSourceStack> parseResults,
 			String command, CallbackInfo ci) {
 		FabricFoliaEngine engine = FabricFoliaMod.engine();
-		if (engine == null) {
-			return; // engine down: vanilla threading is correct as-is
+		if (engine == null
+				|| !com.palordersoftworks.fabricfolia.patches.PatchRegistry.isEnabled("packet-dispatch")) {
+			return;
 		}
 		CommandSourceStack source = parseResults.getContext().getSource();
 		net.minecraft.world.entity.Entity entity = source.getEntity();

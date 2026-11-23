@@ -80,6 +80,10 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	/** Registry of live task queues by region (see class docs re: spec 18). */
 	private final Map<Region, RegionTaskQueue> queuesByRegion = new ConcurrentHashMap<>();
 
+	private final AtomicLong rehomedAtExecution = new AtomicLong();
+	private final AtomicLong executedWithoutOwner = new AtomicLong();
+	private final AtomicBoolean unownedTaskReported = new AtomicBoolean();
+
 	/** Engine-provided region tick body. Receives the region, runs in its context. */
 	private volatile Consumer<Region> regionTickBody;
 	/** Diagnostics sink for dropped tasks and failures (spec 26 uses this too). */
@@ -138,14 +142,14 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	 * Full constructor: takes an explicit per-region failure policy (mandate
 	 * §34). Tests use null for the legacy report-only behavior.
 	 */
-	private RegionScheduler(WorldRegionizer regionizer,
+	RegionScheduler(WorldRegionizer regionizer,
 	                       WorkerPool pool,
 	                       int workerThreadCount,
-                       ValidationMode mode,
-                       Consumer<Region> regionTickBody,
-                       Consumer<String> diagnostics,
-                       boolean ownsPool,
-                       RegionFailurePolicy failurePolicy) {
+	                       ValidationMode mode,
+	                       Consumer<Region> regionTickBody,
+	                       Consumer<String> diagnostics,
+	                       boolean ownsPool,
+	                       RegionFailurePolicy failurePolicy) {
 		this.regionizer = Objects.requireNonNull(regionizer, "regionizer");
 		this.pool = pool;
 		this.poolThreadCount = workerThreadCount;
@@ -205,6 +209,14 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 			total += queue.size();
 		}
 		return total;
+	}
+
+	public long tasksRehomedAtExecution() {
+		return rehomedAtExecution.get();
+	}
+
+	public long tasksExecutedWithoutOwner() {
+		return executedWithoutOwner.get();
 	}
 
 	/** @return cumulative regions absorbed by merges (structural diagnostics). */
@@ -293,8 +305,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 
 	@Override
 	public void onRegionMerged(Region donor, Region into) {
-		// Runs under the regionizer structure lock (merges happen there), so
-		// this is serialized against every other structural transition.
+		failurePolicy.onRegionRemoved(donor);
 		RegionTaskQueue donorQueue = queuesByRegion.remove(donor);
 		if (donorQueue == null) {
 			return;
@@ -360,6 +371,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		// Runs under the regionizer structure lock. DROP policy (spec 16):
 		// dead-region tasks are never executed elsewhere — they were scheduled
 		// under an ownership contract the dead region no longer provides.
+		failurePolicy.onRegionRemoved(region);
 		RegionTaskQueue queue = queuesByRegion.remove(region);
 		if (queue != null) {
 			int dropped = queue.dropAll();
@@ -430,6 +442,10 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 	 *        under is then the best-known owner)
 	 */
 	public boolean enqueue(Region region, Runnable task, Long targetChunkPos) {
+		return enqueue(region, task, targetChunkPos, null);
+	}
+
+	public boolean enqueue(Region region, Runnable task, Long targetChunkPos, Runnable onDropped) {
 		Objects.requireNonNull(task, "task");
 		if (closed) {
 			// Post-shutdown: workers are gone, nothing will ever drain this —
@@ -443,11 +459,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		if (queue == null) {
 			queue = queuesByRegion.computeIfAbsent(region, r -> new RegionTaskQueue());
 		}
-		if (targetChunkPos != null) {
-			queue.add(task, targetChunkPos);
-		} else {
-			queue.add(task);
-		}
+		queue.add(task, targetChunkPos == null ? RegionTaskQueue.Entry.NO_POSITION : targetChunkPos, onDropped);
 		boolean dead = regionizer.underStructureLock(region::isDead);
 		if (dead) {
 			queue.removeTask(task);
@@ -520,11 +532,16 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 
 	/** Position-aware delayed variant (see {@link #enqueue(Region, Runnable, Long)}). */
 	public boolean enqueueDelayed(Region region, int delayTicks, Runnable task, Long targetChunkPos) {
+		return enqueueDelayed(region, delayTicks, task, targetChunkPos, null);
+	}
+
+	public boolean enqueueDelayed(Region region, int delayTicks, Runnable task, Long targetChunkPos,
+			Runnable onDropped) {
 		if (delayTicks <= 0) {
-			return enqueue(region, task, targetChunkPos);
+			return enqueue(region, task, targetChunkPos, onDropped);
 		}
 		long target = region.tickCount() + delayTicks;
-		return enqueue(region, new DelayedRegionTask(target, task), targetChunkPos);
+		return enqueue(region, new DelayedRegionTask(target, task), targetChunkPos, onDropped);
 	}
 
 	public boolean isClosed() {
@@ -653,6 +670,8 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 		long start = nanoClock.getAsLong();
 		region.markTickStart();
 		ThreadOwnership.Context token = ThreadOwnership.enterRegion(regionInfoOf(region));
+		boolean abortRegion = false;
+		Throwable abortCause = null;
 		try {
 			// The tick has STARTED: advance the counter before draining so the
 			// delayed-task time base reads "current tick number" uniformly —
@@ -677,6 +696,8 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 				long drainDeadline = nanoClock.getAsLong() + DRAIN_BUDGET_NANOS;
 				int drained = 0;
 				java.util.ArrayList<RegionTaskQueue.Entry> notDueYet = null;
+				long lastPos = RegionTaskQueue.Entry.NO_POSITION;
+				Region lastOwner = null;
 				RegionTaskQueue.Entry entry;
 				while (drained < DRAIN_MAX_ENTRIES
 						&& nanoClock.getAsLong() < drainDeadline
@@ -684,6 +705,28 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 					drained++;
 					Runnable task = entry.task();
 					try {
+						long pos = entry.chunkPos();
+						if (pos != RegionTaskQueue.Entry.NO_POSITION) {
+							if (pos != lastPos) {
+								lastPos = pos;
+								lastOwner = ownerOfPackedChunk(pos);
+							}
+							if (lastOwner != region && rehomeToOwner(region, lastOwner, entry)) {
+								continue;
+							}
+							if (lastOwner == null || lastOwner.isDead()) {
+								lastOwner = ownerOfPackedChunk(pos);
+								if (lastOwner == null || lastOwner.isDead()) {
+									executedWithoutOwner.incrementAndGet();
+									if (unownedTaskReported.compareAndSet(false, true)) {
+										diagnostics.accept("Fabric-Folia: task for chunk "
+												+ chunkPosX(pos) + "," + chunkPosZ(pos)
+												+ " had no live owner; executed in " + region
+												+ " (terminal local execution, counted in tasksExecutedWithoutOwner)");
+									}
+								}
+							}
+						}
 						if (task instanceof DelayedRegionTask delayed
 								&& delayed.targetTick() > region.tickCount()) {
 							if (notDueYet == null) {
@@ -694,6 +737,7 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 						}
 						long taskStart = nanoClock.getAsLong();
 						task.run();
+						failurePolicy.onSuccess(region);
 						long taskDur = nanoClock.getAsLong() - taskStart;
 						if (taskDur > 1_000_000_000L) {
 							diagnostics.accept("SLOW TASK in " + region + ": " + (taskDur / 1_000_000) + "ms");
@@ -706,17 +750,25 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 						// failure policy — reported with full context, never silent;
 						// a region that fails every tick is aborted rather than
 						// wedging its chunks as eternal TICKING.
-						failurePolicy.reportTaskFailure(region, "queued task", t);
+						if (failurePolicy.reportTaskFailure(region, "queued task", t)
+								== RegionFailurePolicy.Action.ABORT_REGION) {
+							abortCause = t;
+							abortRegion = true;
+							break;
+						}
 					}
 				}
 				if (notDueYet != null) {
 					for (RegionTaskQueue.Entry pending : notDueYet) {
-						queue.add(pending.task(), pending.chunkPos());
+						queue.add(pending.task(), pending.chunkPos(), pending.onDropped());
 					}
 				}
 			}
 			// 2. The region tick body (engine hook; vanilla integration later).
-			regionTickBody.accept(region);
+			if (!abortRegion) {
+				regionTickBody.accept(region);
+				failurePolicy.onSuccess(region);
+			}
 		} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
 				diagnostics.accept("Region tick fatal in " + region + ": " + fatal);
 				throw fatal;
@@ -740,7 +792,11 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 				diagnostics.accept("SLOW TICK " + region + ": " + (duration / 1_000_000) + "ms");
 			}
 			try {
-				regionizer.completeTick(region, duration);
+				if (abortRegion) {
+					regionizer.abortTick(region, abortCause);
+				} else {
+					regionizer.completeTick(region, duration);
+				}
 			} catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
 					diagnostics.accept("FATAL: region tick-end protocol hit a fatal error for " + region + ": " + fatal);
 					throw fatal;
@@ -758,6 +814,39 @@ public final class RegionScheduler implements AutoCloseable, WorldRegionizer.Lis
 				}
 			}
 		}
+	}
+
+	private Region ownerOfPackedChunk(long packedPos) {
+		return regionizer.ownerOfChunk(chunkPosX(packedPos), chunkPosZ(packedPos));
+	}
+
+	private static final int REHOME_ATTEMPTS = 4;
+
+	boolean rehomeToOwner(Region holder, Region owner, RegionTaskQueue.Entry entry) {
+		long pos = entry.chunkPos();
+		for (int attempt = 0; attempt < REHOME_ATTEMPTS; attempt++) {
+			if (owner == holder) {
+				return false;
+			}
+			if (owner != null && !owner.isDead()) {
+				if (enqueue(owner, entry.task(), pos, entry.onDropped())) {
+					rehomedAtExecution.incrementAndGet();
+					return true;
+				}
+				if (closed) {
+					return false;
+				}
+			}
+			owner = ownerOfPackedChunk(pos);
+			if (owner == null) {
+				return false;
+			}
+		}
+		return false;
+	}
+
+	void reportDroppedTaskFailure(Throwable cause) {
+		diagnostics.accept("Fabric-Folia: dropped-task retirement failed: " + cause);
 	}
 
 	private RegionInfo regionInfoOf(Region region) {

@@ -18,6 +18,14 @@ import net.minecraft.network.PacketListener;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketUtils;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ServerboundContainerSlotStateChangedPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
+import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
+import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
@@ -119,32 +127,14 @@ public final class RegionPlayerRouting {
 	/** Respawn commands deliberately left on the server-thread packet queue. */
 	private static final java.util.concurrent.atomic.AtomicLong RESPAWN_COMMANDS =
 			new java.util.concurrent.atomic.AtomicLong();
+	private static final java.util.concurrent.atomic.AtomicLong DEFERRED_CLOSED_TRANSPORT_TICKS =
+			new java.util.concurrent.atomic.AtomicLong();
+	private static final java.util.concurrent.atomic.AtomicLong DEFERRED_INVALID_PLAYER_TICKS =
+			new java.util.concurrent.atomic.AtomicLong();
 
 	private RegionPlayerRouting() {
 	}
 
-	/**
-	 * Decides whether {@code connection}'s per-tick body should move to the
-	 * region owning the player's chunk, and stages it there when so.
-	 *
-	 * <p>Server thread only (the SCL tick iterator). Returns false when the
-	 * vanilla server-thread path should run the body inline (engine down,
-	 * pre-play-phase listener, disconnecting or memory connection, unowned
-	 * chunks — the caller then runs vanilla behavior unchanged).</p>
-	 *
-	 * <p><strong>Ordering guarantee:</strong> the body is staged into the
-	 * hub's PLAYER slice and flushed with the tick's other staged work —
-	 * after every server-thread pass of this tick (the hub's documented
-	 * stage-then-flush contract). Declared last in {@code Slice}, the PLAYER
-	 * slice flushes after the entity slice, preserving vanilla's intra-tick
-	 * order (entity pass, then {@code tickConnection}) per region. The owning
-	 * region is resolved at flush from the player's post-pass chunk.</p>
-	 *
-	 * @param connection the connection whose body is being ticked
-	 * @param body       vanilla's {@code Connection.tick()} body as a
-	 *                   runnable (the capture mixin's staged call)
-	 * @return true when the body was staged (caller must NOT run it inline)
-	 */
 	public static boolean stageConnectionTick(Connection connection,
 	                                          Runnable body) {
 		FabricFoliaEngine engine = FabricFoliaMod.engine();
@@ -158,15 +148,13 @@ public final class RegionPlayerRouting {
 		if (connection.isMemoryConnection()) {
 			return false; // in-process client: its loop discipline is the server's own
 		}
+		ServerPlayer player = gameListener.player;
 		if (!connection.isConnected()) {
-			// A dying connection's tick reaches handleDisconnection →
-			// PlayerList removal — global player state. Vanilla's server-thread
-			// path owns it; the disconnect lands this tick, so skipping one
-			// staged body changes nothing observable.
+			releaseStagedEntityBody(player, player == null || player.isRemoved());
 			return false;
 		}
-		ServerPlayer player = gameListener.player;
 		if (player == null || player.isRemoved() || player.level().isClientSide()) {
+			releaseStagedEntityBody(player, true);
 			return false;
 		}
 		if (!(player.level() instanceof ServerLevel level)) {
@@ -176,41 +164,79 @@ public final class RegionPlayerRouting {
 		if (hub == null || !hub.stagingEnabled(RegionStageHub.Slice.PLAYER)) {
 			return false;
 		}
-		if (!hub.vanillaNeighborhoodLoaded(player.chunkPosition())) {
-			// The staged body runs the physics chain (doTick -> Player.tick),
-			// which can request edge-adjacent chunk data; a neighborhood not
-			// fully loaded in VANILLA's own terms would park a worker on a
-			// synchronous chunk load the worker cannot pump (the same hazard
-			// the entity pass gates). Server-thread vanilla probe: getChunkNow
-			// never blocks there.
-			return false;
-		}
-		if (!hub.stageIfRoom(RegionStageHub.Slice.PLAYER,
-				new StagedConnectionBody(player, body))) {
-			// Backlog-suppressed: the caller runs the connection tick
-			// vanilla on the server thread this tick.
+		if (!hub.stagePlayerConnection(player,
+				position -> new StagedConnectionBody(position,
+						connection::isConnected, () -> playerIsValid(connection), body))) {
 			return false;
 		}
 		STAGED_CONNECTIONS.incrementAndGet();
 		return true;
 	}
 
-	/**
-	 * The staged connection body: its position resolves the owning region at
-	 * flush (the player's post-pass chunk), and the hub's runSafely guard
-	 * isolates a failed body from its worker and from the ownership graph.
-	 */
-	private record StagedConnectionBody(ServerPlayer player, Runnable body)
-			implements RegionStageHub.Positioned, Runnable {
+	static final class StagedConnectionBody implements RegionStageHub.Positioned, Runnable {
+
+		private final ChunkPos position;
+		private final java.util.function.BooleanSupplier transportOpen;
+		private final java.util.function.BooleanSupplier playerValid;
+		private final Runnable body;
+
+		StagedConnectionBody(ChunkPos position, java.util.function.BooleanSupplier transportOpen,
+		                     java.util.function.BooleanSupplier playerValid, Runnable body) {
+			this.position = position;
+			this.transportOpen = transportOpen;
+			this.playerValid = playerValid;
+			this.body = body;
+		}
 
 		@Override
 		public ChunkPos fabricfolia$position() {
-			return player.chunkPosition();
+			return position;
 		}
 
 		@Override
 		public void run() {
+			if (!transportOpen.getAsBoolean()) {
+				DEFERRED_CLOSED_TRANSPORT_TICKS.incrementAndGet();
+				deferToServerThread();
+				return;
+			}
+			if (!playerValid.getAsBoolean()) {
+				DEFERRED_INVALID_PLAYER_TICKS.incrementAndGet();
+				deferToServerThread();
+				return;
+			}
 			body.run();
+		}
+
+		private void deferToServerThread() {
+			if (ThreadOwnership.current().kind() == ThreadContext.Kind.REGION) {
+				ServerThreadDeferral.defer(body);
+			} else {
+				body.run();
+			}
+		}
+	}
+
+	static boolean playerIsValid(Connection connection) {
+		if (!(connection.getPacketListener() instanceof ServerGamePacketListenerImpl gameListener)) {
+			return false;
+		}
+		ServerPlayer player = gameListener.player;
+		return player != null && !player.isRemoved() && !player.level().isClientSide();
+	}
+
+	private static void releaseStagedEntityBody(ServerPlayer player, boolean playerRemoved) {
+		if (player == null || !(player.level() instanceof ServerLevel level)) {
+			return;
+		}
+		RegionStageHub hub = RegionStageHub.hubFor(level);
+		if (hub == null) {
+			return;
+		}
+		if (playerRemoved) {
+			hub.cancelPlayerEntityBody(player.getUUID());
+		} else {
+			hub.reclaimPlayerEntityBody(player.getUUID());
 		}
 	}
 
@@ -255,21 +281,22 @@ public final class RegionPlayerRouting {
 				&& command.getAction() == ServerboundClientCommandPacket.Action.PERFORM_RESPAWN;
 	}
 
-	/**
-	 * True when the current region-owned packet path must deliberately let
-	 * vanilla re-home this packet to the server-thread processor queue.
-	 *
-	 * <p>The check is intentionally narrow: it applies only to a live engine
-	 * with player-path staging enabled, the current REGION context, and the
-	 * {@code PERFORM_RESPAWN} action. All other packets retain the normal
-	 * owner-region routing decision.</p>
-	 */
-	public static boolean requiresServerThreadForRespawn(Packet<?> packet) {
-		if (!isRespawnCommand(packet)
-				|| ThreadOwnership.current().kind() != ThreadContext.Kind.REGION) {
-			return false;
-		}
-		return FabricFoliaMod.engine() != null && stagingPlayerPath();
+	public static boolean requiresServerThreadForPacket(Packet<?> packet) {
+		return packet instanceof ServerboundContainerClickPacket
+				|| packet instanceof ServerboundContainerButtonClickPacket
+				|| packet instanceof ServerboundContainerClosePacket
+				|| packet instanceof ServerboundContainerSlotStateChangedPacket
+				|| packet instanceof ServerboundSetCreativeModeSlotPacket
+				|| packet instanceof ServerboundPlayerActionPacket
+				|| packet instanceof ServerboundUseItemOnPacket
+				|| packet instanceof ServerboundUseItemPacket;
+	}
+
+	public static boolean canHandlePacketOnCurrentThread(Packet<?> packet,
+			boolean processorThread, boolean ownerRegion) {
+		return processorThread || (ownerRegion
+				&& !isRespawnCommand(packet)
+				&& !requiresServerThreadForPacket(packet));
 	}
 
 	/** Counts a respawn command deliberately left on the server-thread queue. */
@@ -292,6 +319,10 @@ public final class RegionPlayerRouting {
 	                                             Packet<?> packet) {
 		FabricFoliaEngine engine = FabricFoliaMod.engine();
 		if (engine == null || !stagingPlayerPath()) {
+			return false;
+		}
+		if (requiresServerThreadForPacket(packet)) {
+			noteRehomedToServer();
 			return false;
 		}
 		if (isRespawnCommand(packet)) {
@@ -390,9 +421,23 @@ public final class RegionPlayerRouting {
 	/** One-line summary for {@code /folia metrics}. */
 	public static String metricsLine() {
 		return "player path: connection ticks staged=" + STAGED_CONNECTIONS.get()
+				+ ", deferred(transport closed)=" + DEFERRED_CLOSED_TRANSPORT_TICKS.get()
+				+ ", deferred(player invalid)=" + DEFERRED_INVALID_PLAYER_TICKS.get()
 				+ ", packet rehomes region=" + REHOME_REGION.get()
 				+ " server=" + REHOME_SERVER.get()
 				+ ", respawns server-thread=" + RESPAWN_COMMANDS.get();
+	}
+
+	public static long closedTransportDeferredTicks() {
+		return DEFERRED_CLOSED_TRANSPORT_TICKS.get();
+	}
+
+	public static long invalidPlayerDeferredTicks() {
+		return DEFERRED_INVALID_PLAYER_TICKS.get();
+	}
+
+	public static long deferredConnectionTicks() {
+		return DEFERRED_CLOSED_TRANSPORT_TICKS.get() + DEFERRED_INVALID_PLAYER_TICKS.get();
 	}
 
 	private static boolean fabricfolia$physicsNeighborhoodLoaded(ServerPlayer player) {

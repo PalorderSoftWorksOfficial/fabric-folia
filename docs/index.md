@@ -11,6 +11,7 @@
 | [Scheduling](../SCHEDULING.md) | Queue, split, merge and tick scheduling semantics |
 | [Testing](../TESTING.md) | Automated checks and production test requirements |
 | [Compatibility](../COMPATIBILITY.md) | Pinned build target and unverified mod compatibility |
+| [Folia parity ledger](folia-parity.md) | Per-subsystem comparison with Folia's execution model and explicit gaps |
 | [Troubleshooting](../TROUBLESHOOTING.md) | Operator diagnostics and incident collection |
 | [Mixins](../MIXINS.md) | Runtime interception inventory and validation caveats |
 

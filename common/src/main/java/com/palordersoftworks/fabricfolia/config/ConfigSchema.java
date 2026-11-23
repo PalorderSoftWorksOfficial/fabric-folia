@@ -136,7 +136,8 @@ public final class ConfigSchema {
 				"Master switch for loading the Fabric-Folia engine and runtime integration.",
 				"",
 				"When false, the engine does not attach worlds, run region schedulers,",
-				"or install its gameplay interception runtime; vanilla execution remains.",
+				"or install its gameplay interception runtime; all patches resolve inactive",
+				"and vanilla execution remains.",
 				"When true, the engine and its region-ownership services are initialized.",
 				"This does NOT enable staged entity or block-entity gameplay by itself.",
 				"",
@@ -183,60 +184,36 @@ public final class ConfigSchema {
 				"Regionized gameplay execution (mandates 15/21/27/37).",
 				"",
 				"What it does:",
-				"  When true, entity tick bodies and block-entity tick bodies",
-				"  execute on the owning region's worker thread instead of the",
-				"  server thread. Vanilla still decides WHAT to tick (its own",
-				"  passes run unchanged on the server thread); the bodies move.",
+				"  When requested, entity and block-entity tick bodies would execute",
+				"  on the owning region's worker instead of the server thread. The",
+				"  R4 safety interlock currently overrides this request and keeps",
+				"  built-in mutation-bearing bodies on the vanilla server thread.",
 				"",
 				"  Scheduled block/fluid tick DRAINS stay on the server thread",
 				"  this phase: their BiConsumer writes cross regions freely, so",
 				"  server-thread execution is the correct owner-confined choice",
 				"  (the drain itself is already O(due), not O(world)).",
 				"",
-				"  Player connection staging is a separate opt-in gate. Keep it",
-				"  disabled until player entity ticks, connection packets,",
-				"  teleport, respawn, and migration have been validated together.",
+				"  Player connection staging is a separate request. The current R4",
+				"  interlock also forces it off; all built-in player physics and",
+				"  packet mutation paths remain on the vanilla server thread.",
 				"",
-				"Default: false (opt in after validating installed mods).",
+				"Default: false. Worker-side world mutation is currently blocked by the",
+				"R4 safety interlock until a synchronous cross-region mutation protocol exists.",
 				"Valid values: true, false",
 				"Restart required: yes.",
 				"Experimental: yes. Not production-certified."}));
 		add(opt(KEY_RANDOM_TICKS, Boolean.class, Boolean.FALSE, v -> v, new String[] {
-				"Regionized random-tick execution (the first vanilla interception).",
+				"Regionized random-tick execution.",
 				"",
-				"What it does:",
-				"  When true, per-chunk random ticking (crop growth, grass spread,",
-				"  fire burn-out, ice/snow melt, leaf decay, copper aging, and the",
-				"  per-chunk precipitation pass) is diverted from the single server",
-				"  thread into the regionizer: each affected chunk is grouped into a",
-				"  dynamic region and its random ticks execute on that region's",
-				"  worker thread, in parallel with other regions.",
-				"",
-				"  When false (default), 100% vanilla execution: this interception",
-				"  is deliberately OFF until an administrator opts in.",
-				"",
-				"This flag controls random ticks only. Entity/block-entity staging",
-				"and player connection staging use their own independent settings.",
-				"",
-				"Known limitation (see THREADING.md): while enabled, random ticks",
-				"  mutate blocks on region workers while scheduled ticks (block and",
-				"  fluid, e.g. falling sand, water flow scheduling) still execute on",
-				"  the server thread. These two categories do not yet share the",
-				"  region boundary, so a mod or datapack touching both in the same",
-				"  area can observe interleaved execution. Test datapacks and mods",
-				"  that combine scheduled ticks with random tick mutations.",
+				"When requested, per-chunk random ticks would be routed to the",
+				"owning region worker. The R4 safety interlock currently overrides",
+				"this request and keeps random ticks on the vanilla server thread",
+				"until a synchronous cross-region mutation protocol is implemented.",
 				"",
 				"Default: false",
 				"Valid values: true, false",
-				"Performance: random-tick work moves OFF the server thread; helps",
-				"  most when random ticking is a measurable server-thread cost",
-				"  (large view/simulation distances, many loaded chunks).",
-				"Compatibility: mods hooking random tick events see the same calls,",
-				"  now possibly from a non-server thread. Block state mutation",
-				"  itself remains correct (all mutation for an area lands on the",
-				"  region that owns it); timing interleavings change.",
-				"Safety: experimental interception; disable to return to vanilla.",
-				"Restart required: no - applies live at the next tick cycle."
+				"Restart required: yes."
 		}));
 
 		add(opt(KEY_SECTION_SIZE, Integer.class, 8, v -> {
@@ -406,7 +383,7 @@ public final class ConfigSchema {
 				"server-thread couplings inside the staged body (chunk-view move,",
 				"game-mode tick) are bounced to the server thread automatically.",
 				"",
-				"Default: false (opt in only after player-path compatibility testing).",
+				"Default: false. Requests are currently blocked by the R4 safety interlock.",
 				"Valid values: true, false",
 				"Performance: one region-queue enqueue per player per tick.",
 				"Experimental: yes. Restart required: yes."
@@ -433,27 +410,32 @@ public final class ConfigSchema {
 				"Restart required: yes.",
 				"Emergency switch: /folia vanilla kill disables this layer until restart."
 		}));
-		add(opt(KEY_PATCH_ENTITY_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+		add(opt(KEY_PATCH_ENTITY_TICK, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Minecraft layer: entity tick staging executes on the owning",
-				"region's worker instead of the server thread.",
+				"region's worker instead of the server thread. This includes item",
+				"entity pickup, movement, merging and despawn logic.",
 				"",
-				"Default: true",
-				"Restart required: yes. When disabled, vanilla server-thread",
-				"entity ticking is used (the original path)."
+				"Default: false. Requests are currently blocked by the R4 safety interlock.",
+				"Restart required: yes. When disabled, all entity ticking stays",
+				"on the vanilla server thread. Keep disabled for main-thread-only",
+				"entity mods and mechanisms."
 		}));
-		add(opt(KEY_PATCH_CHUNK_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
-				"Minecraft layer: chunk tick staging (block entities and scheduled",
-				"ticks) executes region-owned.",
+		add(opt(KEY_PATCH_CHUNK_TICK, Boolean.class, Boolean.FALSE, v -> v, new String[] {
+				"Minecraft layer: block-entity and scheduled block/fluid tick",
+				"bodies execute on the owning region's worker instead of the",
+				"server thread. These include many redstone and interactive-block",
+				"update chains.",
 				"",
-				"Default: true",
-				"Restart required: yes. When disabled, vanilla server-thread",
-				"execution is used."
+				"Default: false. Requests are currently blocked by the R4 safety interlock.",
+				"Restart required: yes. When disabled, block entities and",
+				"scheduled block/fluid ticks use vanilla server-thread execution.",
+				"Keep disabled for redstone and main-thread-only block mods."
 		}));
-		add(opt(KEY_PATCH_RANDOM_TICK, Boolean.class, Boolean.TRUE, v -> v, new String[] {
+		add(opt(KEY_PATCH_RANDOM_TICK, Boolean.class, Boolean.FALSE, v -> v, new String[] {
 				"Minecraft layer: per-chunk random ticks (crop growth, fire, melt,",
 				"decay) execute on the owning region's worker.",
 				"",
-				"Default: true",
+				"Default: false. Requests are currently blocked by the R4 safety interlock.",
 				"Restart required: yes. Takes effect only when",
 				"general.regionized-random-ticks is also true; when disabled,",
 				"vanilla server-thread random ticking is used."
@@ -462,7 +444,7 @@ public final class ConfigSchema {
 				"Network layer: packet re-home dispatch routes to the owning region",
 				"instead of the server thread where ownership allows.",
 				"",
-				"Default: true",
+				"Default: true. Requests are currently blocked by the R4 safety interlock.",
 				"Restart required: yes. When disabled, vanilla packet queueing is",
 				"used. Protocol correctness is preserved either way."
 		}));

@@ -1,0 +1,7 @@
+You are the optimization-mod compatibility specialist. Read FREEBUFF.md and AGENTS.md first, then COMPATIBILITY.md, MIXINS.md, THREADING.md, docs/status.md, docs/folia-parity.md and TEAM_REPORT_API.md.
+
+Audit Fabric + Fabric API + Fabric-Folia baseline, then Lithium, C2ME, FerriteCore, Krypton, VMP, ScalableLux individually and selected combinations (Lithium+C2ME+VMP, C2ME+ScalableLux); Carpet and TIS-Addition where applicable. Study Fabrolia's public compatibility contracts conceptually; do not copy/derive GPL-3.0 code. Current checkout has dirty user work and is four commits behind origin/main; preserve it, no reset/clean/stash/commit/push.
+
+Write tools/freebuff/reports/compatibility.md with exact target versions, source evidence, thread assumptions, async chunk IO, entity tracking, collision indexes, light engine, tickets, spawning, block entities, packets, mixin composition, conditional mixin cancellation, known conflicts and a matrix with separate evidence levels: source inspection, mixin export, startup, gameplay, soak. Never claim compatibility from metadata alone.
+
+You may add a standalone manifest/script only under tools/freebuff/compatibility/. Do not edit COMPATIBILITY.md or production Java during reconciliation. Do not cancel integrations or weaken gates. Report exact files/methods for needed production fixes. No invented claims; no blanket compatibility claim.

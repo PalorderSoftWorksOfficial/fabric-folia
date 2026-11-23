@@ -196,6 +196,43 @@ class RegionEntityRegistryTest {
 	}
 
 	@Test
+	void splitLeavesEachEntityInExactlyOneRegionSet() {
+		WorldRegionizer rz = new WorldRegionizer("test:world", new RegionizerConfig(2, 1, 2, 4, 10),
+				new AtomicLong(1)::getAndIncrement, System::nanoTime);
+		HomeChunks homes = new HomeChunks();
+		RegionEntityRegistry registry = newRegistry(rz, homes);
+
+		for (int x = 0; x <= 33; x++) rz.addChunk(x, 0);
+		Region parent = rz.ownerOfChunk(0, 0);
+		registry.register("left", parent);
+		registry.register("right", parent);
+		registry.register("doomed", parent);
+		homes.homes.put("left", RegionScheduler.packChunkPos(2, 0));
+		homes.homes.put("right", RegionScheduler.packChunkPos(30, 0));
+		homes.homes.put("doomed", RegionScheduler.packChunkPos(16, 0));
+
+		for (int x = 10; x <= 23; x++) rz.removeChunk(x, 0);
+		assertTrue(rz.tryBeginTick(parent));
+		rz.completeTick(parent, 1);
+
+		Region left = rz.ownerOfChunk(0, 0);
+		Region right = rz.ownerOfChunk(33, 0);
+		assertNotNull(right, "split must be real");
+		assertTrue(left != right, "split must produce two regions");
+
+		assertEquals(Set.of("left"), entitySetInContext(registry, left),
+				"the region that kept the left cluster holds exactly its own entity");
+		assertEquals(Set.of("right"), entitySetInContext(registry, right),
+				"the split child holds exactly the entity homed on its territory");
+		for (Region live : rz.liveRegions()) {
+			assertFalse(entitySetInContext(registry, live).contains("doomed"),
+					"a retired handle must appear in no region's set");
+		}
+		assertEquals(2, registry.trackedCount());
+		assertEquals(1, registry.retiredCount());
+	}
+
+	@Test
 	void perRegionSetEnforcesOwnerContext() {
 		WorldRegionizer rz = newRegionizer();
 		Region a = rz.addChunk(0, 0);
@@ -330,6 +367,49 @@ class RegionEntityRegistryTest {
 		assertEquals(entities, counted.get(), "set membership must cover every entity exactly once");
 		assertEquals(0, registry.retiredCount(), "no entity may be retired by a storm");
 		assertTrue(registry.migrationsCompleted() > 0, "migrations must actually have happened");
+	}
+
+	@Test
+	void concurrentRegisterAndUnregisterLeaveNoOrphanSetEntries() throws Exception {
+		WorldRegionizer rz = newRegionizer();
+		Region a = rz.addChunk(0, 0);
+		RegionEntityRegistry registry = newRegistry(rz, new HomeChunks());
+
+		final int threads = 8;
+		final int perThread = 500;
+		CountDownLatch startGun = new CountDownLatch(1);
+		CountDownLatch done = new CountDownLatch(threads);
+		for (int t = 0; t < threads; t++) {
+			final int id = t;
+			Thread worker = new Thread(() -> {
+				try {
+					startGun.await();
+					for (int i = 0; i < perThread; i++) {
+						String handle = "h-" + id + "-" + i;
+						if (registry.register(handle, a) && (i % 2 == 0)) {
+							registry.unregister(handle);
+						}
+					}
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+				} finally {
+					done.countDown();
+				}
+			}, "register-" + id);
+			worker.start();
+		}
+		startGun.countDown();
+		assertTrue(done.await(30, TimeUnit.SECONDS), "registrars must finish");
+
+		Set<Object> set = registry.perRegionEntities().peekForDiagnostics(a);
+		assertNotNull(set);
+		assertEquals(threads * perThread / 2, registry.trackedCount(),
+				"every even-indexed registration must have been unregistered");
+		assertEquals(registry.trackedCount(), set.size(),
+				"the per-region set must match the authoritative map exactly (no orphan entries)");
+		for (Object handle : set) {
+			assertSame(a, registry.ownerOfHandle(handle), handle + " in the set must map to its region");
+		}
 	}
 
 	private static RegionScheduler newScheduler(WorldRegionizer rz, int workers) {

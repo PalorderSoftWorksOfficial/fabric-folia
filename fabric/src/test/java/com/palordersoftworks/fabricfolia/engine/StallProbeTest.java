@@ -19,6 +19,13 @@ class StallProbeTest {
 	Path tempDir;
 
 	@Test
+	void startupInitializationIsSuppressedUntilTheFirstServerTick() {
+		assertTrue(StallProbe.shouldSuppressPreFirstTick(0));
+		assertTrue(StallProbe.shouldSuppressPreFirstTick(-1));
+		assertFalse(StallProbe.shouldSuppressPreFirstTick(1));
+	}
+
+	@Test
 	void emptyServerPauseIsSuppressedOnlyAfterConfiguredThreshold() {
 		assertFalse(StallProbe.shouldSuppressEmptyPause(true, 60, 0, 1199));
 		assertTrue(StallProbe.shouldSuppressEmptyPause(true, 60, 0, 1200));

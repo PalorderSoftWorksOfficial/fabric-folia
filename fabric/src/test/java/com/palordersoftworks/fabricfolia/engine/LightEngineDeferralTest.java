@@ -1,50 +1,37 @@
 package com.palordersoftworks.fabricfolia.engine;
 
+import com.palordersoftworks.fabricfolia.api.ThreadContext;
+import com.palordersoftworks.fabricfolia.thread.ThreadOwnership;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class LightEngineDeferralTest {
 
-    @BeforeEach
-    void setServerThread() {
-        ServerThreadDeferral.noteServerThread(Thread.currentThread());
-        ServerThreadDeferral.clearAll();
-    }
-
     @AfterEach
-    void clear() {
-        ServerThreadDeferral.clearAll();
-        ServerThreadDeferral.noteServerThread(Thread.currentThread());
+    void cleanup() {
+        ThreadOwnership.clear();
     }
 
     @Test
-    void serverThreadMutationsRunImmediately() {
-        List<Integer> order = new ArrayList<>();
-        LightEngineDeferral.runMutation(() -> order.add(1));
-        assertEquals(List.of(1), order);
-        assertEquals(0, ServerThreadDeferral.pendingCount());
+    void engineOffRunsLightMutationInlineOnNetworkContext() {
+        ThreadOwnership.Context previous = ThreadOwnership.enterSide(ThreadContext.Kind.NETWORK);
+        AtomicInteger executions = new AtomicInteger();
+        try {
+            LightEngineDeferral.runMutation(executions::incrementAndGet);
+            assertEquals(1, executions.get());
+        } finally {
+            ThreadOwnership.exit(previous);
+        }
     }
 
     @Test
-    void workerMutationsDeferAndReplayInSubmissionOrder() throws InterruptedException {
-        List<Integer> order = new ArrayList<>();
-        Thread worker = new Thread(() -> {
-            LightEngineDeferral.runMutation(() -> order.add(1));
-            LightEngineDeferral.runMutation(() -> order.add(2));
-        });
-        worker.start();
-        worker.join();
-
-        assertEquals(List.of(), order);
-        assertEquals(2, ServerThreadDeferral.pendingCount());
-
-        assertEquals(2, ServerThreadDeferral.drainAll());
-        assertEquals(List.of(1, 2), order);
+    void engineOffRunsLightMutationInlineOnUnknownContext() {
+        AtomicInteger executions = new AtomicInteger();
+        LightEngineDeferral.runMutation(executions::incrementAndGet);
+        assertEquals(1, executions.get());
     }
 }
