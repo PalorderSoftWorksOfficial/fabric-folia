@@ -46,6 +46,7 @@ import java.util.List;
 public final class FabricFoliaEngine {
 
 	private final FoliaConfig config;
+	private volatile FoliaConfig runtimeConfig;
 	/** Legacy dispatch policy (mandate §39): where undeclared work runs. */
 	private final com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy legacyDispatchPolicy =
 			new com.palordersoftworks.fabricfolia.scheduler.LegacyDispatchPolicy();
@@ -126,6 +127,7 @@ public final class FabricFoliaEngine {
 	                          java.util.function.Consumer<String> info,
 	                          java.util.function.Consumer<String> error) {
 		this.config = config;
+		this.runtimeConfig = config;
 		this.metrics = new RegionMetrics(FoliaConfig.WorkerThreads.resolve(config.workerThreads()));
 		this.api = new FabricFoliaApiImpl(this);
 		this.workerPool = workerPool;
@@ -1063,6 +1065,26 @@ public final class FabricFoliaEngine {
 
 	public FoliaConfig config() {
 		return config;
+	}
+
+	public FoliaConfig runtimeConfig() {
+		return runtimeConfig;
+	}
+
+	public void applyRuntimeConfig(FoliaConfig next) {
+		this.runtimeConfig = java.util.Objects.requireNonNull(next, "next");
+		com.palordersoftworks.fabricfolia.console.Console.setDebugEnabled(next.debug() || next.debugLogging());
+		if (watchdog != null) {
+			if (next.watchdog()) {
+				watchdog.start();
+			} else {
+				watchdog.stop();
+			}
+		}
+	}
+
+	public boolean watchdogRunning() {
+		return watchdog != null && watchdog.isRunning();
 	}
 
 	/**

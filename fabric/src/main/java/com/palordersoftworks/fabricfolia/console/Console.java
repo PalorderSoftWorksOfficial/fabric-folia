@@ -81,6 +81,7 @@ public final class Console {
 
 	/** Keys whose once-only message has already been emitted. */
 	private static final Set<String> ONCE = ConcurrentHashMap.newKeySet();
+	private static volatile boolean debugEnabled;
 
 	private Console() {
 	}
@@ -160,8 +161,14 @@ public final class Console {
 	}
 
 	/** Debug-gated detail (see {@code diagnostics.debug-logging}). */
+	public static void setDebugEnabled(boolean enabled) {
+		debugEnabled = enabled;
+	}
+
 	public static void debug(String message) {
-		LOGGER.debug(format(Level.DEBUG, message));
+		if (debugEnabled) {
+			LOGGER.debug(format(Level.DEBUG, message));
+		}
 	}
 
 	/**

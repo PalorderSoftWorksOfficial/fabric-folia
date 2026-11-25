@@ -6,6 +6,7 @@
 package com.palordersoftworks.fabricfolia;
 
 import com.palordersoftworks.fabricfolia.config.ConfigException;
+import com.palordersoftworks.fabricfolia.config.ConfigReloadPlan;
 import com.palordersoftworks.fabricfolia.config.FoliaConfig;
 import com.palordersoftworks.fabricfolia.console.CompatScanner;
 import com.palordersoftworks.fabricfolia.console.Console;
@@ -61,6 +62,7 @@ public class FabricFoliaMod implements ModInitializer {
 	// (general.enabled=false) or has already stopped — getServerModName()
 	// runs during loadLevel, before/after the engine's own lifecycle.
 	static volatile FoliaConfig config;
+	static volatile FoliaConfig runtimeConfig;
 	/** The vanilla intercept layer; non-null whenever the engine is live. */
 	private static volatile RegionTickInterceptor interceptor;
 	/** The startup compatibility scan result (for /folia compat). */
@@ -102,8 +104,12 @@ public class FabricFoliaMod implements ModInitializer {
 			config.load();
 			config.freeze();
 			FabricFoliaMod.config = config;
+			FabricFoliaMod.runtimeConfig = config;
+			Console.setDebugEnabled(config.debug() || config.debugLogging());
 		} catch (ConfigException e) {
 			FabricFoliaMod.config = null;
+			FabricFoliaMod.runtimeConfig = null;
+			Console.setDebugEnabled(false);
 			// Actionable, not fatal-to-the-server: vanilla execution continues.
 			Console.error("Configuration is invalid - Fabric Folia is DISABLED and vanilla execution will be used. "
 					+ "Nothing is broken; fix the problem below and restart to enable regionized execution.");
@@ -112,6 +118,8 @@ public class FabricFoliaMod implements ModInitializer {
 			return;
 		} catch (Exception e) {
 			FabricFoliaMod.config = null;
+			FabricFoliaMod.runtimeConfig = null;
+			Console.setDebugEnabled(false);
 			Console.error("Failed to load configuration - Fabric Folia is DISABLED. Problem: " + e);
 			return;
 		}
@@ -565,18 +573,61 @@ public class FabricFoliaMod implements ModInitializer {
 	/** @return the loaded configuration, or null when not loaded (vanilla execution). */
 	public static FoliaConfig config() {
 		return config;
-	}	/**
-	 * Containment sink for entity-hook failures (mixin hooks catch and route
-	 * here): bookkeeping must never break vanilla gameplay, so the failure is
-	 * logged and the hook continues inert.
-	 */
+	}
+
+	public record ConfigReloadResult(java.util.Set<String> liveApplied, java.util.Set<String> restartRequired) {
+	}
+
+	public static synchronized ConfigReloadResult reloadConfiguration() throws java.io.IOException {
+		FoliaConfig startup = config;
+		FoliaConfig previousRuntime = runtimeConfig;
+		Path path = previousRuntime != null ? previousRuntime.file()
+				: startup != null ? startup.file() : Path.of("config", "fabric-folia.yml");
+		FoliaConfig next = FoliaConfig.at(path);
+		next.load();
+		next.freeze();
+
+		java.util.Set<String> runtimeChanged = previousRuntime == null
+				? next.keys() : previousRuntime.changedKeys(next);
+		ConfigReloadPlan.Plan livePlan = ConfigReloadPlan.classify(runtimeChanged);
+		java.util.Set<String> liveApplied = new java.util.TreeSet<>(livePlan.live());
+		java.util.Set<String> startupChanged = startup == null
+				? next.keys() : startup.changedKeys(next);
+		java.util.Set<String> restartRequired = new java.util.TreeSet<>(
+				ConfigReloadPlan.classify(startupChanged).restartRequired());
+		FabricFoliaEngine current = engine;
+		if (current != null) {
+			current.applyRuntimeConfig(next);
+		} else {
+			Console.setDebugEnabled(next.debug() || next.debugLogging());
+			if (liveApplied.remove(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_WATCHDOG)) {
+				restartRequired.add(com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_WATCHDOG);
+			}
+			if (startup == null || !startup.enabled()) {
+				for (String key : java.util.List.of(
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_SERVER_BRAND,
+						com.palordersoftworks.fabricfolia.config.ConfigSchema.KEY_SERVER_BRAND_NAME)) {
+					if (liveApplied.remove(key)) {
+						restartRequired.add(key);
+					}
+				}
+			}
+		}
+		runtimeConfig = next;
+		return new ConfigReloadResult(java.util.Set.copyOf(liveApplied), java.util.Set.copyOf(restartRequired));
+	}
+
+	public static FoliaConfig runtimeConfig() {
+		FoliaConfig current = runtimeConfig;
+		return current != null ? current : config;
+	}
+
 	public static void reportTrackerFailure(String operation, String worldName, RuntimeException e) {
 		Console.error("Fabric Folia entity tracking failure (" + operation
 				+ " in " + worldName + "): " + e
 				+ " - the hook is inert for this entity; gameplay continues on vanilla execution.");
 		Console.error("  Stack trace for the Fabric Folia issue tracker:", e);
 	}
-
 	/**
 	 * Whether the player path (connection tick + packet re-home) stages onto
 	 * owning regions. Resolution order: the config gate

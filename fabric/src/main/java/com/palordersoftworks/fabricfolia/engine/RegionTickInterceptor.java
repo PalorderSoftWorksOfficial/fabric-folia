@@ -254,7 +254,7 @@ public void flushPass(String worldName) {
 	/** @return the debug-logging flag from the live engine (false pre-attach). */
 	private boolean debugLogging() {
 		FabricFoliaEngine current = engineSupplier.get();
-		return current != null && current.config().debugLogging();
+		return current != null && current.runtimeConfig().debugLogging();
 	}
 
 	private boolean fabricfolia$neighborhoodLoaded(ServerLevel level, int chunkX, int chunkZ) {

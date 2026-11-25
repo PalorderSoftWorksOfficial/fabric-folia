@@ -13,10 +13,14 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * The live configuration object: load → validate → migrate → save, with typed
@@ -47,6 +51,32 @@ public final class FoliaConfig {
 	/** @return a config bound to {@code file}, without loading it yet. */
 	public static FoliaConfig at(Path file) {
 		return new FoliaConfig(file);
+	}
+
+	public Path file() {
+		return file;
+	}
+
+	public Set<String> keys() {
+		if (!frozen) {
+			throw new IllegalStateException("Config must be frozen before reading keys");
+		}
+		return Collections.unmodifiableSet(new TreeSet<>(values.keySet()));
+	}
+
+	public Set<String> changedKeys(FoliaConfig other) {
+		if (!frozen || other == null || !other.frozen) {
+			throw new IllegalStateException("Both configs must be frozen before comparison");
+		}
+		Set<String> allKeys = new TreeSet<>(values.keySet());
+		allKeys.addAll(other.values.keySet());
+		Set<String> changed = new TreeSet<>();
+		for (String key : allKeys) {
+			if (!Objects.equals(values.get(key), other.values.get(key))) {
+				changed.add(key);
+			}
+		}
+		return Collections.unmodifiableSet(changed);
 	}
 
 	/**

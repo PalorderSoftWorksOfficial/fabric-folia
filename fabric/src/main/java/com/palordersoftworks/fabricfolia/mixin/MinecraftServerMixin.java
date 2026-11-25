@@ -21,10 +21,11 @@ public class MinecraftServerMixin {
         // Config, not engine: the engine is legitimately absent when
         // general.enabled=false (vanilla mode) — dereferencing it crashed
         // the server at loadLevel before the first tick.
-        FoliaConfig config = FabricFoliaMod.config();
+        FoliaConfig startup = FabricFoliaMod.config();
+        FoliaConfig runtime = FabricFoliaMod.runtimeConfig();
 
-        if (config != null && config.enabled() && config.serverBrand()) {
-            cir.setReturnValue(config.serverBrandName());
+        if (startup != null && startup.enabled() && runtime != null && runtime.serverBrand()) {
+            cir.setReturnValue(runtime.serverBrandName());
         }
     }
 

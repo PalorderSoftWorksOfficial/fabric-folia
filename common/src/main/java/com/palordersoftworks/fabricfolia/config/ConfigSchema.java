@@ -308,7 +308,7 @@ public final class ConfigSchema {
 				"  compatibility bug to report to that mod, not to ignore.",
 				"Safety: OFF hides ownership bugs; do not use OFF unless you accept",
 				"  silent world corruption as a possible outcome.",
-				"Restart required: no - applies live."
+				"Restart required: yes."
 		}));
 
 		add(opt(KEY_DEBUG, Boolean.class, Boolean.FALSE, v -> v, new String[] {
@@ -352,7 +352,7 @@ public final class ConfigSchema {
 				"Default: false",
 				"Valid values: true, false",
 				"Performance: small constant overhead per region tick.",
-				"Restart required: no - applies live."
+				"Restart required: yes."
 		}));
 
 		add(opt(KEY_WATCHDOG, Boolean.class, Boolean.TRUE, v -> v, new String[] {
@@ -368,7 +368,7 @@ public final class ConfigSchema {
 				"Default: true",
 				"Valid values: true, false",
 				"Performance: one lock-free region scan per 10s.",
-				"Restart required: no - applies at next engine start."
+				"Restart required: no - use /folia reload while the server is running."
 		}));
 
 		add(opt(KEY_PLAYER_PATH, Boolean.class, Boolean.FALSE, v -> v, new String[] {
@@ -585,7 +585,7 @@ public final class ConfigSchema {
 				"Default: false",
 				"Valid values: true, false",
 				"Performance: negligible.",
-				"Restart required: no - applies live."
+				"Restart required: yes."
 		}));
 	}
 

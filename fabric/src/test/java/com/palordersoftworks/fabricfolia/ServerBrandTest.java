@@ -24,15 +24,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ServerBrandTest {
 
 	private FoliaConfig savedConfig;
+	private FoliaConfig savedRuntimeConfig;
 
 	@BeforeEach
 	void save() {
 		savedConfig = FabricFoliaMod.config;
+		savedRuntimeConfig = FabricFoliaMod.runtimeConfig;
 	}
 
 	@AfterEach
 	void restore() {
 		FabricFoliaMod.config = savedConfig;
+		FabricFoliaMod.runtimeConfig = savedRuntimeConfig;
 	}
 
 	private static CallbackInfoReturnable<String> invokeBrand() throws Exception {
@@ -47,6 +50,7 @@ class ServerBrandTest {
 	void brandInjectionSurvivesMissingEngineAndConfig() throws Exception {
 		assertNull(FabricFoliaMod.engine(), "this JVM must run without an engine (general.enabled=false state)");
 		FabricFoliaMod.config = null;
+		FabricFoliaMod.runtimeConfig = null;
 
 		CallbackInfoReturnable<String> cir = invokeBrand();
 
@@ -64,11 +68,45 @@ class ServerBrandTest {
 		config.freeze();
 
 		FabricFoliaMod.config = config;
+		FabricFoliaMod.runtimeConfig = config;
 
 		CallbackInfoReturnable<String> cir = invokeBrand();
 
 		assertTrue(cir.isCancelled(), "configured brand must override vanilla");
 		assertEquals("folia-test-brand", cir.getReturnValue());
+	}
+
+	@Test
+	void liveRuntimeBrandOverridesStartupBrandWithoutChangingEngineGate() throws Exception {
+		Path dir = Files.createTempDirectory("folia-brand-runtime");
+		Path startupFile = dir.resolve("startup.yml");
+		Path runtimeFile = dir.resolve("runtime.yml");
+		Files.writeString(startupFile, """
+				general:
+				  enabled: true
+				  server-brand: true
+				  server-brand-name: "startup-brand"
+				""");
+		Files.writeString(runtimeFile, """
+				general:
+				  enabled: false
+				  server-brand: true
+				  server-brand-name: "reloaded-brand"
+				""");
+		FoliaConfig startup = FoliaConfig.at(startupFile);
+		startup.load();
+		startup.freeze();
+		FoliaConfig runtime = FoliaConfig.at(runtimeFile);
+		runtime.load();
+		runtime.freeze();
+
+		FabricFoliaMod.config = startup;
+		FabricFoliaMod.runtimeConfig = runtime;
+
+		CallbackInfoReturnable<String> cir = invokeBrand();
+
+		assertTrue(cir.isCancelled());
+		assertEquals("reloaded-brand", cir.getReturnValue());
 	}
 
 	@Test
@@ -81,6 +119,7 @@ class ServerBrandTest {
 		config.freeze();
 
 		FabricFoliaMod.config = config;
+		FabricFoliaMod.runtimeConfig = config;
 
 		CallbackInfoReturnable<String> cir = invokeBrand();
 
@@ -97,6 +136,7 @@ class ServerBrandTest {
 		config.freeze();
 
 		FabricFoliaMod.config = config;
+		FabricFoliaMod.runtimeConfig = config;
 
 		CallbackInfoReturnable<String> cir = invokeBrand();
 

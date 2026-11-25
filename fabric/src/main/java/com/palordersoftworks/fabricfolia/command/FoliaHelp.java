@@ -15,6 +15,7 @@ public final class FoliaHelp {
                 "<aqua>/folia</aqua> <dark_gray>—</dark_gray> <gray>engine overview</gray>",
                 "<aqua>/folia version</aqua> <dark_gray>—</dark_gray> <gray>version and build information</gray>",
                 "<aqua>/folia help [topic]</aqua> <dark_gray>—</dark_gray> <gray>operator help</gray>",
+                "<aqua>/folia reload</aqua> <dark_gray>—</dark_gray> <gray>validate config and apply supported live settings</gray>",
                 "<aqua>/folia status</aqua> <dark_gray>—</dark_gray> <gray>feature gates and engine state</gray>",
                 "<aqua>/folia health</aqua> <dark_gray>—</dark_gray> <gray>invariant checks and health reasons</gray>",
                 "<aqua>/folia regions [verbose]</aqua> <dark_gray>—</dark_gray> <gray>region and owner detail</gray>",
@@ -31,7 +32,7 @@ public final class FoliaHelp {
                 "<aqua>/folia shutdown</aqua> <dark_gray>—</dark_gray> <gray>request server halt; use /stop for routine shutdown</gray>",
                 FoliaMessages.RULE,
                 "<gray>Diagnostics need OP or the </gray><aqua>folia.command</aqua><gray> permission node.</gray>",
-                "<gray>There is no /folia config or reload command; edit config/fabric-folia.yml and restart.</gray>");
+                "<gray>Use /folia reload for supported live settings. Structural, worker and patch changes require a restart.</gray>");
     }
 
     public static java.util.Set<String> topics() {
@@ -110,7 +111,8 @@ public final class FoliaHelp {
                 "<gold><bold>Help: configuration</bold></gold>",
                 "<gray>The file is config/fabric-folia.yml. Missing keys are repaired from the current schema.</gray>",
                 "<gray>Regionized gameplay, player connection staging and random ticks are separate feature gates and are disabled by default.</gray>",
-                "<gray>Edit the file on disk and restart. There is no /folia config or reload command.</gray>"));
+                "<gray>/folia reload applies server branding, debug logging and the region watchdog live.</gray>",
+                "<gray>Engine, worker, thread-check, GPU and patch/interception changes require a restart.</gray>"));
         TOPICS.put("thread checks", List.of(
                 "<gold><bold>Help: thread checks</bold></gold>",
                 "<gray>threads.thread-check-mode accepts STRICT, WARN or OFF.</gray>",

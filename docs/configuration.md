@@ -2,13 +2,15 @@
 
 Fabric-Folia generates config/fabric-folia.yml at first startup. The file is schema-validated, missing keys are repaired, and comments are retained during writes. The current schema version is 2.
 
-There is no /folia config command and no /folia reload command. Edit the file on disk and restart the server. Do not assume settings are hot-reloaded.
+Edit the file on disk, then run /folia reload as an administrator. The command validates the complete file before replacing the active configuration. Server branding, debug logging and the region watchdog apply live. It explicitly lists settings that were accepted but still require a restart. Invalid YAML or values leave the previous active configuration in place.
 
 ## Safe first-run settings
 
 | Key | Default | Notes |
 |---|---:|---|
-| general.enabled | true | Loads the engine and ownership/scheduler infrastructure; false resolves all 13 patches inactive and leaves vanilla execution |
+| general.enabled | true | Startup-only: loads the engine and ownership/scheduler infrastructure; false resolves all 13 patches inactive and leaves vanilla execution |
+| general.server-brand | true | Live via /folia reload only when the engine started enabled; otherwise requires restart |
+| general.server-brand-name | fabricFolia | Live via /folia reload only when the engine started enabled; otherwise requires restart |
 | general.regionized-gameplay | false | Requests selected entity/block-entity staged execution; currently blocked by the R4 safety interlock |
 | general.regionized-random-ticks | false | Requests random-tick staging; currently blocked by the R4 safety interlock |
 | gameplay.stage-player-path | false | Requests player connection/physics staging; currently blocked by the R4 safety interlock |
@@ -17,11 +19,11 @@ There is no /folia config command and no /folia reload command. Edit the file on
 | patches.minecraft.random-tick-optimization | false | Requests parallel chunk random ticks; currently blocked by the R4 safety interlock |
 | threads.worker-threads | auto | Negative/auto values are resolved from available CPUs |
 | threads.thread-check-mode | WARN | OFF, WARN, or STRICT |
-| diagnostics.debug | false | Diagnostic detail toggle |
-| diagnostics.debug-logging | false | Higher-volume dispatch/worker logging |
-| diagnostics.profiling | false | Profiling collection |
-| diagnostics.metrics | false | Declared metrics toggle; `/folia metrics` reports current counters regardless |
-| diagnostics.watchdog | true | Region-stall watchdog |
+| diagnostics.debug | false | Live via /folia reload; verbose diagnostic logging |
+| diagnostics.debug-logging | false | Live via /folia reload; higher-volume dispatch/worker logging |
+| diagnostics.profiling | false | Restart required; profiling collection |
+| diagnostics.metrics | false | Restart required; `/folia metrics` reports current counters regardless |
+| diagnostics.watchdog | true | Live via /folia reload while engine is running; starts or stops the region-stall watchdog |
 | patches.enabled | true | Master optimization-patch switch |
 | patches.fabricfolia.chunk-regionization | true | Registers loaded chunks with the regionizer; prerequisite for region ownership |
 | patches.fabricfolia.region-lookup | true | Selects the region ownership lookup index |
@@ -53,7 +55,7 @@ threads.thread-check-mode accepts OFF, WARN, or STRICT. STRICT throws on detecte
 
 ### Diagnostics
 
-diagnostics.debug and diagnostics.debug-logging increase diagnostic output. Enable them temporarily while collecting an incident reproduction; debug logging can be noisy. diagnostics.profiling controls per-region timing collection. diagnostics.metrics defaults to false in `ConfigSchema`; it does not currently gate the `/folia metrics` command, which reports the engine's current counters regardless of its value. diagnostics.watchdog enables the periodic region-stall scan.
+diagnostics.debug and diagnostics.debug-logging can be toggled with /folia reload; both update the runtime logging gate immediately and can be noisy. diagnostics.watchdog starts or stops the periodic region-stall scan on reload. diagnostics.profiling and diagnostics.metrics remain restart-required. The /folia metrics command reports the engine current counters regardless of diagnostics.metrics.
 
 ### Patch toggles
 
@@ -66,3 +68,17 @@ gpu.enabled is an experimental OpenCL path for bulk axis-aligned bounding-box ov
 ## Configuration recovery
 
 If a setting is rejected, inspect the startup log for the key and expected value. Back up the file before hand-editing it. The loader repairs missing schema keys, but invalid values fail closed instead of silently guessing what the operator intended.
+
+
+## Live configuration reload
+
+Run /folia reload after editing config/fabric-folia.yml. The full YAML document is loaded, schema defaults are repaired, and every configured value is validated before the active snapshot changes.
+
+The following settings apply without restarting:
+- general.server-brand and general.server-brand-name
+- diagnostics.debug and diagnostics.debug-logging
+- diagnostics.watchdog while the engine is running
+
+All other changed settings are retained in the validated file but do not replace the current engine startup configuration. The command lists them under restart required, including general.enabled, worker counts, thread-check mode, region structure, GPU setup, patch toggles and staged execution gates. A restart is required to apply those changes. The R4 safety interlock continues to force built-in worker-side mutation paths off regardless of configured values.
+
+A malformed or invalid config is rejected without replacing the active snapshot or changing the running watchdog/debug state.

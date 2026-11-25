@@ -135,6 +135,37 @@ public final class FoliaCommand {
 			return 1;
 		});
 
+		root.then(Commands.literal("reload")
+				.requires(source -> allowed(source, "admin"))
+				.executes(context -> {
+					List<MutableComponent> lines = new ArrayList<>();
+					lines.add(FoliaMessages.header("Configuration reload"));
+					int resultCode = 1;
+					try {
+						FabricFoliaMod.ConfigReloadResult result = FabricFoliaMod.reloadConfiguration();
+						if (result.liveApplied().isEmpty() && result.restartRequired().isEmpty()) {
+							lines.add(FoliaMessages.ok("Configuration is valid; no values changed."));
+						} else {
+							if (!result.liveApplied().isEmpty()) {
+								lines.add(FoliaMessages.ok("Applied live: " + String.join(", ",
+										result.liveApplied().stream().sorted().toList())));
+							}
+							if (!result.restartRequired().isEmpty()) {
+								lines.add(FoliaMessages.warn("Saved; restart required for: " + String.join(", ",
+										result.restartRequired().stream().sorted().toList())));
+							}
+						}
+					} catch (Exception e) {
+						lines.add(FoliaMessages.error("Reload rejected; previous live configuration remains active: "
+								+ e.getMessage()));
+						com.palordersoftworks.fabricfolia.console.Console.error(
+								"Configuration reload failed; the active configuration was not replaced.", e);
+						resultCode = 0;
+					}
+					send(context.getSource(), lines);
+					return resultCode;
+				}));
+
 		root.then(Commands.literal("version")
 				.executes(context -> {
 					List<MutableComponent> lines = new ArrayList<>();
@@ -423,6 +454,11 @@ public final class FoliaCommand {
 					lines.add(FoliaMessages.row("Worker threads", String.valueOf(engine.primaryWorkerCount())));
 					lines.add(FoliaMessages.row("Thread-check mode", config.threadCheckMode()));
 					lines.add(FoliaMessages.row("Region section size", String.valueOf(config.regionSectionSize())));
+					var runtimeConfig = FabricFoliaMod.runtimeConfig();
+					lines.add(FoliaMessages.row("Server brand", runtimeConfig != null && runtimeConfig.serverBrand()
+							? runtimeConfig.serverBrandName() : "vanilla"));
+					lines.add(FoliaMessages.row("Debug logging", engine.runtimeConfig().debugLogging() ? "enabled" : "disabled"));
+					lines.add(FoliaMessages.row("Region watchdog", engine.watchdogRunning() ? "running" : "stopped"));
 					lines.add(FoliaMessages.row("Live regions", String.valueOf(engine.regionCount())));
 					send(context.getSource(), lines);
 					return 1;

@@ -2099,3 +2099,19 @@ unmerged, status hash `ae97c1adabf5448a`.
 - Engine-on interlock boot: with general gameplay, random ticks, player path, entity/chunk/random patch requests all true, startup logged the R4 warning, Patches: 5 active / 13 registered (8 blocked), region ownership infrastructure initialized, and the gameplay/player/random staging summaries all reported disabled by R4 interlock. Server reached Done (0.431s), no Mixin errors. Same redstone test produced R4_INTERLOCK_POWERED_OK and R4_INTERLOCK_UNPOWERED_OK.
 - QA cleanup: both temporary servers stopped cleanly, test force-load was removed, the disposable config was restored and no temporary server process remains.
 - R4 status: built-in staged mutation exposure is mitigated by disabling the worker path, not by implementing a synchronous write protocol. Third-party region-scheduler tasks remain subject to owner confinement; no arbitrary cross-region write safety is claimed. Details in tools/freebuff/reports/r4-design-review.md and tools/freebuff/reports/engine-off-and-redstone-smoke.md.
+
+
+## 2026-11-25 — Fabric-Folia live config reload (feature branch; no deployment)
+
+- Added OP/admin-gated /folia reload.
+- Reload parses, migrates/repairs and validates an entirely new FoliaConfig snapshot before changing live state. Invalid YAML or values are rejected and leave the active runtime snapshot unchanged.
+- Runtime-safe settings: general.server-brand, general.server-brand-name, diagnostics.debug, diagnostics.debug-logging, and diagnostics.watchdog while the engine is running.
+- Restart-required settings remain in the validated file but do not replace the engine startup snapshot. This includes general.enabled, worker count, thread-check mode, region sizing, GPU initialization, profiling, metrics and all patch/interception settings. The command lists the pending keys on every reload until a restart applies them.
+- Startup and runtime config snapshots are distinct. Brand override uses the startup general.enabled gate and the live server-brand values; changing general.enabled in a reload cannot start/stop an engine or turn off the already-running engine mid-session.
+- /folia status now reports the live server-brand name, runtime debug state and watchdog running/stopped state.
+- Watchdog start/stop is synchronized and idempotent.
+- Tests: 340 total — common 174, Fabric 156, API 10; zero failures/errors/skips. bash ./gradlew build --stacktrace passed. Java 25 ThreadDeath deprecation, unchecked-operation, OpenCL native-access and Gradle deprecation warnings remain.
+- Final JAR: fabric/build/libs/fabric-folia-0.1.0.jar, SHA-256 a0a0d7b6f5a5560df77f58e2e9536277c356d7573c0e669c3a90aedc16b53c7d.
+- Live smoke on a disposable Minecraft 26.2 / Fabric API 0.161.0+26.2 server: initial boot Done (0.436s). Changed brand to ReloadedBrand, turned debug logging on, watchdog off, requested worker count 6 and general.enabled=false. /folia reload applied three live keys and reported worker count/master switch restart-required. /folia status showed ReloadedBrand, debug logging enabled, watchdog stopped, worker threads still 4 and engine still ACTIVE. Second reload continued to report the same restart-required keys. Invalid region-section-size 7 was rejected; /folia status still showed section size 8 and retained the live settings. Changing watchdog back to true and reloading returned watchdog state to running. Server stopped cleanly; disposable config restored; no temporary QA process remains.
+- SFS Enhanced main merge completed separately at ef7d0f04e586f4b96782bfd09a4522e0c55f53c1.
+- Engine-disabled edge case covered: if startup general.enabled is false, brand changes are reported restart-required (the vanilla brand path remains active); debug logging can still update live. No production deployment or release approval.

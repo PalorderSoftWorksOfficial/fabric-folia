@@ -19,13 +19,14 @@ class FoliaCommandPermissionTest {
 		assertEquals("folia.command", FoliaCommand.umbrellaNode());
 		assertEquals("folia.command.regions", FoliaCommand.subNode("regions"));
 		assertEquals("folia.command.admin", FoliaCommand.subNode("admin"));
+		assertEquals("folia.command.reload", FoliaCommand.subNode("reload"));
 		assertEquals("fabricfolia.command.folia.regions", FoliaCommand.atomNode("regions"));
 	}
 
 	@Test
 	void umbrellaGrantsEveryLeaf() {
 		for (String leaf : new String[] {"regions", "workers", "scheduler", "patches",
-				"health", "threads", "admin"}) {
+				"health", "threads", "reload", "admin"}) {
 			assertTrue(FoliaCommand.grants(false, false, true, false),
 					"umbrella must grant " + leaf);
 		}

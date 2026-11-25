@@ -68,14 +68,28 @@ public final class RegionWatchdog implements AutoCloseable {
 	}
 
 	/** Starts the watchdog thread. Idempotent. */
-	public void start() {
+	public synchronized void start() {
 		if (running) {
 			return;
 		}
 		running = true;
-		thread = new Thread(this::loop, "FabricFolia-Watchdog");
-		thread.setDaemon(true);
-		thread.start();
+		Thread next = new Thread(this::loop, "FabricFolia-Watchdog");
+		next.setDaemon(true);
+		thread = next;
+		next.start();
+	}
+
+	public synchronized void stop() {
+		running = false;
+		Thread current = thread;
+		thread = null;
+		if (current != null) {
+			current.interrupt();
+		}
+	}
+
+	public boolean isRunning() {
+		return running;
 	}
 
 	private void loop() {
@@ -143,9 +157,6 @@ public final class RegionWatchdog implements AutoCloseable {
 
 	@Override
 	public void close() {
-		running = false;
-		if (thread != null) {
-			thread.interrupt();
-		}
+		stop();
 	}
 }

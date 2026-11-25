@@ -163,6 +163,32 @@ class FoliaConfigTest {
 	}
 
 	@Test
+	void changedKeysCompareFrozenSnapshotsAndExposeTheConfigPath(@TempDir Path dir) throws IOException {
+		Path file = dir.resolve("fabric-folia.yml");
+		FoliaConfig first = FoliaConfig.at(file);
+		first.load();
+		first.freeze();
+
+		String edited = Files.readString(file, StandardCharsets.UTF_8)
+				.replace("worker-threads: -1", "worker-threads: 4")
+				.replace("watchdog: true", "watchdog: false")
+				.replace("debug-logging: false", "debug-logging: true");
+		Files.writeString(file, edited, StandardCharsets.UTF_8);
+
+		FoliaConfig second = FoliaConfig.at(file);
+		second.load();
+		second.freeze();
+
+		assertEquals(file, second.file());
+		assertEquals(java.util.Set.of(
+				ConfigSchema.KEY_WORKER_THREADS,
+				ConfigSchema.KEY_WATCHDOG,
+				ConfigSchema.KEY_DEBUG_LOGGING
+		), first.changedKeys(second));
+		assertEquals(java.util.Set.of(), second.changedKeys(second));
+	}
+
+	@Test
 	void workerThreadAutoResolution() {
 		// Auto resolves to at least 2 and roughly half the cores.
 		int auto = FoliaConfig.WorkerThreads.resolve(-1);
